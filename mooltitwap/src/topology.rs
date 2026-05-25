@@ -58,9 +58,9 @@ fn bias_curve(v: f32, x: f32) -> f32 {
     if x.abs() < 1e-6 { return v; }
     // power-curve bias: positive x compresses values upward, negative downward
     let power = if x >= 0.0 {
-        1.0 / (1.0 + 4.0 * x)
+        1.0 / (1.0 + 2.0 * x)
     } else {
-        1.0 + 4.0 * (-x)
+        1.0 + 2.0 * (-x)
     };
     v.powf(power)
 }

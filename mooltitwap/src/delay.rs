@@ -123,9 +123,17 @@ impl Default for SlewedTime {
 /// arbitrarily far from its intended position), we use two crossfaded read
 /// heads when |pitch| > 0, each ramping through a window centered on the
 /// nominal tap time.
+///
+/// Pitch changes are smoothed via a one-pole lowpass (~5 ms) to avoid clicks
+/// and clipping when the user changes the pitch semitone value.
 pub struct TapReader {
     nominal: SlewedTime,
-    pitch_factor: f32, // 2^(semis/12)
+    /// Target pitch factor (2^(semis/12)) set by set_pitch_semitones.
+    pitch_target: f32,
+    /// Smoothed pitch factor — actually applied to the drift computation.
+    pitch_current: f32,
+    /// One-pole LP coefficient for pitch smoothing. Computed from sample_rate.
+    pitch_smooth_coef: f32,
     head_a: f32,
     head_b: f32,
     fade: f32, // 0..1, crossfade position
@@ -136,7 +144,9 @@ impl TapReader {
     pub fn new() -> Self {
         Self {
             nominal: SlewedTime::new(),
-            pitch_factor: 1.0,
+            pitch_target: 1.0,
+            pitch_current: 1.0,
+            pitch_smooth_coef: 0.005, // safe default, updated by set_window_ms
             head_a: 0.0,
             head_b: 0.0,
             fade: 0.0,
@@ -146,6 +156,10 @@ impl TapReader {
 
     pub fn set_window_ms(&mut self, ms: f32, sample_rate: f32) {
         self.window_samples = (ms * 0.001 * sample_rate).max(64.0);
+        // 5ms pitch smoothing to suppress clicks when pitch param changes.
+        // One-pole LP: y = y_prev + coef * (x - y_prev), coef = 1 - e^(-1/tc)
+        let tc = (0.005 * sample_rate).max(1.0);
+        self.pitch_smooth_coef = 1.0 - (-1.0_f32 / tc).exp();
     }
 
     pub fn set_nominal(&mut self, delay_samples: f32) {
@@ -157,10 +171,12 @@ impl TapReader {
         self.head_a = delay_samples;
         self.head_b = delay_samples + self.window_samples * 0.5;
         self.fade = 0.0;
+        // Hard-snap pitch smooth too — no click since we're resetting everything
+        self.pitch_current = self.pitch_target;
     }
 
     pub fn set_pitch_semitones(&mut self, semis: f32) {
-        self.pitch_factor = 2.0_f32.powf(semis / 12.0);
+        self.pitch_target = 2.0_f32.powf(semis / 12.0);
     }
 
     pub fn set_nominal_slew_rate(&mut self, rate: f32) {
@@ -172,26 +188,30 @@ impl TapReader {
     pub fn read(&mut self, delay: &DelayLine) -> f32 {
         let nominal = self.nominal.tick();
 
-        if (self.pitch_factor - 1.0).abs() < 1e-5 {
-            // no pitch — single read at nominal
-            self.head_a = nominal;
-            self.head_b = nominal;
-            self.fade = 0.0;
+        // Smooth pitch factor toward target — prevents clicks on param change.
+        self.pitch_current +=
+            self.pitch_smooth_coef * (self.pitch_target - self.pitch_current);
+        let drift = self.pitch_current - 1.0;
+
+        // When pitch is (effectively) 0, just read from nominal.
+        // We don't snap heads instantly; they converge naturally as drift → 0.
+        if drift.abs() < 1e-6 {
             return delay.read(nominal.max(1.0));
         }
 
         // Pitch shifting: heads drift relative to write head.
-        // If pitch_factor > 1 (up), read faster than write -> delay decreases.
-        let drift = self.pitch_factor - 1.0;
+        // drift > 0 → pitch up (read position moves closer to write head over time)
+        // drift < 0 → pitch down (read position moves away from write head)
         self.head_a -= drift;
         self.head_b -= drift;
 
-        // crossfade increment so we cycle through the window in window_samples
+        // Crossfade increment: complete one full cycle per window_samples of drift
         let fade_step = drift.abs() / self.window_samples;
         self.fade += fade_step;
         if self.fade >= 1.0 {
             self.fade -= 1.0;
-            // reset whichever head is further from nominal back to nominal
+            // Reset whichever head is further from nominal back to nominal.
+            // The crossfade masks the discontinuity — no click.
             if (self.head_a - nominal).abs() > (self.head_b - nominal).abs() {
                 self.head_a = nominal;
             } else {
@@ -206,7 +226,7 @@ impl TapReader {
         let sa = delay.read(a);
         let sb = delay.read(b);
 
-        // equal-power crossfade
+        // Equal-power crossfade
         let w = self.fade;
         let wa = (1.0 - w).sqrt();
         let wb = w.sqrt();

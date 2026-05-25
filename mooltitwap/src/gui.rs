@@ -52,6 +52,8 @@ pub struct EditorState {
     pub right_tab: RightTab,
     pub drag_tap: Option<usize>,
     pub drag_kind: DragKind,
+    /// Accumulated drag pixels for the tap-count drag-on-number widget.
+    pub tap_count_drag_accum: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,6 +72,7 @@ impl Default for EditorState {
             right_tab: RightTab::Pitch,
             drag_tap: None,
             drag_kind: DragKind::None,
+            tap_count_drag_accum: 0.0,
         }
     }
 }
@@ -211,12 +214,16 @@ fn draw_left(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamS
     let r_label = params.format_base_time(time_r_val, tempo_bpm);
 
     knob_at(ui, lknob_center, knob_size, &params.base_time_l, setter);
-    // If linked, also drive R from L drag
+    // If linked, both knobs drive base_time_l — symmetric link
     if params.time_linked.value() {
-        knob_display_only(ui, rknob_center, knob_size, time_l_val);
+        knob_at(ui, rknob_center, knob_size, &params.base_time_l, setter);
     } else {
         knob_at(ui, rknob_center, knob_size, &params.base_time_r, setter);
     }
+
+    // M/S mode renames the time knob labels
+    let ms_mode = params.channel_mode.value() == ChannelMode::MidSide;
+    let (l_name, r_name) = if ms_mode { ("TIME M", "TIME S") } else { ("TIME L", "TIME R") };
 
     // labels
     {
@@ -224,11 +231,11 @@ fn draw_left(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamS
         p.text(Pos2::new(lknob_center.x, lknob_center.y + 30.0), Align2::CENTER_TOP,
                &l_label, FontId::new(11.0, FontFamily::Proportional), c::INK);
         p.text(Pos2::new(lknob_center.x, lknob_center.y + 44.0), Align2::CENTER_TOP,
-               "TIME L", FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+               l_name, FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
         p.text(Pos2::new(rknob_center.x, rknob_center.y + 30.0), Align2::CENTER_TOP,
                &r_label, FontId::new(11.0, FontFamily::Proportional), c::INK);
         p.text(Pos2::new(rknob_center.x, rknob_center.y + 44.0), Align2::CENTER_TOP,
-               "TIME R", FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+               r_name, FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
     }
 
     // link button
@@ -421,12 +428,6 @@ where P::Plain: Into<f32> + Copy {
     paint_knob(ui.painter(), center, size, norm);
 }
 
-fn knob_display_only(ui: &mut Ui, center: Pos2, size: f32, norm: f32) {
-    let rect = Rect::from_center_size(center, Vec2::splat(size));
-    let _ = ui.allocate_rect(rect, Sense::hover());
-    paint_knob(ui.painter(), center, size, norm);
-}
-
 fn paint_knob(p: &egui::Painter, center: Pos2, size: f32, value_norm: f32) {
     let r_outer = size * 0.5 - 2.0;
     let r_inner = size * 0.5 - 6.0;
@@ -487,13 +488,16 @@ fn sigmoid_blend(x: f32, y: f32) -> f32 {
 }
 fn bias_curve(v: f32, x: f32) -> f32 {
     if x.abs() < 1e-6 { return v; }
-    let power = if x >= 0.0 { 1.0 / (1.0 + 4.0 * x) } else { 1.0 + 4.0 * (-x) };
+    let power = if x >= 0.0 { 1.0 / (1.0 + 2.0 * x) } else { 1.0 + 2.0 * (-x) };
     v.powf(power)
 }
 
-// Returns (positions_l, positions_r) normalized to fit in [0, 1] of the
-// visible timeline, scaled by relative time_l vs time_r.
-fn tap_times_normalized(params: &PetalParams) -> ([f32; NUM_TAPS], [f32; NUM_TAPS]) {
+// Returns (positions_l, positions_r, grid_range_secs) where positions are
+// normalized to [0,1] over the dynamically chosen grid range.
+// The grid range is the smallest "nice" beat multiple (at 120 BPM placeholder)
+// that accommodates the longest active tap.
+fn tap_times_and_range(params: &PetalParams) -> ([f32; NUM_TAPS], [f32; NUM_TAPS], f32) {
+    let tempo_bpm = 120.0_f32; // placeholder — real BPM only on audio thread
     let pos_l = compute_positions(params.spacing_mode.value(),
                                    params.shape_x_l.value(), params.shape_y_l.value());
     let pos_r = if params.shape_linked.value() {
@@ -502,24 +506,40 @@ fn tap_times_normalized(params: &PetalParams) -> ([f32; NUM_TAPS], [f32; NUM_TAP
         compute_positions(params.spacing_mode.value(),
                           params.shape_x_r.value(), params.shape_y_r.value())
     };
-    // Scale positions by time L/R so different L/R times spread visually
-    let time_l = params.base_time_l.value();
-    let time_r = if params.time_linked.value() { time_l } else { params.base_time_r.value() };
-    // Normalize by max to fit timeline width
-    let max_time = time_l.max(time_r).max(0.001);
-    let scale_l = time_l / max_time;
-    let scale_r = time_r / max_time;
+
+    let time_l_norm = params.base_time_l.value();
+    let time_r_norm = if params.time_linked.value() { time_l_norm }
+                      else { params.base_time_r.value() };
+    let base_secs_l = params.base_time_seconds(time_l_norm, tempo_bpm);
+    let base_secs_r = params.base_time_seconds(time_r_norm, tempo_bpm);
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
-    let max_pos_l = pos_l[n_active - 1].max(0.001);
-    let max_pos_r = pos_r[n_active - 1].max(0.001);
-    let mut out_l = [0.0; NUM_TAPS];
-    let mut out_r = [0.0; NUM_TAPS];
+
+    // Actual time (secs) of the last active tap on each channel.
+    // Span = NUM_TAPS * base_secs; tap i at pos[i] * span.
+    let span_l = NUM_TAPS as f32 * base_secs_l;
+    let span_r = NUM_TAPS as f32 * base_secs_r;
+    let max_tap_secs = (pos_l[n_active - 1] * span_l)
+        .max(pos_r[n_active - 1] * span_r)
+        .max(0.001);
+
+    // Pick smallest "nice" beat range (in beats at tempo_bpm) that fits all taps.
+    let beat_secs = 60.0 / tempo_bpm;
+    let max_beats = max_tap_secs / beat_secs;
+    let nice_ranges: &[f32] = &[0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0];
+    let grid_beats = nice_ranges.iter().copied()
+        .find(|&r| max_beats <= r * 1.05)
+        .unwrap_or(16.0);
+    let grid_range_secs = grid_beats * beat_secs;
+
+    // Normalize tap positions into [0,1] over the grid range.
+    let mut out_l = [0.0f32; NUM_TAPS];
+    let mut out_r = [0.0f32; NUM_TAPS];
     for i in 0..NUM_TAPS {
         let offset = params.taps[i].time_offset.value();
-        out_l[i] = (pos_l[i] / max_pos_l * scale_l + offset).clamp(0.0, 1.0);
-        out_r[i] = (pos_r[i] / max_pos_r * scale_r + offset).clamp(0.0, 1.0);
+        out_l[i] = ((pos_l[i] * span_l / grid_range_secs) + offset).clamp(0.0, 1.0);
+        out_r[i] = ((pos_r[i] * span_r / grid_range_secs) + offset).clamp(0.0, 1.0);
     }
-    (out_l, out_r)
+    (out_l, out_r, grid_range_secs)
 }
 
 // ─── CENTER ──────────────────────────────────────────────────────────────
@@ -556,11 +576,11 @@ fn draw_center(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &Para
         Pos2::new(rect.min.x, viz_rect.max.y), rect.max,
     );
 
-    let (times_l, times_r) = tap_times_normalized(params);
+    let (times_l, times_r, grid_range_secs) = tap_times_and_range(params);
 
     match st.viz_mode {
-        VizMode::Stems => draw_stems(ui, viz_rect, params, &times_l, &times_r),
-        VizMode::Grid  => draw_grid_viz(ui, viz_rect, params, setter, st, &times_l),
+        VizMode::Stems => draw_stems(ui, viz_rect, params, &times_l, &times_r, grid_range_secs),
+        VizMode::Grid  => draw_grid_viz(ui, viz_rect, params, setter, st, &times_l, grid_range_secs),
     }
     draw_shaping_strip(ui, shaping_rect, params, setter);
 }
@@ -578,25 +598,59 @@ fn viz_tab(ui: &mut Ui, rect: Rect, label: &str, active: bool) -> bool {
     resp.clicked()
 }
 
-// ─── Grid background helper (16th notes) ─────────────────────────────────
-fn paint_timeline_grid(p: &egui::Painter, draw_l: f32, draw_r: f32, draw_t: f32, draw_b: f32, show_labels: bool, label_y: f32) {
+// ─── Dynamic grid (beat-subdivisions scaled to actual tap time range) ────
+fn paint_timeline_grid(
+    p: &egui::Painter,
+    draw_l: f32, draw_r: f32, draw_t: f32, draw_b: f32,
+    grid_range_secs: f32,
+    show_labels: bool, label_y: f32,
+) {
+    let tempo_bpm = 120.0_f32; // placeholder
+    let beat_secs = 60.0 / tempo_bpm;
+    let total_beats = (grid_range_secs / beat_secs).max(0.001);
     let draw_w = draw_r - draw_l;
-    // 16th note subdivisions (16 over 4 beats)
-    for i in 0..=16 {
-        let x = draw_l + (i as f32 / 16.0) * draw_w;
-        let (sw, col) = if i % 4 == 0 { (1.0, c::LINE) } else { (0.5, c::LINE_SOFT) };
+
+    // Choose major/minor step sizes in beats based on range.
+    let (major, minor) = if total_beats <= 0.5 {
+        (0.125_f32, 0.0625_f32)
+    } else if total_beats <= 1.0 {
+        (0.25, 0.125)
+    } else if total_beats <= 2.0 {
+        (0.5, 0.25)
+    } else if total_beats <= 4.0 {
+        (1.0, 0.5)
+    } else if total_beats <= 8.0 {
+        (2.0, 1.0)
+    } else {
+        (4.0, 2.0)
+    };
+
+    let mut beat = 0.0_f32;
+    let eps = minor * 0.01;
+    while beat <= total_beats + eps {
+        let x = draw_l + (beat / total_beats) * draw_w;
+        let is_major = (beat / major - (beat / major).round()).abs() < 0.02;
+        let (sw, col) = if is_major { (1.0, c::LINE) } else { (0.5, c::LINE_SOFT) };
         p.line_segment([Pos2::new(x, draw_t), Pos2::new(x, draw_b)], Stroke::new(sw, col));
-        if show_labels && i % 4 == 0 {
-            p.text(Pos2::new(x, label_y), Align2::CENTER_BOTTOM,
-                   &format!("{}/1", i / 4),
+        if show_labels && is_major {
+            // Label as fractional or integer beats
+            let rounded = (beat * 100.0).round() / 100.0;
+            let label = if rounded == 0.0 { "0".to_string() }
+                else if rounded == rounded.floor() { format!("{:.0}", rounded) }
+                else if (rounded * 2.0).round() == rounded * 2.0 { format!("{:.1}", rounded) }
+                else { format!("{:.2}", rounded) };
+            p.text(Pos2::new(x, label_y), Align2::CENTER_BOTTOM, &label,
                    FontId::new(9.0, FontFamily::Proportional), c::INK_FAINT);
         }
+        beat += minor;
+        if beat > 32.0 { break; } // safety
     }
 }
 
 // ─── STEMS visualizer ───────────────────────────────────────────────────
 fn draw_stems(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>,
-              times_l: &[f32; NUM_TAPS], times_r: &[f32; NUM_TAPS]) {
+              times_l: &[f32; NUM_TAPS], times_r: &[f32; NUM_TAPS],
+              grid_range_secs: f32) {
     let p = ui.painter();
     let pad_l = 36.0;
     let pad_r = 24.0;
@@ -626,8 +680,8 @@ fn draw_stems(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>,
     // center dashed
     dashed_h(p, Pos2::new(draw_l, mid_y), draw_w, c::LINE);
 
-    // 16th grid
-    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, true, rect.max.y - 6.0);
+    // Dynamic beat grid
+    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, grid_range_secs, true, rect.max.y - 6.0);
 
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
 
@@ -715,7 +769,7 @@ fn dashed_v(p: &egui::Painter, start: Pos2, height: f32, color: Color32) {
 
 // ─── GRID visualizer ────────────────────────────────────────────────────
 fn draw_grid_viz(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter,
-                 st: &mut EditorState, times_l: &[f32; NUM_TAPS]) {
+                 st: &mut EditorState, times_l: &[f32; NUM_TAPS], grid_range_secs: f32) {
     let p = ui.painter();
     let pad_l = 40.0;
     let pad_r = 24.0;
@@ -743,7 +797,7 @@ fn draw_grid_viz(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &Pa
     p.text(Pos2::new(rect.min.x + pad_l - 6.0, draw_t - 6.0), Align2::RIGHT_BOTTOM, "dB",
            FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
 
-    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, true, rect.max.y - 6.0);
+    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, grid_range_secs, true, rect.max.y - 6.0);
 
     p.text(Pos2::new(draw_l + 8.0, draw_t + 6.0), Align2::LEFT_TOP,
            "DRAG · X = TIME · Y = GAIN",
@@ -992,7 +1046,7 @@ fn draw_right(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &Param
     }
 
     draw_right_body(ui, body_rect, params, setter, st);
-    draw_right_footer(ui, footer_rect, params, setter);
+    draw_right_footer(ui, footer_rect, params, setter, st);
 }
 
 fn draw_tab_icon(p: &egui::Painter, center: Pos2, kind: RightTab, color: Color32) {
@@ -1070,17 +1124,28 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
             }
         }
         RightTab::Pan => {
+            let ms_mode = params.channel_mode.value() == ChannelMode::MidSide;
             for i in 0..n_active {
                 let r = Rect::from_min_size(
                     Pos2::new(rect.min.x + pad, rect.min.y + pad + i as f32 * (row_h + row_gap)),
                     Vec2::new(rect.width() - pad * 2.0, row_h),
                 );
-                tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].pan, setter,
-                               -1.0, 1.0, true, |v| {
-                    if v.abs() < 0.05 { "C".to_string() }
-                    else if v > 0.0 { format!("R{}", (v * 100.0).round() as i32) }
-                    else { format!("L{}", (-v * 100.0).round() as i32) }
-                });
+                if ms_mode {
+                    // In M/S mode: pan = -1 → all Mid, pan = 0 → balanced, pan = +1 → all Side
+                    tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].pan, setter,
+                                   -1.0, 1.0, true, |v| {
+                        if v.abs() < 0.05 { "BAL".to_string() }
+                        else if v < 0.0 { format!("M{}", ((-v) * 100.0).round() as i32) }
+                        else { format!("S{}", (v * 100.0).round() as i32) }
+                    });
+                } else {
+                    tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].pan, setter,
+                                   -1.0, 1.0, true, |v| {
+                        if v.abs() < 0.05 { "C".to_string() }
+                        else if v > 0.0 { format!("R{}", (v * 100.0).round() as i32) }
+                        else { format!("L{}", (-v * 100.0).round() as i32) }
+                    });
+                }
             }
         }
         RightTab::Gain => {
@@ -1182,16 +1247,31 @@ fn tap_row_slider<F: Fn(f32) -> String>(
 ) {
     let active = active_param.value();
     let alpha = if active { 1.0 } else { 0.4 };
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius { nw: 5, ne: 5, sw: 5, se: 5 }, c::BG_SURFACE.linear_multiply(alpha));
-    p.rect_stroke(rect, CornerRadius { nw: 5, ne: 5, sw: 5, se: 5 }, Stroke::new(1.0, c::LINE_SOFT), StrokeKind::Middle);
-    p.text(Pos2::new(rect.min.x + 8.0, rect.center().y), Align2::LEFT_CENTER,
-           &format!("{:02}", idx + 1),
-           FontId::new(10.0, FontFamily::Proportional), c::INK_FAINT);
 
+    // Background + index number — drop painter borrow before allocate_rect
+    {
+        let p = ui.painter();
+        p.rect_filled(rect, CornerRadius { nw: 5, ne: 5, sw: 5, se: 5 }, c::BG_SURFACE.linear_multiply(alpha));
+        p.rect_stroke(rect, CornerRadius { nw: 5, ne: 5, sw: 5, se: 5 }, Stroke::new(1.0, c::LINE_SOFT), StrokeKind::Middle);
+        p.text(Pos2::new(rect.min.x + 8.0, rect.center().y), Align2::LEFT_CENTER,
+               &format!("{:02}", idx + 1),
+               FontId::new(10.0, FontFamily::Proportional), c::INK_FAINT);
+    }
+
+    // Dot — now clickable to toggle tap active in ALL tabs (not just Pitch)
     let dot_center = Pos2::new(rect.min.x + 32.0, rect.center().y);
-    if active { p.circle_filled(dot_center, 4.0, c::ACCENT.linear_multiply(alpha)); }
-    else { p.circle_stroke(dot_center, 4.0, Stroke::new(1.0, c::LINE)); }
+    let dot_rect = Rect::from_center_size(dot_center, Vec2::splat(14.0));
+    let dot_resp = ui.allocate_rect(dot_rect, Sense::click());
+    if dot_resp.clicked() {
+        setter.begin_set_parameter(active_param);
+        setter.set_parameter(active_param, !active);
+        setter.end_set_parameter(active_param);
+    }
+    {
+        let p = ui.painter();
+        if active { p.circle_filled(dot_center, 4.0, c::ACCENT); }
+        else { p.circle_stroke(dot_center, 4.0, Stroke::new(1.0, c::LINE)); }
+    }
 
     let slider_left = rect.min.x + 52.0;
     let slider_right = rect.max.x - 56.0;
@@ -1251,38 +1331,77 @@ fn click_box(ui: &mut Ui, rect: Rect, label: &str) -> bool {
     resp.clicked()
 }
 
-fn draw_right_footer(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter) {
+fn draw_right_footer(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter,
+                     st: &mut EditorState) {
     let half = rect.width() * 0.5;
     let fb_rect = Rect::from_min_max(rect.min, Pos2::new(rect.min.x + half, rect.max.y));
     knob_at(ui, Pos2::new(fb_rect.min.x + 28.0, fb_rect.center().y), 36.0, &params.feedback, setter);
-    let p = ui.painter();
-    p.text(Pos2::new(fb_rect.min.x + 56.0, fb_rect.center().y - 6.0), Align2::LEFT_CENTER,
-           "FEEDBACK", FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
-    p.text(Pos2::new(fb_rect.min.x + 56.0, fb_rect.center().y + 8.0), Align2::LEFT_CENTER,
-           &format!("{:.0}%", params.feedback.value() * 100.0),
-           FontId::new(13.0, FontFamily::Proportional), c::INK);
+    {
+        let p = ui.painter();
+        p.text(Pos2::new(fb_rect.min.x + 56.0, fb_rect.center().y - 6.0), Align2::LEFT_CENTER,
+               "FEEDBACK", FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+        p.text(Pos2::new(fb_rect.min.x + 56.0, fb_rect.center().y + 8.0), Align2::LEFT_CENTER,
+               &format!("{:.0}%", params.feedback.value() * 100.0),
+               FontId::new(13.0, FontFamily::Proportional), c::INK);
+    }
 
-    // tap count: − [n] +
+    // Tap count — drag up/down on the number to change (click & drag replaces +/- buttons)
     let ct_rect = Rect::from_min_max(Pos2::new(rect.min.x + half, rect.min.y), rect.max);
     let n = params.num_taps_active.value();
-    let label_y = ct_rect.center().y - 18.0;
-    p.text(Pos2::new(ct_rect.max.x - 12.0, label_y), Align2::RIGHT_CENTER, "TAPS",
-           FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
-    p.text(Pos2::new(ct_rect.max.x - 12.0, ct_rect.center().y + 2.0), Align2::RIGHT_CENTER,
-           &format!("{}", n),
-           FontId::new(22.0, FontFamily::Proportional), c::ACCENT_2);
-    // − / + buttons
-    let plus = Rect::from_min_size(Pos2::new(ct_rect.max.x - 44.0, ct_rect.max.y - 24.0), Vec2::new(20.0, 20.0));
-    let minus = Rect::from_min_size(Pos2::new(plus.min.x - 22.0, plus.min.y), Vec2::new(20.0, 20.0));
-    if click_box(ui, minus, "−") {
+    {
+        let p = ui.painter();
+        p.text(Pos2::new(ct_rect.center().x, ct_rect.min.y + 10.0), Align2::CENTER_TOP,
+               "TAPS", FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+    }
+
+    // Draggable number — drag up to increase, down to decrease
+    let num_rect = Rect::from_center_size(
+        Pos2::new(ct_rect.center().x, ct_rect.center().y + 6.0),
+        Vec2::new(50.0, 34.0),
+    );
+    let drag_resp = ui.allocate_rect(num_rect, Sense::click_and_drag());
+    if drag_resp.drag_started() {
         setter.begin_set_parameter(&params.num_taps_active);
-        setter.set_parameter(&params.num_taps_active, (n - 1).max(1));
+        st.tap_count_drag_accum = 0.0;
+    }
+    if drag_resp.dragged() {
+        st.tap_count_drag_accum -= drag_resp.drag_delta().y; // drag up = positive = more taps
+        let steps = (st.tap_count_drag_accum / 10.0) as i32;
+        if steps != 0 {
+            st.tap_count_drag_accum -= steps as f32 * 10.0;
+            let new_n = (n + steps).clamp(1, NUM_TAPS as i32);
+            setter.set_parameter(&params.num_taps_active, new_n);
+        }
+    }
+    if drag_resp.drag_stopped() {
+        setter.end_set_parameter(&params.num_taps_active);
+        st.tap_count_drag_accum = 0.0;
+    }
+    // Scroll wheel also works
+    let scroll = ui.input(|i| i.raw_scroll_delta.y);
+    if num_rect.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or(Pos2::ZERO))) && scroll != 0.0 {
+        setter.begin_set_parameter(&params.num_taps_active);
+        setter.set_parameter(&params.num_taps_active, (n + scroll.signum() as i32).clamp(1, NUM_TAPS as i32));
         setter.end_set_parameter(&params.num_taps_active);
     }
-    if click_box(ui, plus, "+") {
-        setter.begin_set_parameter(&params.num_taps_active);
-        setter.set_parameter(&params.num_taps_active, (n + 1).min(NUM_TAPS as i32));
-        setter.end_set_parameter(&params.num_taps_active);
+
+    let hovering = drag_resp.hovered() || drag_resp.dragged();
+    let num_col = if hovering { c::ACCENT_2 } else { c::INK };
+    {
+        let p = ui.painter();
+        if hovering {
+            p.rect_filled(num_rect, RR, c::BG_ELEV);
+        }
+        p.text(num_rect.center(), Align2::CENTER_CENTER,
+               &format!("{}", n),
+               FontId::new(24.0, FontFamily::Proportional), num_col);
+        // Subtle up/down arrows hint
+        p.text(Pos2::new(num_rect.center().x, num_rect.min.y + 1.0), Align2::CENTER_TOP,
+               "▲", FontId::new(7.0, FontFamily::Proportional),
+               c::INK_FAINT.linear_multiply(if hovering { 1.0 } else { 0.5 }));
+        p.text(Pos2::new(num_rect.center().x, num_rect.max.y - 1.0), Align2::CENTER_BOTTOM,
+               "▼", FontId::new(7.0, FontFamily::Proportional),
+               c::INK_FAINT.linear_multiply(if hovering { 1.0 } else { 0.5 }));
     }
 }
 

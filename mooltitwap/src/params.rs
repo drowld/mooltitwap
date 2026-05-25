@@ -1,6 +1,6 @@
 use nih_plug::prelude::*;
 
-pub const NUM_TAPS: usize = 8;
+pub const NUM_TAPS: usize = 16;
 
 /// Beat divisions for sync mode (sorted shortest -> longest).
 pub const SYNC_DIVS: &[(f32, &str)] = &[
@@ -215,7 +215,7 @@ impl Default for PetalParams {
 
             num_taps_active: IntParam::new(
                 "Tap Count",
-                NUM_TAPS as i32,
+                8, // default 8 active even with max 16
                 IntRange::Linear { min: 1, max: NUM_TAPS as i32 },
             ),
 
@@ -229,7 +229,7 @@ impl Default for PetalParams {
             .with_smoother(SmoothingStyle::Linear(20.0)),
             feedback_tap: IntParam::new(
                 "Feedback Size",
-                NUM_TAPS as i32,
+                8,
                 IntRange::Linear { min: 1, max: NUM_TAPS as i32 },
             ),
 
