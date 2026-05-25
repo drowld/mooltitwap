@@ -1,0 +1,16 @@
+[package]
+name = "mooltitwap"
+version = "2.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Emmanuel Bussien"]
+description = "Multitap delay garden, inspired by Rainbow Circuit's Petal"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+crossbeam = "0.8"
+
