@@ -156,24 +156,47 @@ impl Plugin for Mooltitwap {
         let pos_r = *self.topology_r.positions();
         let n_active = (p.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
 
+        let grain_ms = p.grain_size_ms.value();
+        // Tape-bend slew: 1 sample of delay-time change per ~50 samples of audio.
+        // Fast enough to track changes, slow enough to hear the Doppler.
+        let bend_slew_rate = 1.0 / 50.0;
         let mut nom_l = [0.0f32; NUM_TAPS];
         let mut nom_r = [0.0f32; NUM_TAPS];
+        let mut continuous_mode = [false; NUM_TAPS];
         for i in 0..NUM_TAPS {
             let active = p.taps[i].active.value() && i < n_active;
             let semis = if active { p.taps[i].pitch_semitones.value() as f32 } else { 0.0 };
-            // Per-tap time offset (fraction of full delay span)
+            let cont = p.taps[i].pitch_continuous.value();
+            continuous_mode[i] = cont;
+
             let span_l = NUM_TAPS as f32 * base_samples_l;
             let span_r = NUM_TAPS as f32 * base_samples_r;
             let off = p.taps[i].time_offset.value() * span_l;
             let off_r = p.taps[i].time_offset.value() * span_r;
-            nom_l[i] = (pos_l[i] * span_l + off).max(2.0);
-            nom_r[i] = (pos_r[i] * span_r + off_r).max(2.0);
-            self.main_l.readers[i].set_pitch_semitones(semis);
-            self.main_r.readers[i].set_pitch_semitones(semis);
-            self.main_l.readers[i].set_window_ms(100.0, sr);
-            self.main_r.readers[i].set_window_ms(100.0, sr);
-            self.main_l.readers[i].set_nominal_slew_rate(1e6);
-            self.main_r.readers[i].set_nominal_slew_rate(1e6);
+
+            if cont {
+                // CONTINUOUS pitch: nominal stays at the topology position;
+                // pitch is applied by the dual-head grain shifter.
+                nom_l[i] = (pos_l[i] * span_l + off).max(2.0);
+                nom_r[i] = (pos_r[i] * span_r + off_r).max(2.0);
+                self.main_l.readers[i].set_pitch_semitones(semis);
+                self.main_r.readers[i].set_pitch_semitones(semis);
+                self.main_l.readers[i].set_nominal_slew_rate(1e6);
+                self.main_r.readers[i].set_nominal_slew_rate(1e6);
+            } else {
+                // TAPE BEND: pitch modifies the effective delay time.
+                // Higher pitch = shorter delay (tape sped up). The slewed
+                // delay-time transition produces the Doppler bend.
+                let mult = 2.0_f32.powf(-semis / 12.0);
+                nom_l[i] = ((pos_l[i] * span_l + off) * mult).max(2.0);
+                nom_r[i] = ((pos_r[i] * span_r + off_r) * mult).max(2.0);
+                self.main_l.readers[i].set_pitch_semitones(0.0);
+                self.main_r.readers[i].set_pitch_semitones(0.0);
+                self.main_l.readers[i].set_nominal_slew_rate(bend_slew_rate);
+                self.main_r.readers[i].set_nominal_slew_rate(bend_slew_rate);
+            }
+            self.main_l.readers[i].set_window_ms(grain_ms, sr);
+            self.main_r.readers[i].set_window_ms(grain_ms, sr);
         }
 
         self.svf_l.set(p.filter_cutoff.value(), p.filter_q.value(), sr);
@@ -255,8 +278,17 @@ impl Plugin for Mooltitwap {
             for i in 0..n_active {
                 self.main_l.readers[i].set_nominal((nom_l[i] * mod_scale).max(2.0));
                 self.main_r.readers[i].set_nominal((nom_r[i] * mod_scale).max(2.0));
-                let sl = self.main_l.readers[i].read(&self.main_l.delay);
-                let sr_s = self.main_r.readers[i].read(&self.main_r.delay);
+                let (sl, sr_s) = if continuous_mode[i] {
+                    (
+                        self.main_l.readers[i].read_continuous(&self.main_l.delay),
+                        self.main_r.readers[i].read_continuous(&self.main_r.delay),
+                    )
+                } else {
+                    (
+                        self.main_l.readers[i].read_tape_bend(&self.main_l.delay),
+                        self.main_r.readers[i].read_tape_bend(&self.main_r.delay),
+                    )
+                };
                 let gl = sl * tap_gain[i];
                 let gr = sr_s * tap_gain[i];
                 tap_out_l += gl * tap_pan_l[i];

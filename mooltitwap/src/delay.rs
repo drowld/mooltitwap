@@ -114,29 +114,35 @@ impl Default for SlewedTime {
     fn default() -> Self { Self::new() }
 }
 
-/// A per-tap delay-time slewer + pitch handling. Pitch is implemented as
-/// continuous delay-time drift: if pitch != 0, the read position drifts at
-/// rate (1 - 2^(pitch/12)) samples per sample. This creates varispeed Doppler
-/// pitch shift, which is what gen~ multitap does via `slide`.
+/// Per-tap delay reader with two pitch modes:
 ///
-/// To prevent the delay from drifting indefinitely (which would push the tap
-/// arbitrarily far from its intended position), we use two crossfaded read
-/// heads when |pitch| > 0, each ramping through a window centered on the
-/// nominal tap time.
+/// 1. **TAPE BEND** (`read_tape_bend`): single read head at the slewed
+///    nominal delay time. Pitch is encoded by changing the nominal delay
+///    (the caller sets `set_nominal` to `base_delay * 2^(-semis/12)`), and
+///    the slew of `SlewedTime` produces the Doppler pitch bend during the
+///    transition. Steady state = no pitch, just a delayed read. No clicks,
+///    no grain artifacts — but no sustained pitch shift either.
 ///
-/// Pitch changes are smoothed via a one-pole lowpass (~5 ms) to avoid clicks
-/// and clipping when the user changes the pitch semitone value.
+/// 2. **CONTINUOUS** (`read_continuous`): proper dual-head Hann-windowed
+///    pitch shifter. Two read heads share a phasor, 180° offset. Each head
+///    sweeps from `nominal` outward by `drift * window_samples` over one
+///    window cycle, then resets to `nominal` at the moment its Hann window
+///    weight is exactly 0 (silent reset → no click). Window weights sum to
+///    constant 1.0 → no amplitude modulation when drift = 0.
+///
+/// Pitch param changes are smoothed by a 5 ms one-pole lowpass to suppress
+/// the click that an instant pitch_factor jump would create.
 pub struct TapReader {
     nominal: SlewedTime,
     /// Target pitch factor (2^(semis/12)) set by set_pitch_semitones.
     pitch_target: f32,
     /// Smoothed pitch factor — actually applied to the drift computation.
     pitch_current: f32,
-    /// One-pole LP coefficient for pitch smoothing. Computed from sample_rate.
+    /// One-pole LP coefficient for pitch smoothing.
     pitch_smooth_coef: f32,
-    head_a: f32,
-    head_b: f32,
-    fade: f32, // 0..1, crossfade position
+    /// Grain phasor [0,1) for the continuous-mode dual-head shifter.
+    phase: f32,
+    /// Hann window length in samples.
     window_samples: f32,
 }
 
@@ -146,18 +152,15 @@ impl TapReader {
             nominal: SlewedTime::new(),
             pitch_target: 1.0,
             pitch_current: 1.0,
-            pitch_smooth_coef: 0.005, // safe default, updated by set_window_ms
-            head_a: 0.0,
-            head_b: 0.0,
-            fade: 0.0,
-            window_samples: 4800.0, // ~100ms at 48kHz
+            pitch_smooth_coef: 0.005,
+            phase: 0.0,
+            window_samples: 2880.0, // ~60ms at 48kHz
         }
     }
 
     pub fn set_window_ms(&mut self, ms: f32, sample_rate: f32) {
         self.window_samples = (ms * 0.001 * sample_rate).max(64.0);
         // 5ms pitch smoothing to suppress clicks when pitch param changes.
-        // One-pole LP: y = y_prev + coef * (x - y_prev), coef = 1 - e^(-1/tc)
         let tc = (0.005 * sample_rate).max(1.0);
         self.pitch_smooth_coef = 1.0 - (-1.0_f32 / tc).exp();
     }
@@ -168,10 +171,7 @@ impl TapReader {
 
     pub fn snap_to(&mut self, delay_samples: f32) {
         self.nominal.snap_to(delay_samples);
-        self.head_a = delay_samples;
-        self.head_b = delay_samples + self.window_samples * 0.5;
-        self.fade = 0.0;
-        // Hard-snap pitch smooth too — no click since we're resetting everything
+        self.phase = 0.0;
         self.pitch_current = self.pitch_target;
     }
 
@@ -183,54 +183,50 @@ impl TapReader {
         self.nominal.set_rate(rate);
     }
 
-    /// Read one sample from the delay line at the current pitch/time.
+    /// TAPE BEND mode — single read at slewed nominal. Pitch is implicit
+    /// in the slew. No grain artifacts possible because there's no drift.
     #[inline]
-    pub fn read(&mut self, delay: &DelayLine) -> f32 {
-        let nominal = self.nominal.tick();
+    pub fn read_tape_bend(&mut self, delay: &DelayLine) -> f32 {
+        let n = self.nominal.tick();
+        delay.read(n.max(1.0))
+    }
 
-        // Smooth pitch factor toward target — prevents clicks on param change.
+    /// CONTINUOUS mode — proper dual-head Hann-windowed pitch shifter.
+    /// Sustains the pitch indefinitely without grain-boundary clicks.
+    #[inline]
+    pub fn read_continuous(&mut self, delay: &DelayLine) -> f32 {
+        let n = self.nominal.tick();
+
+        // Smooth pitch factor → target (5ms LP). Prevents param-change clicks.
         self.pitch_current +=
             self.pitch_smooth_coef * (self.pitch_target - self.pitch_current);
         let drift = self.pitch_current - 1.0;
 
-        // When pitch is (effectively) 0, just read from nominal.
-        // We don't snap heads instantly; they converge naturally as drift → 0.
-        if drift.abs() < 1e-6 {
-            return delay.read(nominal.max(1.0));
-        }
+        // Advance the shared phasor at a fixed rate (1/window_samples per sample).
+        // Cycle duration is the window length, independent of drift magnitude.
+        self.phase += 1.0 / self.window_samples;
+        if self.phase >= 1.0 { self.phase -= 1.0; }
 
-        // Pitch shifting: heads drift relative to write head.
-        // drift > 0 → pitch up (read position moves closer to write head over time)
-        // drift < 0 → pitch down (read position moves away from write head)
-        self.head_a -= drift;
-        self.head_b -= drift;
+        let phase_a = self.phase;
+        let phase_b = if self.phase < 0.5 { self.phase + 0.5 } else { self.phase - 0.5 };
 
-        // Crossfade increment: complete one full cycle per window_samples of drift
-        let fade_step = drift.abs() / self.window_samples;
-        self.fade += fade_step;
-        if self.fade >= 1.0 {
-            self.fade -= 1.0;
-            // Reset whichever head is further from nominal back to nominal.
-            // The crossfade masks the discontinuity — no click.
-            if (self.head_a - nominal).abs() > (self.head_b - nominal).abs() {
-                self.head_a = nominal;
-            } else {
-                self.head_b = nominal;
-            }
-        }
+        // Hann windows: 0 at phase=0 and phase=1, peak 1 at phase=0.5.
+        // Sum of A and B (180° offset) = constant 1.0.
+        let tau = std::f32::consts::TAU;
+        let win_a = 0.5 * (1.0 - (phase_a * tau).cos());
+        let win_b = 0.5 * (1.0 - (phase_b * tau).cos());
 
-        // Clamp heads to valid range
-        let a = self.head_a.max(1.0);
-        let b = self.head_b.max(1.0);
+        // Head positions: at phase=0 the head is exactly at `nominal`; over
+        // one window it drifts by `drift * window_samples`. When phase wraps
+        // back to 0 the head resets to nominal — but the Hann window is 0
+        // at that moment, so the reset is inaudible.
+        let head_a = n - drift * self.window_samples * phase_a;
+        let head_b = n - drift * self.window_samples * phase_b;
 
-        let sa = delay.read(a);
-        let sb = delay.read(b);
+        let sa = delay.read(head_a.max(1.0));
+        let sb = delay.read(head_b.max(1.0));
 
-        // Equal-power crossfade
-        let w = self.fade;
-        let wa = (1.0 - w).sqrt();
-        let wb = w.sqrt();
-        sa * wa + sb * wb
+        sa * win_a + sb * win_b
     }
 }
 

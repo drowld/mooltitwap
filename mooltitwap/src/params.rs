@@ -129,6 +129,11 @@ pub struct PetalParams {
     #[id = "wobble_amount"]
     pub wobble_amount: FloatParam,
 
+    /// Grain window size in milliseconds for the continuous pitch shifter
+    /// (only used by taps with pitch_continuous = true).
+    #[id = "grain_size_ms"]
+    pub grain_size_ms: FloatParam,
+
     // ---- I/O ----
     #[id = "input_gain"]
     pub input_gain: FloatParam,
@@ -146,6 +151,14 @@ pub struct TapParams {
     pub active: BoolParam,
     #[id = "pitch_semitones"]
     pub pitch_semitones: IntParam,
+    /// Pitch behaviour mode:
+    /// - false (default): TAPE BEND — pitch modifies the effective delay time
+    ///   (higher pitch = shorter delay). Slewing the delay produces a Doppler
+    ///   bend during transitions; steady state has no continuous pitch shift.
+    /// - true: CONTINUOUS — proper dual-head Hann-windowed pitch shifter that
+    ///   holds the pitch indefinitely without grain clicks.
+    #[id = "pitch_continuous"]
+    pub pitch_continuous: BoolParam,
     #[id = "gain_db"]
     pub gain_db: FloatParam,
     #[id = "pan"]
@@ -161,6 +174,7 @@ impl Default for TapParams {
         Self {
             active: BoolParam::new("Active", true),
             pitch_semitones: IntParam::new("Pitch", 0, IntRange::Linear { min: -12, max: 12 }),
+            pitch_continuous: BoolParam::new("Pitch Continuous", false),
             gain_db: FloatParam::new(
                 "Gain",
                 0.0,
@@ -273,6 +287,13 @@ impl Default for PetalParams {
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
             .with_smoother(SmoothingStyle::Linear(20.0)),
+
+            grain_size_ms: FloatParam::new(
+                "Grain Size",
+                60.0,
+                FloatRange::Skewed { min: 20.0, max: 200.0, factor: FloatRange::skew_factor(-1.0) },
+            )
+            .with_unit(" ms"),
 
             input_gain: FloatParam::new(
                 "Input Gain",

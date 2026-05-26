@@ -328,22 +328,30 @@ fn draw_left(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamS
     });
 
     y = section(ui, rect, y, "CHARACTER", 76.0, |ui, sec| {
-        let knob_s = 38.0;
-        let ky = sec.min.y + 22.0;
-        let cx_l = sec.min.x + sec.width() * 0.25;
-        let cx_r = sec.min.x + sec.width() * 0.75;
-        knob_at(ui, Pos2::new(cx_l, ky), knob_s, &params.wobble_amount, setter);
-        knob_at(ui, Pos2::new(cx_r, ky), knob_s, &params.wobble_rate, setter);
+        let knob_s = 34.0;
+        let ky = sec.min.y + 20.0;
+        let third = sec.width() / 3.0;
+        let cx_a = sec.min.x + third * 0.5;
+        let cx_b = sec.min.x + third * 1.5;
+        let cx_c = sec.min.x + third * 2.5;
+        knob_at(ui, Pos2::new(cx_a, ky), knob_s, &params.wobble_amount, setter);
+        knob_at(ui, Pos2::new(cx_b, ky), knob_s, &params.wobble_rate, setter);
+        knob_at(ui, Pos2::new(cx_c, ky), knob_s, &params.grain_size_ms, setter);
         let p = ui.painter();
-        p.text(Pos2::new(cx_l, ky + knob_s * 0.5 + 4.0), Align2::CENTER_TOP, "WOBBLE",
+        p.text(Pos2::new(cx_a, ky + knob_s * 0.5 + 4.0), Align2::CENTER_TOP, "WOBBLE",
                FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
-        p.text(Pos2::new(cx_l, ky + knob_s * 0.5 + 16.0), Align2::CENTER_TOP,
+        p.text(Pos2::new(cx_a, ky + knob_s * 0.5 + 16.0), Align2::CENTER_TOP,
                &format!("{:.0}", params.wobble_amount.value() * 100.0),
                FontId::new(10.0, FontFamily::Proportional), c::INK);
-        p.text(Pos2::new(cx_r, ky + knob_s * 0.5 + 4.0), Align2::CENTER_TOP, "RATE",
+        p.text(Pos2::new(cx_b, ky + knob_s * 0.5 + 4.0), Align2::CENTER_TOP, "RATE",
                FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
-        p.text(Pos2::new(cx_r, ky + knob_s * 0.5 + 16.0), Align2::CENTER_TOP,
+        p.text(Pos2::new(cx_b, ky + knob_s * 0.5 + 16.0), Align2::CENTER_TOP,
                &format!("{:.2} Hz", params.wobble_rate.value()),
+               FontId::new(10.0, FontFamily::Proportional), c::INK);
+        p.text(Pos2::new(cx_c, ky + knob_s * 0.5 + 4.0), Align2::CENTER_TOP, "GRAIN",
+               FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+        p.text(Pos2::new(cx_c, ky + knob_s * 0.5 + 16.0), Align2::CENTER_TOP,
+               &format!("{:.0} ms", params.grain_size_ms.value()),
                FontId::new(10.0, FontFamily::Proportional), c::INK);
     });
 
@@ -1286,7 +1294,7 @@ fn tap_row_pitch(ui: &mut Ui, rect: Rect, idx: usize, tap: &crate::params::TapPa
     }
     let val_rect = Rect::from_min_size(
         Pos2::new(minus.max.x, rect.center().y - 9.0),
-        Vec2::new(rect.max.x - minus.max.x - 50.0, 18.0),
+        Vec2::new(rect.max.x - minus.max.x - 76.0, 18.0),
     );
     let pitch = tap.pitch_semitones.value();
     let label = if pitch > 0 { format!("+{}", pitch) } else { format!("{}", pitch) };
@@ -1302,9 +1310,34 @@ fn tap_row_pitch(ui: &mut Ui, rect: Rect, idx: usize, tap: &crate::params::TapPa
         setter.set_parameter(&tap.pitch_semitones, (v + 1).min(12));
         setter.end_set_parameter(&tap.pitch_semitones);
     }
+    // Mode toggle pill: BEND (tape-bend, default) / PITCH (continuous shifter)
+    let mode_w = 44.0;
+    let mode_rect = Rect::from_min_size(
+        Pos2::new(rect.max.x - mode_w - 4.0, rect.center().y - 9.0),
+        Vec2::new(mode_w, 18.0),
+    );
+    let cont = tap.pitch_continuous.value();
+    let mode_resp = ui.allocate_rect(mode_rect, Sense::click())
+        .on_hover_text_at_pointer(if cont {
+            "PITCH: continuous Hann-windowed shifter (no clicks at sustained pitch). Click to switch to BEND."
+        } else {
+            "BEND: tape-style Doppler bend during delay-time transitions. Click to switch to PITCH."
+        });
+    if mode_resp.clicked() {
+        setter.begin_set_parameter(&tap.pitch_continuous);
+        setter.set_parameter(&tap.pitch_continuous, !cont);
+        setter.end_set_parameter(&tap.pitch_continuous);
+    }
     let p = ui.painter();
-    p.text(Pos2::new(rect.max.x - 12.0, rect.center().y), Align2::RIGHT_CENTER, "st",
-           FontId::new(9.0, FontFamily::Proportional), c::INK_FAINT);
+    let (fill, ink, label) = if cont {
+        (c::ACCENT, Color32::WHITE, "PITCH")
+    } else {
+        (c::BG_ELEV, c::INK_DIM, "BEND")
+    };
+    p.rect_filled(mode_rect, RR, fill);
+    p.rect_stroke(mode_rect, RR, Stroke::new(1.0, c::LINE), StrokeKind::Middle);
+    p.text(mode_rect.center(), Align2::CENTER_CENTER, label,
+           FontId::new(9.0, FontFamily::Proportional), ink);
 }
 
 fn tap_row_slider<F: Fn(f32) -> String>(
