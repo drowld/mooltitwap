@@ -10,11 +10,20 @@ use nih_plug_egui::{
     resizable_window::ResizableWindow,
     EguiState,
 };
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::params::{
-    snap_to_div, ChannelMode, PetalParams, SpacingMode, SyncMode, NUM_TAPS, SYNC_DIVS,
+    snap_to_div, ChannelMode, FilterType, PetalParams, SpacingMode, SyncMode, NUM_TAPS, SYNC_DIVS,
 };
+
+/// Read the live tempo published by the audio thread.
+#[inline]
+fn read_tempo(tempo_atomic: &Arc<AtomicU32>) -> f32 {
+    let raw = tempo_atomic.load(Ordering::Relaxed);
+    let t = f32::from_bits(raw);
+    if t.is_finite() && t > 1.0 { t } else { 120.0 }
+}
 
 pub const WINDOW_W: u32 = 1080;
 pub const WINDOW_H: u32 = 560;
@@ -90,6 +99,7 @@ pub fn default_state() -> Arc<EguiState> {
 pub fn create_editor(
     params: Arc<PetalParams>,
     egui_state: Arc<EguiState>,
+    tempo_bpm_shared: Arc<AtomicU32>,
 ) -> Option<Box<dyn Editor>> {
     let editor_state = std::sync::Mutex::new(EditorState::default());
     create_egui_editor(
@@ -97,18 +107,19 @@ pub fn create_editor(
         editor_state,
         |_ctx, _| {},
         move |egui_ctx, setter, state| {
+            let tempo_bpm = read_tempo(&tempo_bpm_shared);
             ResizableWindow::new("mooltitwap-window")
                 .min_size(Vec2::new(WINDOW_W as f32, WINDOW_H as f32))
                 .show(egui_ctx, egui_state.as_ref(), |ui| {
                     let mut st = state.lock().unwrap();
-                    draw_plugin(ui, &params, setter, &mut st);
+                    draw_plugin(ui, &params, setter, &mut st, tempo_bpm);
                 });
         },
     )
 }
 
 // ─── Top-level draw ──────────────────────────────────────────────────────
-fn draw_plugin(ui: &mut Ui, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState) {
+fn draw_plugin(ui: &mut Ui, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState, tempo_bpm: f32) {
     let avail = ui.available_rect_before_wrap();
     ui.painter().rect_filled(avail, RR_ZERO, c::BG_PLUGIN);
 
@@ -141,8 +152,8 @@ fn draw_plugin(ui: &mut Ui, params: &Arc<PetalParams>, setter: &ParamSetter, st:
         p.rect_filled(right_rect, RR_ZERO, c::BG_PANEL);
     }
 
-    draw_left(ui, left_rect, params, setter);
-    draw_center(ui, center_rect, params, setter, st);
+    draw_left(ui, left_rect, params, setter, tempo_bpm);
+    draw_center(ui, center_rect, params, setter, st, tempo_bpm);
     draw_right(ui, right_rect, params, setter, st);
 }
 
@@ -198,7 +209,7 @@ fn draw_brand_mark(p: &egui::Painter, center: Pos2, r: f32) {
 }
 
 // ─── LEFT PANEL ──────────────────────────────────────────────────────────
-fn draw_left(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter) {
+fn draw_left(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter, tempo_bpm: f32) {
     // Hero: Time L knob – link button – Time R knob
     let hero_h = 96.0;
     let hero_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), hero_h));
@@ -213,7 +224,6 @@ fn draw_left(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamS
     let lknob_center = Pos2::new(hero_rect.center().x - 56.0, cy);
     let rknob_center = Pos2::new(hero_rect.center().x + 56.0, cy);
 
-    let tempo_bpm = 120.0; // placeholder for display only
     let time_l_val = params.base_time_l.value();
     let time_r_val = if params.time_linked.value() { time_l_val } else { params.base_time_r.value() };
     let l_label = params.format_base_time(time_l_val, tempo_bpm);
@@ -508,10 +518,9 @@ fn bias_curve(v: f32, x: f32) -> f32 {
 
 // Returns (positions_l, positions_r, grid_range_secs) where positions are
 // normalized to [0,1] over the dynamically chosen grid range.
-// The grid range is the smallest "nice" beat multiple (at 120 BPM placeholder)
-// that accommodates the longest active tap.
-fn tap_times_and_range(params: &PetalParams) -> ([f32; NUM_TAPS], [f32; NUM_TAPS], f32) {
-    let tempo_bpm = 120.0_f32; // placeholder — real BPM only on audio thread
+// In Sync mode the grid range is a nice beat multiple at the live tempo;
+// in Free mode it's a nice round number of seconds.
+fn tap_times_and_range(params: &PetalParams, tempo_bpm: f32) -> ([f32; NUM_TAPS], [f32; NUM_TAPS], f32) {
     let pos_l = compute_positions(params.spacing_mode.value(),
                                    params.shape_x_l.value(), params.shape_y_l.value());
     let pos_r = if params.shape_linked.value() {
@@ -536,14 +545,28 @@ fn tap_times_and_range(params: &PetalParams) -> ([f32; NUM_TAPS], [f32; NUM_TAPS
         .max(pos_r[n_active - 1] * span_r)
         .max(0.001);
 
-    // Pick smallest "nice" beat range (in beats at tempo_bpm) that fits all taps.
-    let beat_secs = 60.0 / tempo_bpm;
-    let max_beats = max_tap_secs / beat_secs;
-    let nice_ranges: &[f32] = &[0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0];
-    let grid_beats = nice_ranges.iter().copied()
-        .find(|&r| max_beats <= r * 1.05)
-        .unwrap_or(16.0);
-    let grid_range_secs = grid_beats * beat_secs;
+    // Pick a "nice" grid range. Sync mode → beat multiples; Free → round seconds.
+    let grid_range_secs = match params.sync_mode.value() {
+        SyncMode::Sync => {
+            let beat_secs = 60.0 / tempo_bpm;
+            let max_beats = max_tap_secs / beat_secs;
+            let nice: &[f32] = &[0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0];
+            let grid_beats = nice.iter().copied()
+                .find(|&r| max_beats <= r * 1.05)
+                .unwrap_or(16.0);
+            grid_beats * beat_secs
+        }
+        SyncMode::Free => {
+            // Nice round seconds — pick the smallest from this set ≥ max
+            let nice_ms: &[f32] = &[100.0, 200.0, 500.0, 1000.0, 2000.0, 3000.0,
+                                    4000.0, 6000.0, 8000.0, 12000.0, 16000.0];
+            let max_ms = max_tap_secs * 1000.0;
+            let grid_ms = nice_ms.iter().copied()
+                .find(|&r| max_ms <= r * 1.05)
+                .unwrap_or(16000.0);
+            grid_ms * 0.001
+        }
+    };
 
     // Normalize tap positions into [0,1] over the grid range.
     let mut out_l = [0.0f32; NUM_TAPS];
@@ -557,7 +580,8 @@ fn tap_times_and_range(params: &PetalParams) -> ([f32; NUM_TAPS], [f32; NUM_TAPS
 }
 
 // ─── CENTER ──────────────────────────────────────────────────────────────
-fn draw_center(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState) {
+fn draw_center(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter,
+               st: &mut EditorState, tempo_bpm: f32) {
     let p = ui.painter();
     p.rect_filled(rect, RR_ZERO, c::BG_PLUGIN);
 
@@ -572,9 +596,26 @@ fn draw_center(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &Para
     if viz_tab(ui, stems_r, "STEMS", st.viz_mode == VizMode::Stems) { st.viz_mode = VizMode::Stems; }
     if viz_tab(ui, grid_r,  "GRID",  st.viz_mode == VizMode::Grid)  { st.viz_mode = VizMode::Grid; }
 
-    // meta
+    // meta — channel mode + tap count + actual visible length
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
-    let meta = format!("STEREO    TAPS  {}    LENGTH  4 / 1", n_active);
+    let ch_label = match params.channel_mode.value() {
+        ChannelMode::Stereo  => "STEREO",
+        ChannelMode::MidSide => "MID/SIDE",
+        ChannelMode::Mono    => "MONO",
+    };
+    let (_t_l, _t_r, gr_secs) = tap_times_and_range(params, tempo_bpm);
+    let len_str = match params.sync_mode.value() {
+        SyncMode::Sync => {
+            let beats = gr_secs * tempo_bpm / 60.0;
+            if beats == beats.floor() { format!("{:.0} / 1", beats) }
+            else { format!("{:.1} beat", beats) }
+        }
+        SyncMode::Free => {
+            if gr_secs < 1.0 { format!("{:.0} ms", gr_secs * 1000.0) }
+            else { format!("{:.2} s", gr_secs) }
+        }
+    };
+    let meta = format!("{}    TAPS  {}    LENGTH  {}", ch_label, n_active, len_str);
     ui.painter().text(
         Pos2::new(tabs_rect.max.x - 16.0, tabs_rect.center().y),
         Align2::RIGHT_CENTER, &meta,
@@ -590,11 +631,14 @@ fn draw_center(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &Para
         Pos2::new(rect.min.x, viz_rect.max.y), rect.max,
     );
 
-    let (times_l, times_r, grid_range_secs) = tap_times_and_range(params);
+    let (times_l, times_r, grid_range_secs) = tap_times_and_range(params, tempo_bpm);
+    let is_sync = params.sync_mode.value() == SyncMode::Sync;
 
     match st.viz_mode {
-        VizMode::Stems => draw_stems(ui, viz_rect, params, &times_l, &times_r, grid_range_secs),
-        VizMode::Grid  => draw_grid_viz(ui, viz_rect, params, setter, st, &times_l, grid_range_secs),
+        VizMode::Stems => draw_stems(ui, viz_rect, params, &times_l, &times_r,
+                                     grid_range_secs, tempo_bpm, is_sync),
+        VizMode::Grid  => draw_grid_viz(ui, viz_rect, params, setter, st, &times_l,
+                                        grid_range_secs, tempo_bpm, is_sync),
     }
     draw_shaping_strip(ui, shaping_rect, params, setter);
 }
@@ -612,59 +656,80 @@ fn viz_tab(ui: &mut Ui, rect: Rect, label: &str, active: bool) -> bool {
     resp.clicked()
 }
 
-// ─── Dynamic grid (beat-subdivisions scaled to actual tap time range) ────
+// ─── Dynamic grid — beat divisions in Sync, ms in Free ───────────────────
 fn paint_timeline_grid(
     p: &egui::Painter,
     draw_l: f32, draw_r: f32, draw_t: f32, draw_b: f32,
-    grid_range_secs: f32,
+    grid_range_secs: f32, tempo_bpm: f32, is_sync: bool,
     show_labels: bool, label_y: f32,
 ) {
-    let tempo_bpm = 120.0_f32; // placeholder
-    let beat_secs = 60.0 / tempo_bpm;
-    let total_beats = (grid_range_secs / beat_secs).max(0.001);
     let draw_w = draw_r - draw_l;
 
-    // Choose major/minor step sizes in beats based on range.
-    let (major, minor) = if total_beats <= 0.5 {
-        (0.125_f32, 0.0625_f32)
-    } else if total_beats <= 1.0 {
-        (0.25, 0.125)
-    } else if total_beats <= 2.0 {
-        (0.5, 0.25)
-    } else if total_beats <= 4.0 {
-        (1.0, 0.5)
-    } else if total_beats <= 8.0 {
-        (2.0, 1.0)
-    } else {
-        (4.0, 2.0)
-    };
+    if is_sync {
+        let beat_secs = 60.0 / tempo_bpm;
+        let total_beats = (grid_range_secs / beat_secs).max(0.001);
 
-    let mut beat = 0.0_f32;
-    let eps = minor * 0.01;
-    while beat <= total_beats + eps {
-        let x = draw_l + (beat / total_beats) * draw_w;
-        let is_major = (beat / major - (beat / major).round()).abs() < 0.02;
-        let (sw, col) = if is_major { (1.0, c::LINE) } else { (0.5, c::LINE_SOFT) };
-        p.line_segment([Pos2::new(x, draw_t), Pos2::new(x, draw_b)], Stroke::new(sw, col));
-        if show_labels && is_major {
-            // Label as fractional or integer beats
-            let rounded = (beat * 100.0).round() / 100.0;
-            let label = if rounded == 0.0 { "0".to_string() }
-                else if rounded == rounded.floor() { format!("{:.0}", rounded) }
-                else if (rounded * 2.0).round() == rounded * 2.0 { format!("{:.1}", rounded) }
-                else { format!("{:.2}", rounded) };
-            p.text(Pos2::new(x, label_y), Align2::CENTER_BOTTOM, &label,
-                   FontId::new(9.0, FontFamily::Proportional), c::INK_FAINT);
+        let (major, minor) = if total_beats <= 0.5 { (0.125_f32, 0.0625_f32) }
+            else if total_beats <= 1.0 { (0.25, 0.125) }
+            else if total_beats <= 2.0 { (0.5, 0.25) }
+            else if total_beats <= 4.0 { (1.0, 0.5) }
+            else if total_beats <= 8.0 { (2.0, 1.0) }
+            else { (4.0, 2.0) };
+
+        let mut beat = 0.0_f32;
+        let eps = minor * 0.01;
+        while beat <= total_beats + eps {
+            let x = draw_l + (beat / total_beats) * draw_w;
+            let is_major = (beat / major - (beat / major).round()).abs() < 0.02;
+            let (sw, col) = if is_major { (1.0, c::LINE) } else { (0.5, c::LINE_SOFT) };
+            p.line_segment([Pos2::new(x, draw_t), Pos2::new(x, draw_b)], Stroke::new(sw, col));
+            if show_labels && is_major {
+                let rounded = (beat * 100.0).round() / 100.0;
+                let label = if rounded == 0.0 { "0".to_string() }
+                    else if rounded == rounded.floor() { format!("{:.0}", rounded) }
+                    else if (rounded * 2.0).round() == rounded * 2.0 { format!("{:.1}", rounded) }
+                    else { format!("{:.2}", rounded) };
+                p.text(Pos2::new(x, label_y), Align2::CENTER_BOTTOM, &label,
+                       FontId::new(9.0, FontFamily::Proportional), c::INK_FAINT);
+            }
+            beat += minor;
+            if beat > 32.0 { break; }
         }
-        beat += minor;
-        if beat > 32.0 { break; } // safety
+    } else {
+        // Free mode — pick ms divisions that fit nicely in the range
+        let total_ms = grid_range_secs * 1000.0;
+        let (major, minor) = if total_ms <= 250.0 { (50.0_f32, 25.0_f32) }
+            else if total_ms <= 500.0 { (100.0, 50.0) }
+            else if total_ms <= 1000.0 { (200.0, 100.0) }
+            else if total_ms <= 2000.0 { (500.0, 250.0) }
+            else if total_ms <= 5000.0 { (1000.0, 500.0) }
+            else if total_ms <= 10000.0 { (2000.0, 1000.0) }
+            else { (4000.0, 2000.0) };
+
+        let mut ms = 0.0_f32;
+        let eps = minor * 0.01;
+        while ms <= total_ms + eps {
+            let x = draw_l + (ms / total_ms) * draw_w;
+            let is_major = (ms / major - (ms / major).round()).abs() < 0.02;
+            let (sw, col) = if is_major { (1.0, c::LINE) } else { (0.5, c::LINE_SOFT) };
+            p.line_segment([Pos2::new(x, draw_t), Pos2::new(x, draw_b)], Stroke::new(sw, col));
+            if show_labels && is_major {
+                let label = if ms < 1.0 { "0".to_string() }
+                    else if ms < 1000.0 { format!("{:.0}", ms) }
+                    else { format!("{:.1}s", ms * 0.001) };
+                p.text(Pos2::new(x, label_y), Align2::CENTER_BOTTOM, &label,
+                       FontId::new(9.0, FontFamily::Proportional), c::INK_FAINT);
+            }
+            ms += minor;
+            if ms > 30000.0 { break; }
+        }
     }
 }
 
 // ─── STEMS visualizer ───────────────────────────────────────────────────
 fn draw_stems(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>,
               times_l: &[f32; NUM_TAPS], times_r: &[f32; NUM_TAPS],
-              grid_range_secs: f32) {
+              grid_range_secs: f32, tempo_bpm: f32, is_sync: bool) {
     let p = ui.painter();
     let pad_l = 36.0;
     let pad_r = 24.0;
@@ -694,8 +759,9 @@ fn draw_stems(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>,
     // center dashed
     dashed_h(p, Pos2::new(draw_l, mid_y), draw_w, c::LINE);
 
-    // Dynamic beat grid
-    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, grid_range_secs, true, rect.max.y - 6.0);
+    // Dynamic grid (beats in Sync, ms in Free)
+    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, grid_range_secs, tempo_bpm, is_sync,
+                        true, rect.max.y - 6.0);
 
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
 
@@ -729,34 +795,43 @@ fn draw_stems(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>,
                 }
             }
             ChannelMode::MidSide => {
-                // pan = -1 → all Mid; pan = 0 → balanced; pan = +1 → all Side
+                // Three-bar look: a centered Mid bar at x_l (Time M position)
+                // and two Side bars (top+bottom) at x_r (Time S position).
+                // Bar heights scale with the M/S balance set by `pan`:
+                //   pan = -1 → all Mid, pan = 0 → balanced, pan = +1 → all Side
                 let mid_amt  = ((1.0 - pan) * 0.5).clamp(0.0, 1.0);
                 let side_amt = ((1.0 + pan) * 0.5).clamp(0.0, 1.0);
-                let mid_h  = gain_n * max_bar * mid_amt;
-                let side_h = gain_n * max_bar * side_amt;
+                let mid_h  = gain_n * max_bar * 0.5 * mid_amt;
+                let side_h = gain_n * max_bar * 0.35 * side_amt;
                 let col = c::ACCENT.linear_multiply(op);
-                // MID — top half, bar at x_l (uses Time M position)
+
+                // MID — centered horizontal bar at x_l
                 if mid_h > 0.5 {
-                    p.line_segment([Pos2::new(x_l, mid_y - 1.0),
-                                    Pos2::new(x_l, mid_y - mid_h)],
-                                   Stroke::new(2.2, col));
-                    p.circle_filled(Pos2::new(x_l, mid_y - mid_h), 3.0, col);
+                    let mr = Rect::from_min_max(
+                        Pos2::new(x_l - 2.5, mid_y - mid_h),
+                        Pos2::new(x_l + 2.5, mid_y + mid_h),
+                    );
+                    p.rect_filled(mr, RR, col);
                 }
-                // SIDE — bottom half, bar at x_r (uses Time S position)
+                // SIDE — top and bottom bars at x_r (visually different position
+                // when Time M ≠ Time S)
                 if side_h > 0.5 {
-                    p.line_segment([Pos2::new(x_r, mid_y + 1.0),
-                                    Pos2::new(x_r, mid_y + side_h)],
+                    let s_top_y = mid_y - max_bar * 0.65;
+                    let s_bot_y = mid_y + max_bar * 0.65;
+                    p.line_segment([Pos2::new(x_r, s_top_y - side_h),
+                                    Pos2::new(x_r, s_top_y + side_h)],
                                    Stroke::new(2.2, col));
-                    p.circle_filled(Pos2::new(x_r, mid_y + side_h), 3.0, col);
+                    p.line_segment([Pos2::new(x_r, s_bot_y - side_h),
+                                    Pos2::new(x_r, s_bot_y + side_h)],
+                                   Stroke::new(2.2, col));
                 }
+
                 let pitch = tap.pitch_semitones.value();
                 if pitch != 0 && active {
                     let sign = if pitch > 0 { "+" } else { "" };
+                    // Place pitch label near whichever bar is taller
                     let label_x = if mid_h >= side_h { x_l } else { x_r };
-                    let label_y = if mid_h >= side_h { mid_y - mid_h - 10.0 }
-                                  else { mid_y + side_h + 10.0 };
-                    let align = if mid_h >= side_h { Align2::CENTER_BOTTOM } else { Align2::CENTER_TOP };
-                    p.text(Pos2::new(label_x, label_y), align,
+                    p.text(Pos2::new(label_x, mid_y - max_bar * 0.85), Align2::CENTER_BOTTOM,
                            &format!("{}{}", sign, pitch),
                            FontId::new(10.0, FontFamily::Proportional), col);
                 }
@@ -795,7 +870,8 @@ fn dashed_v(p: &egui::Painter, start: Pos2, height: f32, color: Color32) {
 
 // ─── GRID visualizer ────────────────────────────────────────────────────
 fn draw_grid_viz(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter,
-                 st: &mut EditorState, times_l: &[f32; NUM_TAPS], grid_range_secs: f32) {
+                 st: &mut EditorState, times_l: &[f32; NUM_TAPS],
+                 grid_range_secs: f32, tempo_bpm: f32, is_sync: bool) {
     let p = ui.painter();
     let pad_l = 40.0;
     let pad_r = 24.0;
@@ -823,7 +899,8 @@ fn draw_grid_viz(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &Pa
     p.text(Pos2::new(rect.min.x + pad_l - 6.0, draw_t - 6.0), Align2::RIGHT_BOTTOM, "dB",
            FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
 
-    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, grid_range_secs, true, rect.max.y - 6.0);
+    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b,
+                        grid_range_secs, tempo_bpm, is_sync, true, rect.max.y - 6.0);
 
     p.text(Pos2::new(draw_l + 8.0, draw_t + 6.0), Align2::LEFT_TOP,
            "DRAG · X = TIME · Y = GAIN",
@@ -997,6 +1074,15 @@ fn draw_xy_pad(ui: &mut Ui, rect: Rect, label: &str,
     }
     if resp.drag_stopped() && !dim {
         setter.end_set_parameter(x_param);
+        setter.end_set_parameter(y_param);
+    }
+    // Double-click anywhere on the pad → reset both axes to default (typically 0)
+    if resp.double_clicked() && !dim {
+        setter.begin_set_parameter(x_param);
+        setter.set_parameter_normalized(x_param, x_param.default_normalized_value());
+        setter.end_set_parameter(x_param);
+        setter.begin_set_parameter(y_param);
+        setter.set_parameter_normalized(y_param, y_param.default_normalized_value());
         setter.end_set_parameter(y_param);
     }
 
@@ -1184,14 +1270,14 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
                 if ms_mode {
                     // In M/S mode: pan = -1 → all Mid, pan = 0 → balanced, pan = +1 → all Side
                     tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].pan, setter,
-                                   -1.0, 1.0, true, |v| {
+                                   -1.0, 1.0, true, 1.0, |v| {
                         if v.abs() < 0.05 { "BAL".to_string() }
                         else if v < 0.0 { format!("M{}", ((-v) * 100.0).round() as i32) }
                         else { format!("S{}", (v * 100.0).round() as i32) }
                     });
                 } else {
                     tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].pan, setter,
-                                   -1.0, 1.0, true, |v| {
+                                   -1.0, 1.0, true, 1.0, |v| {
                         if v.abs() < 0.05 { "C".to_string() }
                         else if v > 0.0 { format!("R{}", (v * 100.0).round() as i32) }
                         else { format!("L{}", (-v * 100.0).round() as i32) }
@@ -1204,12 +1290,16 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
                 let y = row_y(i);
                 if y + row_h < rect.min.y || y > rect.max.y { continue; }
                 let r = Rect::from_min_size(Pos2::new(row_x, y), Vec2::new(row_w, row_h));
+                // Exponential mapping (skew=2.0) — fine resolution near 0 dB,
+                // coarse resolution near -60 dB. Matches audio-taper potentiometer feel.
                 tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].gain_db, setter,
-                               -60.0, 6.0, false, |v| format!("{:.0} dB", v));
+                               -60.0, 6.0, false, 2.0, |v| {
+                    if v < -50.0 { "-∞ dB".to_string() } else { format!("{:.0} dB", v) }
+                });
             }
         }
-        RightTab::Filter => stub_panel(ui, rect, "Filter", "Per-tap SVF coming soon."),
-        RightTab::XFeed  => stub_panel(ui, rect, "Crossfeed", "Route tap outputs into adjacent taps or the opposite stereo channel."),
+        RightTab::Filter  => draw_filter_panel(ui, rect, params, setter),
+        RightTab::XFeed   => draw_xfeed_panel(ui, rect, params, setter),
         RightTab::Diffuse => stub_panel(ui, rect, "Diffusion", "Allpass network per tap — blurs transients into smear."),
     }
 
@@ -1236,6 +1326,86 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
             Vec2::new(3.0, thumb_h),
         );
         p.rect_filled(thumb_rect, RR, c::INK_DIM);
+    }
+}
+
+fn draw_filter_panel(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter) {
+    let pad = 14.0;
+    {
+        let p = ui.painter();
+        p.text(Pos2::new(rect.min.x + pad, rect.min.y + 14.0), Align2::LEFT_TOP,
+               "FILTER (WET BUS)",
+               FontId::new(10.0, FontFamily::Proportional), c::INK_FAINT);
+    }
+
+    // Filter type segment buttons (LP / BP / HP)
+    let seg_y = rect.min.y + 36.0;
+    let seg_h = 24.0;
+    let seg_w = (rect.width() - pad * 2.0 - 4.0) / 3.0;
+    let labels = ["LP", "BP", "HP"];
+    let types  = [FilterType::LowPass, FilterType::BandPass, FilterType::HighPass];
+    let cur_t  = params.filter_type.value();
+    for i in 0..3 {
+        let r = Rect::from_min_size(
+            Pos2::new(rect.min.x + pad + i as f32 * (seg_w + 2.0), seg_y),
+            Vec2::new(seg_w, seg_h),
+        );
+        if seg_button(ui, r, labels[i], cur_t == types[i], true) {
+            setter.begin_set_parameter(&params.filter_type);
+            setter.set_parameter(&params.filter_type, types[i]);
+            setter.end_set_parameter(&params.filter_type);
+        }
+    }
+
+    // CUTOFF + Q knobs
+    let knob_s = 52.0;
+    let ky = seg_y + seg_h + 36.0;
+    let cx_c = rect.min.x + rect.width() * 0.3;
+    let cx_q = rect.min.x + rect.width() * 0.7;
+    knob_at(ui, Pos2::new(cx_c, ky), knob_s, &params.filter_cutoff, setter);
+    knob_at(ui, Pos2::new(cx_q, ky), knob_s, &params.filter_q, setter);
+    {
+        let p = ui.painter();
+        let cutoff = params.filter_cutoff.value();
+        let cutoff_str = if cutoff >= 1000.0 { format!("{:.1} kHz", cutoff / 1000.0) }
+                         else { format!("{:.0} Hz", cutoff) };
+        p.text(Pos2::new(cx_c, ky + knob_s * 0.5 + 6.0), Align2::CENTER_TOP, "CUTOFF",
+               FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+        p.text(Pos2::new(cx_c, ky + knob_s * 0.5 + 18.0), Align2::CENTER_TOP, &cutoff_str,
+               FontId::new(11.0, FontFamily::Proportional), c::INK);
+        p.text(Pos2::new(cx_q, ky + knob_s * 0.5 + 6.0), Align2::CENTER_TOP, "Q",
+               FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+        p.text(Pos2::new(cx_q, ky + knob_s * 0.5 + 18.0), Align2::CENTER_TOP,
+               &format!("{:.2}", params.filter_q.value()),
+               FontId::new(11.0, FontFamily::Proportional), c::INK);
+    }
+}
+
+fn draw_xfeed_panel(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter) {
+    let pad = 14.0;
+    {
+        let p = ui.painter();
+        p.text(Pos2::new(rect.min.x + pad, rect.min.y + 14.0), Align2::LEFT_TOP,
+               "CROSSFEED",
+               FontId::new(10.0, FontFamily::Proportional), c::INK_FAINT);
+        p.text(Pos2::new(rect.min.x + pad, rect.min.y + 30.0), Align2::LEFT_TOP,
+               "Bleed each channel's wet bus into the opposite.",
+               FontId::new(9.0, FontFamily::Proportional), c::INK_DIM);
+    }
+
+    let knob_s = 64.0;
+    let center = Pos2::new(rect.center().x, rect.min.y + 110.0);
+    knob_at(ui, center, knob_s, &params.crossfeed, setter);
+    {
+        let p = ui.painter();
+        let v = params.crossfeed.value();
+        let label = if v < 0.01 { "OFF".to_string() }
+                    else if (v - 1.0).abs() < 0.01 { "FULL SWAP".to_string() }
+                    else { format!("{:.0}%", v * 100.0) };
+        p.text(Pos2::new(center.x, center.y + knob_s * 0.5 + 8.0), Align2::CENTER_TOP, "AMOUNT",
+               FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
+        p.text(Pos2::new(center.x, center.y + knob_s * 0.5 + 22.0), Align2::CENTER_TOP, &label,
+               FontId::new(12.0, FontFamily::Proportional), c::INK);
     }
 }
 
@@ -1296,6 +1466,13 @@ fn tap_row_pitch(ui: &mut Ui, rect: Rect, idx: usize, tap: &crate::params::TapPa
         Pos2::new(minus.max.x, rect.center().y - 9.0),
         Vec2::new(rect.max.x - minus.max.x - 76.0, 18.0),
     );
+    // Double-click the pitch value field to reset to 0
+    let val_resp = ui.allocate_rect(val_rect, Sense::click());
+    if val_resp.double_clicked() {
+        setter.begin_set_parameter(&tap.pitch_semitones);
+        setter.set_parameter(&tap.pitch_semitones, 0);
+        setter.end_set_parameter(&tap.pitch_semitones);
+    }
     let pitch = tap.pitch_semitones.value();
     let label = if pitch > 0 { format!("+{}", pitch) } else { format!("{}", pitch) };
     let p = ui.painter();
@@ -1340,15 +1517,31 @@ fn tap_row_pitch(ui: &mut Ui, rect: Rect, idx: usize, tap: &crate::params::TapPa
            FontId::new(9.0, FontFamily::Proportional), ink);
 }
 
+/// `skew`:
+/// - `1.0`  → linear mapping (default)
+/// - `> 1`  → audio-taper: more resolution near the top of the range
+///   (e.g. 2.0 for gain so the right half covers ~0…−13 dB and only the
+///   bottom of the slider reaches −60 dB).
 fn tap_row_slider<F: Fn(f32) -> String>(
     ui: &mut Ui, rect: Rect, idx: usize,
     active_param: &BoolParam, value_param: &FloatParam,
-    setter: &ParamSetter, min: f32, max: f32, bipolar: bool, formatter: F,
+    setter: &ParamSetter, min: f32, max: f32, bipolar: bool, skew: f32,
+    formatter: F,
 ) {
     let active = active_param.value();
     let alpha = if active { 1.0 } else { 0.4 };
 
-    // Background + index number — drop painter borrow before allocate_rect
+    // value <-> slider-position (n in [0,1]) helpers, with optional skew
+    let val_to_pos = |v: f32| -> f32 {
+        let raw = ((v - min) / (max - min)).clamp(0.0, 1.0);
+        if (skew - 1.0).abs() < 1e-4 { raw } else { raw.powf(1.0 / skew) }
+    };
+    let pos_to_val = |n: f32| -> f32 {
+        let raw = if (skew - 1.0).abs() < 1e-4 { n } else { n.powf(skew) };
+        min + raw * (max - min)
+    };
+
+    // Background + index number
     {
         let p = ui.painter();
         p.rect_filled(rect, CornerRadius { nw: 5, ne: 5, sw: 5, se: 5 }, c::BG_SURFACE.linear_multiply(alpha));
@@ -1358,7 +1551,7 @@ fn tap_row_slider<F: Fn(f32) -> String>(
                FontId::new(10.0, FontFamily::Proportional), c::INK_FAINT);
     }
 
-    // Dot — now clickable to toggle tap active in ALL tabs (not just Pitch)
+    // Dot — clickable to toggle tap active in ALL tabs
     let dot_center = Pos2::new(rect.min.x + 32.0, rect.center().y);
     let dot_rect = Rect::from_center_size(dot_center, Vec2::splat(14.0));
     let dot_resp = ui.allocate_rect(dot_rect, Sense::click());
@@ -1380,45 +1573,55 @@ fn tap_row_slider<F: Fn(f32) -> String>(
         Pos2::new(slider_left, slider_y - 3.0),
         Pos2::new(slider_right, slider_y + 3.0),
     );
-    let p = ui.painter();
-    p.rect_filled(slider_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, c::BG_ELEV);
-    p.rect_stroke(slider_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 },
-                  Stroke::new(1.0, c::LINE), StrokeKind::Middle);
     let v = value_param.value();
-    let n = ((v - min) / (max - min)).clamp(0.0, 1.0);
-    if bipolar {
-        let mid_x = slider_left + (slider_right - slider_left) * 0.5;
-        let cur_x = slider_left + n * (slider_right - slider_left);
-        let (fl, fr) = (mid_x.min(cur_x), mid_x.max(cur_x));
-        let fr_rect = Rect::from_min_max(Pos2::new(fl, slider_y - 3.0), Pos2::new(fr, slider_y + 3.0));
-        p.rect_filled(fr_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, c::ACCENT.linear_multiply(alpha));
-    } else {
-        let fr_rect = Rect::from_min_max(
-            slider_rect.min,
-            Pos2::new(slider_left + n * (slider_right - slider_left), slider_rect.max.y),
-        );
-        p.rect_filled(fr_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, c::ACCENT.linear_multiply(alpha));
+    let n = val_to_pos(v);
+    {
+        let p = ui.painter();
+        p.rect_filled(slider_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, c::BG_ELEV);
+        p.rect_stroke(slider_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 },
+                      Stroke::new(1.0, c::LINE), StrokeKind::Middle);
+        if bipolar {
+            let mid_x = slider_left + (slider_right - slider_left) * 0.5;
+            let cur_x = slider_left + n * (slider_right - slider_left);
+            let (fl, fr) = (mid_x.min(cur_x), mid_x.max(cur_x));
+            let fr_rect = Rect::from_min_max(Pos2::new(fl, slider_y - 3.0), Pos2::new(fr, slider_y + 3.0));
+            p.rect_filled(fr_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, c::ACCENT.linear_multiply(alpha));
+        } else {
+            let fr_rect = Rect::from_min_max(
+                slider_rect.min,
+                Pos2::new(slider_left + n * (slider_right - slider_left), slider_rect.max.y),
+            );
+            p.rect_filled(fr_rect, CornerRadius { nw: 3, ne: 3, sw: 3, se: 3 }, c::ACCENT.linear_multiply(alpha));
+        }
+        let tx = slider_left + n * (slider_right - slider_left);
+        p.circle_filled(Pos2::new(tx, slider_y), 5.0, Color32::WHITE);
+        p.circle_stroke(Pos2::new(tx, slider_y), 5.0, Stroke::new(1.0, c::ACCENT.linear_multiply(alpha)));
     }
-    let tx = slider_left + n * (slider_right - slider_left);
-    p.circle_filled(Pos2::new(tx, slider_y), 5.0, Color32::WHITE);
-    p.circle_stroke(Pos2::new(tx, slider_y), 5.0, Stroke::new(1.0, c::ACCENT.linear_multiply(alpha)));
 
     let hit = Rect::from_min_max(Pos2::new(slider_left - 4.0, slider_y - 10.0),
                                   Pos2::new(slider_right + 4.0, slider_y + 10.0));
     let resp = ui.allocate_rect(hit, Sense::click_and_drag());
     if resp.drag_started() { setter.begin_set_parameter(value_param); }
-    if resp.dragged() || resp.clicked() {
+    if resp.dragged() || (resp.clicked() && !resp.double_clicked()) {
         if let Some(pos) = resp.interact_pointer_pos() {
             let nx = ((pos.x - slider_left) / (slider_right - slider_left)).clamp(0.0, 1.0);
-            setter.set_parameter(value_param, min + nx * (max - min));
+            setter.set_parameter(value_param, pos_to_val(nx));
         }
     }
     if resp.drag_stopped() { setter.end_set_parameter(value_param); }
+    // Double-click anywhere on the slider track → reset to default
+    if resp.double_clicked() {
+        setter.begin_set_parameter(value_param);
+        setter.set_parameter_normalized(value_param, value_param.default_normalized_value());
+        setter.end_set_parameter(value_param);
+    }
 
-    let p = ui.painter();
-    p.text(Pos2::new(rect.max.x - 8.0, rect.center().y), Align2::RIGHT_CENTER,
-           &formatter(v),
-           FontId::new(10.0, FontFamily::Proportional), c::INK);
+    {
+        let p = ui.painter();
+        p.text(Pos2::new(rect.max.x - 8.0, rect.center().y), Align2::RIGHT_CENTER,
+               &formatter(v),
+               FontId::new(10.0, FontFamily::Proportional), c::INK);
+    }
 }
 
 fn click_box(ui: &mut Ui, rect: Rect, label: &str) -> bool {

@@ -115,6 +115,11 @@ pub struct PetalParams {
     #[id = "feedback_tap"]
     pub feedback_tap: IntParam,
 
+    /// Crossfeed: post-tap, mixes each channel's wet bus into the opposite.
+    /// 0 = no crossfeed, 1 = full swap. Useful for ping-pong style effects.
+    #[id = "crossfeed"]
+    pub crossfeed: FloatParam,
+
     // ---- Filter ----
     #[id = "filter_type"]
     pub filter_type: EnumParam<FilterType>,
@@ -246,6 +251,8 @@ impl Default for PetalParams {
                 8,
                 IntRange::Linear { min: 1, max: NUM_TAPS as i32 },
             ),
+            crossfeed: FloatParam::new("Crossfeed", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(20.0)),
 
             filter_type: EnumParam::new("Filter Type", FilterType::LowPass),
             filter_cutoff: FloatParam::new(

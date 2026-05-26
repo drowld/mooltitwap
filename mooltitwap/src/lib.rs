@@ -6,6 +6,7 @@ mod topology;
 
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::delay::{ChannelTaps, DelayLine};
@@ -18,6 +19,9 @@ const MAX_DELAY_SECONDS: f32 = 4.0;
 pub struct Mooltitwap {
     params: Arc<PetalParams>,
     editor_state: Arc<EguiState>,
+    /// Tempo shared with the GUI thread (f32 bitcast into u32).
+    /// Updated from `ctx.transport().tempo` every process block.
+    tempo_bpm_shared: Arc<AtomicU32>,
     sample_rate: f32,
 
     // Layer 1
@@ -52,6 +56,7 @@ impl Default for Mooltitwap {
         Self {
             params: Arc::new(PetalParams::default()),
             editor_state: gui::default_state(),
+            tempo_bpm_shared: Arc::new(AtomicU32::new(120.0_f32.to_bits())),
             sample_rate: 48_000.0,
             topology_l: TopologyEngine::new(),
             topology_r: TopologyEngine::new(),
@@ -93,7 +98,11 @@ impl Plugin for Mooltitwap {
     fn params(&self) -> Arc<dyn Params> { self.params.clone() }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        gui::create_editor(self.params.clone(), self.editor_state.clone())
+        gui::create_editor(
+            self.params.clone(),
+            self.editor_state.clone(),
+            self.tempo_bpm_shared.clone(),
+        )
     }
 
     fn initialize(
@@ -135,6 +144,8 @@ impl Plugin for Mooltitwap {
         let p = self.params.clone();
 
         let tempo_bpm = ctx.transport().tempo.unwrap_or(120.0) as f32;
+        // Publish tempo to GUI thread for accurate grid/sync display
+        self.tempo_bpm_shared.store(tempo_bpm.to_bits(), Ordering::Relaxed);
         let time_l_norm = p.base_time_l.value();
         let time_r_norm = if p.time_linked.value() { time_l_norm } else { p.base_time_r.value() };
         let base_sec_l = p.base_time_seconds(time_l_norm, tempo_bpm);
@@ -214,6 +225,7 @@ impl Plugin for Mooltitwap {
         let soft = p.soft_clip.value();
         let fb_tap_idx = ((p.feedback_tap.value() as usize).min(n_active).saturating_sub(1)).min(NUM_TAPS - 1);
         let ch_mode = p.channel_mode.value();
+        let crossfeed = p.crossfeed.value();
 
         let mut tap_gain = [0.0f32; NUM_TAPS];
         let mut tap_pan_l = [1.0f32; NUM_TAPS];
@@ -297,6 +309,17 @@ impl Plugin for Mooltitwap {
                     fb_tap_l = sl;
                     fb_tap_r = sr_s;
                 }
+            }
+
+            // Crossfeed: mix opposite channel into each (equal-power blend)
+            if crossfeed > 1e-4 {
+                let cf = crossfeed.min(1.0);
+                let kept = 1.0 - cf * 0.5;
+                let sent = cf * 0.5;
+                let new_l = tap_out_l * kept + tap_out_r * sent;
+                let new_r = tap_out_r * kept + tap_out_l * sent;
+                tap_out_l = new_l;
+                tap_out_r = new_r;
             }
 
             let fb_in_l = fb_tap_l * feedback;
