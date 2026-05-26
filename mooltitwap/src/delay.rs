@@ -114,21 +114,46 @@ impl Default for SlewedTime {
     fn default() -> Self { Self::new() }
 }
 
-/// Per-tap delay reader with two pitch modes:
+/// One grain in the PSOLA-style pitch shifter.
+#[derive(Default, Clone, Copy)]
+struct PsolaGrain {
+    active: bool,
+    /// Constant delay (in delay-line samples) captured at grain start.
+    /// While active the grain reads at this delay every sample, which gives
+    /// natural-rate playback of consecutive source samples (since write_pos
+    /// also advances 1 per sample).
+    delay_samples: f32,
+    /// Age in samples since grain start.
+    age: f32,
+    /// Total grain duration in samples (≈ 2 × period).
+    duration: f32,
+}
+
+/// Max simultaneous grains in the PSOLA shifter. With grain duration ≈ 2T
+/// and output epoch interval = T/pitch_factor, the average grain density is
+/// roughly 2·pitch_factor. 6 is safe up to ~3× pitch up.
+const PSOLA_MAX_GRAINS: usize = 6;
+
+/// Per-tap delay reader with three pitch modes:
 ///
 /// 1. **TAPE BEND** (`read_tape_bend`): single read head at the slewed
 ///    nominal delay time. Pitch is encoded by changing the nominal delay
-///    (the caller sets `set_nominal` to `base_delay * 2^(-semis/12)`), and
-///    the slew of `SlewedTime` produces the Doppler pitch bend during the
-///    transition. Steady state = no pitch, just a delayed read. No clicks,
-///    no grain artifacts — but no sustained pitch shift either.
+///    (caller sets `set_nominal` to `base_delay * 2^(-semis/12)`); the slew
+///    of `SlewedTime` produces the Doppler bend during transition. Steady
+///    state = no pitch, just a delayed read. No clicks, no grain artifacts.
 ///
-/// 2. **CONTINUOUS** (`read_continuous`): proper dual-head Hann-windowed
-///    pitch shifter. Two read heads share a phasor, 180° offset. Each head
-///    sweeps from `nominal` outward by `drift * window_samples` over one
-///    window cycle, then resets to `nominal` at the moment its Hann window
-///    weight is exactly 0 (silent reset → no click). Window weights sum to
-///    constant 1.0 → no amplitude modulation when drift = 0.
+/// 2. **PSOLA** (`read_psola`): pitch-period-synchronous granular shifter.
+///    Takes an externally estimated pitch period and places grains at output
+///    epochs spaced `period / pitch_factor` apart. Each grain reads at a
+///    constant delay (captured at grain start) and lasts ~2·period samples
+///    with a Hann window. Adjacent grains overlap and OLA. Because grain
+///    spacing aligns with pitch periods, the algorithm preserves the local
+///    waveform shape and avoids the phase cancellation that plagues the
+///    fixed-window dual-head approach.
+///
+/// 3. **Hann dual-head** (`read_continuous_hann`): the older fixed-window
+///    shifter. Kept as a fallback when the pitch tracker reports unpitched
+///    content (the PSOLA path needs a valid period to work).
 ///
 /// Pitch param changes are smoothed by a 5 ms one-pole lowpass to suppress
 /// the click that an instant pitch_factor jump would create.
@@ -140,10 +165,14 @@ pub struct TapReader {
     pitch_current: f32,
     /// One-pole LP coefficient for pitch smoothing.
     pitch_smooth_coef: f32,
-    /// Grain phasor [0,1) for the continuous-mode dual-head shifter.
+    /// Grain phasor [0,1) for the Hann fallback shifter.
     phase: f32,
-    /// Hann window length in samples.
+    /// Hann window length in samples (fallback only).
     window_samples: f32,
+    /// PSOLA grain pool.
+    psola_grains: [PsolaGrain; PSOLA_MAX_GRAINS],
+    /// Samples until the next PSOLA grain trigger (fractional, in output time).
+    psola_next_trigger_in: f32,
 }
 
 impl TapReader {
@@ -154,7 +183,9 @@ impl TapReader {
             pitch_current: 1.0,
             pitch_smooth_coef: 0.005,
             phase: 0.0,
-            window_samples: 2880.0, // ~60ms at 48kHz
+            window_samples: 2880.0,
+            psola_grains: [PsolaGrain::default(); PSOLA_MAX_GRAINS],
+            psola_next_trigger_in: 0.0,
         }
     }
 
@@ -173,6 +204,8 @@ impl TapReader {
         self.nominal.snap_to(delay_samples);
         self.phase = 0.0;
         self.pitch_current = self.pitch_target;
+        for g in self.psola_grains.iter_mut() { g.active = false; }
+        self.psola_next_trigger_in = 0.0;
     }
 
     pub fn set_pitch_semitones(&mut self, semis: f32) {
@@ -183,43 +216,124 @@ impl TapReader {
         self.nominal.set_rate(rate);
     }
 
-    /// TAPE BEND mode — single read at slewed nominal. Pitch is implicit
-    /// in the slew. No grain artifacts possible because there's no drift.
+    /// TAPE BEND mode — single read at slewed nominal.
     #[inline]
     pub fn read_tape_bend(&mut self, delay: &DelayLine) -> f32 {
         let n = self.nominal.tick();
         delay.read(n.max(1.0))
     }
 
-    /// CONTINUOUS mode — proper dual-head Hann-windowed pitch shifter.
-    /// Sustains the pitch indefinitely without grain-boundary clicks.
+    /// PSOLA-style pitch-period-synchronous shifter.
+    ///
+    /// `period_samples` is the externally detected pitch period of the source
+    /// signal. When the period is valid (the tracker reports a confident
+    /// fundamental), grains are placed at output epochs of `period /
+    /// pitch_factor`, each lasting 2·period samples with a Hann window.
+    /// Adjacent grains overlap and OLA. Because grain hops align with the
+    /// source's pitch periods, the local waveform is preserved across grains
+    /// → no phase cancellation between grains, no perceived detune.
+    ///
+    /// When `period_samples <= 0` (unpitched / noisy / silent input), falls
+    /// back to the fixed-window dual-head Hann shifter.
     #[inline]
-    pub fn read_continuous(&mut self, delay: &DelayLine) -> f32 {
+    pub fn read_psola(&mut self, delay: &DelayLine, period_samples: f32) -> f32 {
         let n = self.nominal.tick();
 
-        // Smooth pitch factor → target (5ms LP). Prevents param-change clicks.
+        // Smooth the pitch_factor (kills param-change clicks)
         self.pitch_current +=
             self.pitch_smooth_coef * (self.pitch_target - self.pitch_current);
+        let pf = self.pitch_current.max(0.0625); // clamp to 4 oct down
+
+        if (pf - 1.0).abs() < 1e-5 {
+            // No pitch shift — just read at nominal.
+            return delay.read(n.max(1.0));
+        }
+
+        // Bail to Hann fallback when no usable period is reported
+        if period_samples < 32.0 {
+            return self.read_continuous_hann(delay);
+        }
+
+        // Clamp period to musical range
+        let period = period_samples.clamp(32.0, 2400.0);
+        // Output epoch spacing in output-time samples
+        let out_step = (period / pf).max(8.0);
+        // Grain duration = 2 periods so adjacent grains have 50% overlap at pf=1
+        let grain_dur = 2.0 * period;
+
+        // Step the trigger counter and fire a new grain at each epoch
+        self.psola_next_trigger_in -= 1.0;
+        while self.psola_next_trigger_in <= 0.0 {
+            self.psola_next_trigger_in += out_step;
+            // Find an inactive slot or evict the oldest
+            let slot = self.allocate_grain_slot();
+            let g = &mut self.psola_grains[slot];
+            g.active = true;
+            g.delay_samples = n;
+            g.age = 0.0;
+            g.duration = grain_dur;
+        }
+
+        // Sum all active grains with Hann window weights. Window sum is *not*
+        // guaranteed to be 1.0 for arbitrary pitch_factor, so normalize by it.
+        let tau = std::f32::consts::TAU;
+        let mut output = 0.0_f32;
+        let mut win_sum = 0.0_f32;
+        for g in self.psola_grains.iter_mut() {
+            if !g.active { continue; }
+            if g.age >= g.duration {
+                g.active = false;
+                continue;
+            }
+            let phase = g.age / g.duration;
+            let w = 0.5 * (1.0 - (phase * tau).cos());
+            // Constant delay = natural-rate playback through delay buffer
+            let s = delay.read(g.delay_samples.max(1.0));
+            output += s * w;
+            win_sum += w;
+            g.age += 1.0;
+        }
+        if win_sum > 1e-4 {
+            output / win_sum
+        } else {
+            // Coverage hole — fall back to direct read
+            delay.read(n.max(1.0))
+        }
+    }
+
+    fn allocate_grain_slot(&mut self) -> usize {
+        // Prefer inactive slot
+        for i in 0..PSOLA_MAX_GRAINS {
+            if !self.psola_grains[i].active { return i; }
+        }
+        // All active — evict the one furthest along its life
+        let mut best = 0;
+        let mut best_ratio = -1.0_f32;
+        for i in 0..PSOLA_MAX_GRAINS {
+            let g = &self.psola_grains[i];
+            let r = g.age / g.duration.max(1.0);
+            if r > best_ratio { best_ratio = r; best = i; }
+        }
+        best
+    }
+
+    /// Fixed-window dual-head Hann shifter (fallback used by PSOLA when
+    /// no pitch is detected). Same algorithm as before.
+    #[inline]
+    fn read_continuous_hann(&mut self, delay: &DelayLine) -> f32 {
+        let n = self.nominal.current();
         let drift = self.pitch_current - 1.0;
 
-        // Advance the shared phasor at a fixed rate (1/window_samples per sample).
-        // Cycle duration is the window length, independent of drift magnitude.
         self.phase += 1.0 / self.window_samples;
         if self.phase >= 1.0 { self.phase -= 1.0; }
 
         let phase_a = self.phase;
         let phase_b = if self.phase < 0.5 { self.phase + 0.5 } else { self.phase - 0.5 };
 
-        // Hann windows: 0 at phase=0 and phase=1, peak 1 at phase=0.5.
-        // Sum of A and B (180° offset) = constant 1.0.
         let tau = std::f32::consts::TAU;
         let win_a = 0.5 * (1.0 - (phase_a * tau).cos());
         let win_b = 0.5 * (1.0 - (phase_b * tau).cos());
 
-        // Head positions: at phase=0 the head is exactly at `nominal`; over
-        // one window it drifts by `drift * window_samples`. When phase wraps
-        // back to 0 the head resets to nominal — but the Hann window is 0
-        // at that moment, so the reset is inaudible.
         let head_a = n - drift * self.window_samples * phase_a;
         let head_b = n - drift * self.window_samples * phase_b;
 

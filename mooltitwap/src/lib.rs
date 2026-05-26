@@ -14,7 +14,96 @@ use crate::filter::{soft_clip, PeakLimiter, Svf};
 use crate::params::{ChannelMode, PetalParams, NUM_TAPS};
 use crate::topology::TopologyEngine;
 
-const MAX_DELAY_SECONDS: f32 = 4.0;
+const MAX_DELAY_SECONDS: f32 = 16.0;
+
+/// Simple autocorrelation pitch tracker. Maintains a ring buffer of recent
+/// input samples and re-estimates the dominant pitch period every
+/// `ESTIMATE_INTERVAL` samples. Used to feed the PSOLA shifter.
+struct PitchTracker {
+    buf: Vec<f32>,
+    write_idx: usize,
+    counter: usize,
+    period: f32, // samples; 0 = unpitched
+    sample_rate: f32,
+}
+
+const PITCH_BUF_LEN: usize = 4096;
+const PITCH_ESTIMATE_INTERVAL: usize = 1024;
+
+impl PitchTracker {
+    fn new(sample_rate: f32) -> Self {
+        Self {
+            buf: vec![0.0; PITCH_BUF_LEN],
+            write_idx: 0,
+            counter: 0,
+            period: 0.0,
+            sample_rate,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, x: f32) {
+        self.buf[self.write_idx] = x;
+        self.write_idx = (self.write_idx + 1) % PITCH_BUF_LEN;
+        self.counter += 1;
+        if self.counter >= PITCH_ESTIMATE_INTERVAL {
+            self.counter = 0;
+            self.estimate();
+        }
+    }
+
+    fn estimate(&mut self) {
+        let n = self.buf.len();
+        // Linearize ring buffer into a temporary
+        let mut lin = [0.0_f32; PITCH_BUF_LEN];
+        for i in 0..n { lin[i] = self.buf[(self.write_idx + i) % n]; }
+
+        // Skip silent buffers — keep previous estimate
+        let mut e0 = 0.0_f32;
+        for s in lin.iter() { e0 += s * s; }
+        if e0 < 1e-3 {
+            // very quiet — reset to "unknown" so PSOLA falls back to Hann
+            self.period = 0.0;
+            return;
+        }
+
+        // Search range: 60 Hz .. 1500 Hz (covers most musical content)
+        let min_lag = ((self.sample_rate / 1500.0) as usize).max(16);
+        let max_lag = ((self.sample_rate / 60.0) as usize).min(n / 2);
+
+        let mut best_lag = 0usize;
+        let mut best_norm = 0.0_f32;
+        for lag in min_lag..=max_lag {
+            let m = n - lag;
+            let mut corr = 0.0_f32;
+            let mut e_lag = 0.0_f32;
+            for i in 0..m {
+                let a = lin[i];
+                let b = lin[i + lag];
+                corr += a * b;
+                e_lag += b * b;
+            }
+            let denom = (e0 * e_lag).sqrt().max(1e-9);
+            let norm = corr / denom;
+            if norm > best_norm {
+                best_norm = norm;
+                best_lag = lag;
+            }
+        }
+
+        if best_norm > 0.35 && best_lag > 0 {
+            // Smooth toward new estimate
+            let new_p = best_lag as f32;
+            if self.period < 1.0 { self.period = new_p; }
+            else { self.period = self.period * 0.5 + new_p * 0.5; }
+        } else {
+            self.period = 0.0;
+        }
+    }
+
+    #[inline]
+    fn period(&self) -> f32 { self.period }
+}
 
 pub struct Mooltitwap {
     params: Arc<PetalParams>,
@@ -38,9 +127,13 @@ pub struct Mooltitwap {
     fb_state_l: f32,
     fb_state_r: f32,
 
-    // Filter
-    svf_l: Svf,
-    svf_r: Svf,
+    // Per-tap filters (one SVF per tap, per channel)
+    tap_svf_l: [Svf; NUM_TAPS],
+    tap_svf_r: [Svf; NUM_TAPS],
+
+    // Pitch trackers for the PSOLA shifter (one per channel)
+    pitch_l: PitchTracker,
+    pitch_r: PitchTracker,
 
     // Limiter
     lim_l: PeakLimiter,
@@ -66,8 +159,10 @@ impl Default for Mooltitwap {
             fb_r: DelayLine::new(dummy_max),
             fb_state_l: 0.0,
             fb_state_r: 0.0,
-            svf_l: Svf::new(),
-            svf_r: Svf::new(),
+            tap_svf_l: core::array::from_fn(|_| Svf::new()),
+            tap_svf_r: core::array::from_fn(|_| Svf::new()),
+            pitch_l: PitchTracker::new(48_000.0),
+            pitch_r: PitchTracker::new(48_000.0),
             lim_l: PeakLimiter::new(48_000.0),
             lim_r: PeakLimiter::new(48_000.0),
             lfo_phase: 0.0,
@@ -119,6 +214,8 @@ impl Plugin for Mooltitwap {
         self.fb_r = DelayLine::new(max_samples);
         self.lim_l = PeakLimiter::new(self.sample_rate);
         self.lim_r = PeakLimiter::new(self.sample_rate);
+        self.pitch_l = PitchTracker::new(self.sample_rate);
+        self.pitch_r = PitchTracker::new(self.sample_rate);
         true
     }
 
@@ -129,8 +226,8 @@ impl Plugin for Mooltitwap {
         self.fb_r.reset();
         self.fb_state_l = 0.0;
         self.fb_state_r = 0.0;
-        self.svf_l.reset();
-        self.svf_r.reset();
+        for s in self.tap_svf_l.iter_mut() { s.reset(); }
+        for s in self.tap_svf_r.iter_mut() { s.reset(); }
         self.lfo_phase = 0.0;
     }
 
@@ -210,9 +307,16 @@ impl Plugin for Mooltitwap {
             self.main_r.readers[i].set_window_ms(grain_ms, sr);
         }
 
-        self.svf_l.set(p.filter_cutoff.value(), p.filter_q.value(), sr);
-        self.svf_r.set(p.filter_cutoff.value(), p.filter_q.value(), sr);
-        let f_type = p.filter_type.value();
+        // Per-tap filter configuration
+        let mut tap_filter_types = [crate::params::FilterType::LowPass; NUM_TAPS];
+        for i in 0..NUM_TAPS {
+            let tap = &p.taps[i];
+            let cutoff = tap.filter_cutoff.value();
+            let q = tap.filter_q.value();
+            self.tap_svf_l[i].set(cutoff, q, sr);
+            self.tap_svf_r[i].set(cutoff, q, sr);
+            tap_filter_types[i] = tap.filter_type.value();
+        }
 
         let lfo_rate = p.wobble_rate.value();
         let wobble_amt = p.wobble_amount.value();
@@ -283,6 +387,12 @@ impl Plugin for Mooltitwap {
             self.main_l.delay.write(x_l + self.fb_state_l);
             self.main_r.delay.write(x_r + self.fb_state_r);
 
+            // Feed input into the pitch trackers for PSOLA-mode shifting
+            self.pitch_l.push(x_l);
+            self.pitch_r.push(x_r);
+            let period_l = self.pitch_l.period();
+            let period_r = self.pitch_r.period();
+
             let mut tap_out_l = 0.0;
             let mut tap_out_r = 0.0;
             let mut fb_tap_l = 0.0;
@@ -290,10 +400,11 @@ impl Plugin for Mooltitwap {
             for i in 0..n_active {
                 self.main_l.readers[i].set_nominal((nom_l[i] * mod_scale).max(2.0));
                 self.main_r.readers[i].set_nominal((nom_r[i] * mod_scale).max(2.0));
-                let (sl, sr_s) = if continuous_mode[i] {
+                let (mut sl, mut sr_s) = if continuous_mode[i] {
+                    // PSOLA — period-synchronous granular shifter
                     (
-                        self.main_l.readers[i].read_continuous(&self.main_l.delay),
-                        self.main_r.readers[i].read_continuous(&self.main_r.delay),
+                        self.main_l.readers[i].read_psola(&self.main_l.delay, period_l),
+                        self.main_r.readers[i].read_psola(&self.main_r.delay, period_r),
                     )
                 } else {
                     (
@@ -301,6 +412,11 @@ impl Plugin for Mooltitwap {
                         self.main_r.readers[i].read_tape_bend(&self.main_r.delay),
                     )
                 };
+
+                // Per-tap filter
+                sl = self.tap_svf_l[i].process(sl, tap_filter_types[i]);
+                sr_s = self.tap_svf_r[i].process(sr_s, tap_filter_types[i]);
+
                 let gl = sl * tap_gain[i];
                 let gr = sr_s * tap_gain[i];
                 tap_out_l += gl * tap_pan_l[i];
@@ -329,8 +445,9 @@ impl Plugin for Mooltitwap {
             let fb_read_l = self.fb_l.read(2.0);
             let fb_read_r = self.fb_r.read(2.0);
 
-            let wet_l = self.svf_l.process(tap_out_l, f_type);
-            let wet_r = self.svf_r.process(tap_out_r, f_type);
+            // Per-tap filters were applied above; wet bus is the tap sum
+            let wet_l = tap_out_l;
+            let wet_r = tap_out_r;
 
             self.fb_state_l = fb_read_l;
             self.fb_state_r = fb_read_r;

@@ -2,24 +2,33 @@ use nih_plug::prelude::*;
 
 pub const NUM_TAPS: usize = 16;
 
-/// Beat divisions for sync mode (sorted shortest -> longest).
+/// Per-tap spacing in standard music notation. Each entry is
+/// (beats_per_tap_step, label).
+///
+/// In 4/4: 1/4 = 1 beat (quarter note), 1/8 = 0.5 beats (eighth note),
+/// 1/2 = 2 beats, 1/1 = 4 beats (whole note = one bar), 4/1 = 16 beats = 4 bars.
+///
+/// Selecting "1/8" means each tap fires one 1/8 note after the previous one:
+/// tap 1 at 1×(1/8), tap 2 at 2×(1/8), tap N at N×(1/8).
 pub const SYNC_DIVS: &[(f32, &str)] = &[
-    (1.0/32.0, "1/32"),
-    (1.0/24.0, "1/16T"),
-    (1.0/16.0, "1/16"),
-    (1.0/16.0 * 1.5, "1/16."),
-    (1.0/12.0, "1/8T"),
-    (1.0/8.0,  "1/8"),
-    (1.0/8.0 * 1.5, "1/8."),
-    (1.0/6.0,  "1/4T"),
-    (1.0/4.0,  "1/4"),
-    (1.0/4.0 * 1.5, "1/4."),
-    (1.0/3.0,  "1/2T"),
-    (1.0/2.0,  "1/2"),
-    (1.0/2.0 * 1.5, "1/2."),
-    (1.0,      "1/1"),
-    (1.5,      "1/1."),
-    (2.0,      "2/1"),
+    (0.125,    "1/32"),    // 1/32 note = 1/8 beat
+    (1.0/6.0,  "1/16T"),   // 1/16 triplet
+    (0.25,     "1/16"),    // 1/16 note = 1/4 beat
+    (0.375,    "1/16."),   // dotted 1/16
+    (1.0/3.0,  "1/8T"),    // 1/8 triplet
+    (0.5,      "1/8"),     // 1/8 note = half a beat
+    (0.75,     "1/8."),    // dotted 1/8
+    (2.0/3.0,  "1/4T"),    // 1/4 triplet
+    (1.0,      "1/4"),     // quarter note = 1 beat
+    (1.5,      "1/4."),    // dotted 1/4
+    (4.0/3.0,  "1/2T"),    // 1/2 triplet
+    (2.0,      "1/2"),     // half note = 2 beats
+    (3.0,      "1/2."),    // dotted 1/2
+    (4.0,      "1/1"),     // whole note = 4 beats (1 bar)
+    (6.0,      "1/1."),    // dotted whole
+    (8.0,      "2/1"),     // 2 bars
+    (12.0,     "2/1."),    // dotted 2/1
+    (16.0,     "4/1"),     // 4 bars
 ];
 
 /// Helper: snap a normalized 0..1 value to the nearest sync-division index and return (beats, label)
@@ -172,6 +181,14 @@ pub struct TapParams {
     /// the full delay span (−0.5 .. +0.5). Drag a Grid ball horizontally to set.
     #[id = "time_offset"]
     pub time_offset: FloatParam,
+
+    // ---- Per-tap filter ----
+    #[id = "tap_filter_type"]
+    pub filter_type: EnumParam<FilterType>,
+    #[id = "tap_filter_cutoff"]
+    pub filter_cutoff: FloatParam,
+    #[id = "tap_filter_q"]
+    pub filter_q: FloatParam,
 }
 
 impl Default for TapParams {
@@ -195,6 +212,28 @@ impl Default for TapParams {
                 FloatRange::Linear { min: -0.5, max: 0.5 },
             )
             .with_smoother(SmoothingStyle::Linear(10.0)),
+            filter_type: EnumParam::new("Tap Filter Type", FilterType::LowPass),
+            filter_cutoff: FloatParam::new(
+                "Tap Cutoff",
+                20000.0,
+                FloatRange::Skewed {
+                    min: 20.0,
+                    max: 20000.0,
+                    factor: FloatRange::skew_factor(-2.0),
+                },
+            )
+            .with_unit(" Hz")
+            .with_smoother(SmoothingStyle::Logarithmic(30.0)),
+            filter_q: FloatParam::new(
+                "Tap Q",
+                0.707,
+                FloatRange::Skewed {
+                    min: 0.1,
+                    max: 16.0,
+                    factor: FloatRange::skew_factor(-1.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(30.0)),
         }
     }
 }

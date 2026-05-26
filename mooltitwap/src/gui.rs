@@ -439,7 +439,10 @@ where P::Plain: Into<f32> + Copy {
     let mut norm = param.modulated_normalized_value();
     if resp.drag_started() { setter.begin_set_parameter(param); }
     if resp.dragged() {
-        let delta = -resp.drag_delta().y * 0.005;
+        // Shift = fine adjust (8× slower for precise tuning)
+        let fine = ui.input(|i| i.modifiers.shift);
+        let mult = if fine { 0.0006 } else { 0.005 };
+        let delta = -resp.drag_delta().y * mult;
         norm = (norm + delta).clamp(0.0, 1.0);
         setter.set_parameter_normalized(param, norm);
     }
@@ -1298,7 +1301,14 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
                 });
             }
         }
-        RightTab::Filter  => draw_filter_panel(ui, rect, params, setter),
+        RightTab::Filter => {
+            for i in 0..n_active {
+                let y = row_y(i);
+                if y + row_h < rect.min.y || y > rect.max.y { continue; }
+                let r = Rect::from_min_size(Pos2::new(row_x, y), Vec2::new(row_w, row_h));
+                tap_row_filter(ui, r, i, &params.taps[i], setter);
+            }
+        }
         RightTab::XFeed   => draw_xfeed_panel(ui, rect, params, setter),
         RightTab::Diffuse => stub_panel(ui, rect, "Diffusion", "Allpass network per tap — blurs transients into smear."),
     }
@@ -1329,57 +1339,91 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
     }
 }
 
-fn draw_filter_panel(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter) {
-    let pad = 14.0;
+/// One per-tap filter row in the FILTER tab.
+fn tap_row_filter(ui: &mut Ui, rect: Rect, idx: usize, tap: &crate::params::TapParams, setter: &ParamSetter) {
+    let active = tap.active.value();
+    let alpha = if active { 1.0 } else { 0.4 };
+
+    // Row background + tap number
     {
         let p = ui.painter();
-        p.text(Pos2::new(rect.min.x + pad, rect.min.y + 14.0), Align2::LEFT_TOP,
-               "FILTER (WET BUS)",
+        p.rect_filled(rect, CornerRadius { nw: 5, ne: 5, sw: 5, se: 5 }, c::BG_SURFACE.linear_multiply(alpha));
+        p.rect_stroke(rect, CornerRadius { nw: 5, ne: 5, sw: 5, se: 5 }, Stroke::new(1.0, c::LINE_SOFT), StrokeKind::Middle);
+        p.text(Pos2::new(rect.min.x + 8.0, rect.center().y), Align2::LEFT_CENTER,
+               &format!("{:02}", idx + 1),
                FontId::new(10.0, FontFamily::Proportional), c::INK_FAINT);
     }
 
-    // Filter type segment buttons (LP / BP / HP)
-    let seg_y = rect.min.y + 36.0;
-    let seg_h = 24.0;
-    let seg_w = (rect.width() - pad * 2.0 - 4.0) / 3.0;
-    let labels = ["LP", "BP", "HP"];
-    let types  = [FilterType::LowPass, FilterType::BandPass, FilterType::HighPass];
-    let cur_t  = params.filter_type.value();
-    for i in 0..3 {
-        let r = Rect::from_min_size(
-            Pos2::new(rect.min.x + pad + i as f32 * (seg_w + 2.0), seg_y),
-            Vec2::new(seg_w, seg_h),
-        );
-        if seg_button(ui, r, labels[i], cur_t == types[i], true) {
-            setter.begin_set_parameter(&params.filter_type);
-            setter.set_parameter(&params.filter_type, types[i]);
-            setter.end_set_parameter(&params.filter_type);
-        }
+    // Clickable active-toggle dot
+    let dot_center = Pos2::new(rect.min.x + 30.0, rect.center().y);
+    let dot_rect = Rect::from_center_size(dot_center, Vec2::splat(14.0));
+    let dot_resp = ui.allocate_rect(dot_rect, Sense::click());
+    if dot_resp.clicked() {
+        setter.begin_set_parameter(&tap.active);
+        setter.set_parameter(&tap.active, !active);
+        setter.end_set_parameter(&tap.active);
     }
-
-    // CUTOFF + Q knobs
-    let knob_s = 52.0;
-    let ky = seg_y + seg_h + 36.0;
-    let cx_c = rect.min.x + rect.width() * 0.3;
-    let cx_q = rect.min.x + rect.width() * 0.7;
-    knob_at(ui, Pos2::new(cx_c, ky), knob_s, &params.filter_cutoff, setter);
-    knob_at(ui, Pos2::new(cx_q, ky), knob_s, &params.filter_q, setter);
     {
         let p = ui.painter();
-        let cutoff = params.filter_cutoff.value();
-        let cutoff_str = if cutoff >= 1000.0 { format!("{:.1} kHz", cutoff / 1000.0) }
-                         else { format!("{:.0} Hz", cutoff) };
-        p.text(Pos2::new(cx_c, ky + knob_s * 0.5 + 6.0), Align2::CENTER_TOP, "CUTOFF",
-               FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
-        p.text(Pos2::new(cx_c, ky + knob_s * 0.5 + 18.0), Align2::CENTER_TOP, &cutoff_str,
-               FontId::new(11.0, FontFamily::Proportional), c::INK);
-        p.text(Pos2::new(cx_q, ky + knob_s * 0.5 + 6.0), Align2::CENTER_TOP, "Q",
-               FontId::new(8.0, FontFamily::Proportional), c::INK_FAINT);
-        p.text(Pos2::new(cx_q, ky + knob_s * 0.5 + 18.0), Align2::CENTER_TOP,
-               &format!("{:.2}", params.filter_q.value()),
-               FontId::new(11.0, FontFamily::Proportional), c::INK);
+        if active { p.circle_filled(dot_center, 4.0, c::ACCENT); }
+        else { p.circle_stroke(dot_center, 4.0, Stroke::new(1.0, c::LINE)); }
+    }
+
+    // Type cycling button: LP → BP → HP → LP …
+    let cur_type = tap.filter_type.value();
+    let type_label = match cur_type {
+        FilterType::LowPass  => "LP",
+        FilterType::BandPass => "BP",
+        FilterType::HighPass => "HP",
+    };
+    let next_type = match cur_type {
+        FilterType::LowPass  => FilterType::BandPass,
+        FilterType::BandPass => FilterType::HighPass,
+        FilterType::HighPass => FilterType::LowPass,
+    };
+    let type_rect = Rect::from_min_size(
+        Pos2::new(rect.min.x + 46.0, rect.center().y - 9.0),
+        Vec2::new(32.0, 18.0),
+    );
+    let type_resp = ui.allocate_rect(type_rect, Sense::click());
+    if type_resp.clicked() {
+        setter.begin_set_parameter(&tap.filter_type);
+        setter.set_parameter(&tap.filter_type, next_type);
+        setter.end_set_parameter(&tap.filter_type);
+    }
+    {
+        let p = ui.painter();
+        p.rect_filled(type_rect, RR, c::ACCENT.linear_multiply(alpha));
+        p.rect_stroke(type_rect, RR, Stroke::new(1.0, c::LINE), StrokeKind::Middle);
+        p.text(type_rect.center(), Align2::CENTER_CENTER, type_label,
+               FontId::new(9.0, FontFamily::Proportional), Color32::WHITE);
+    }
+
+    // Frequency knob + value
+    let knob_s = 22.0;
+    let freq_cx = rect.min.x + 92.0;
+    knob_at(ui, Pos2::new(freq_cx, rect.center().y), knob_s, &tap.filter_cutoff, setter);
+    let cutoff = tap.filter_cutoff.value();
+    let cutoff_str = if cutoff >= 1000.0 { format!("{:.1}k", cutoff / 1000.0) }
+                     else { format!("{:.0}", cutoff) };
+    {
+        let p = ui.painter();
+        p.text(Pos2::new(freq_cx + 14.0, rect.center().y), Align2::LEFT_CENTER,
+               &cutoff_str,
+               FontId::new(9.0, FontFamily::Proportional), c::INK);
+    }
+
+    // Q knob + value
+    let q_cx = rect.min.x + 168.0;
+    knob_at(ui, Pos2::new(q_cx, rect.center().y), knob_s, &tap.filter_q, setter);
+    {
+        let p = ui.painter();
+        p.text(Pos2::new(q_cx + 14.0, rect.center().y), Align2::LEFT_CENTER,
+               &format!("Q {:.1}", tap.filter_q.value()),
+               FontId::new(9.0, FontFamily::Proportional), c::INK);
     }
 }
+
 
 fn draw_xfeed_panel(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter) {
     let pad = 14.0;
