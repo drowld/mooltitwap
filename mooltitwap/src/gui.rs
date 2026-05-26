@@ -54,6 +54,10 @@ pub struct EditorState {
     pub drag_kind: DragKind,
     /// Accumulated drag pixels for the tap-count drag-on-number widget.
     pub tap_count_drag_accum: f32,
+    /// Tap count at the moment a drag-on-number started (absolute reference).
+    pub tap_count_drag_start: i32,
+    /// Right-panel vertical scroll offset (px) when n_active rows overflow.
+    pub right_panel_scroll: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -73,6 +77,8 @@ impl Default for EditorState {
             drag_tap: None,
             drag_kind: DragKind::None,
             tap_count_drag_accum: 0.0,
+            tap_count_drag_start: 8,
+            right_panel_scroll: 0.0,
         }
     }
 }
@@ -666,10 +672,10 @@ fn draw_stems(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>,
 
     let ch_mode = params.channel_mode.value();
 
-    // L/R or M/S labels
+    // L/R or M/S labels — top vs bottom half of the visualizer
     let (top_lab, bot_lab) = match ch_mode {
         ChannelMode::Stereo => ("L", "R"),
-        ChannelMode::MidSide => ("M", "S"),
+        ChannelMode::MidSide => ("MID", "SIDE"),
         ChannelMode::Mono => ("M", "M"),
     };
     p.text(Pos2::new(rect.min.x + 10.0, draw_t + 4.0), Align2::LEFT_TOP, top_lab,
@@ -715,24 +721,36 @@ fn draw_stems(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>,
                 }
             }
             ChannelMode::MidSide => {
-                // Mid bar centered (small ±20% height), Side bars spaced 30% above/below
-                let mid_h = gain_n * max_bar * 0.4;
-                let side_h = gain_n * max_bar * 0.3 * pan.abs(); // |pan| drives side amount
+                // pan = -1 → all Mid; pan = 0 → balanced; pan = +1 → all Side
+                let mid_amt  = ((1.0 - pan) * 0.5).clamp(0.0, 1.0);
+                let side_amt = ((1.0 + pan) * 0.5).clamp(0.0, 1.0);
+                let mid_h  = gain_n * max_bar * mid_amt;
+                let side_h = gain_n * max_bar * side_amt;
                 let col = c::ACCENT.linear_multiply(op);
-                // Mid: centered horizontal bar
-                let mr = Rect::from_min_max(
-                    Pos2::new(x_l - 2.5, mid_y - mid_h * 0.5),
-                    Pos2::new(x_l + 2.5, mid_y + mid_h * 0.5),
-                );
-                p.rect_filled(mr, RR, col);
-                // Side bars top and bottom
-                if side_h > 1.0 {
-                    let s_top_y = mid_y - max_bar * 0.6;
-                    let s_bot_y = mid_y + max_bar * 0.6;
-                    p.line_segment([Pos2::new(x_l, s_top_y - side_h * 0.5), Pos2::new(x_l, s_top_y + side_h * 0.5)],
+                // MID — top half, bar at x_l (uses Time M position)
+                if mid_h > 0.5 {
+                    p.line_segment([Pos2::new(x_l, mid_y - 1.0),
+                                    Pos2::new(x_l, mid_y - mid_h)],
                                    Stroke::new(2.2, col));
-                    p.line_segment([Pos2::new(x_l, s_bot_y - side_h * 0.5), Pos2::new(x_l, s_bot_y + side_h * 0.5)],
+                    p.circle_filled(Pos2::new(x_l, mid_y - mid_h), 3.0, col);
+                }
+                // SIDE — bottom half, bar at x_r (uses Time S position)
+                if side_h > 0.5 {
+                    p.line_segment([Pos2::new(x_r, mid_y + 1.0),
+                                    Pos2::new(x_r, mid_y + side_h)],
                                    Stroke::new(2.2, col));
+                    p.circle_filled(Pos2::new(x_r, mid_y + side_h), 3.0, col);
+                }
+                let pitch = tap.pitch_semitones.value();
+                if pitch != 0 && active {
+                    let sign = if pitch > 0 { "+" } else { "" };
+                    let label_x = if mid_h >= side_h { x_l } else { x_r };
+                    let label_y = if mid_h >= side_h { mid_y - mid_h - 10.0 }
+                                  else { mid_y + side_h + 10.0 };
+                    let align = if mid_h >= side_h { Align2::CENTER_BOTTOM } else { Align2::CENTER_TOP };
+                    p.text(Pos2::new(label_x, label_y), align,
+                           &format!("{}{}", sign, pitch),
+                           FontId::new(10.0, FontFamily::Proportional), col);
                 }
             }
             ChannelMode::Mono => {
@@ -1113,23 +1131,48 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
     let row_gap = 4.0;
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
 
+    // Scroll handling — when n_active rows overflow the body height
+    let body_inner_h = rect.height() - 2.0 * pad;
+    let total_h = n_active as f32 * (row_h + row_gap);
+    let max_scroll = (total_h - body_inner_h).max(0.0);
+    // Capture mouse wheel while pointer is over the body rect
+    let hover_pos = ui.input(|i| i.pointer.hover_pos());
+    let scroll_dy = ui.input(|i| i.raw_scroll_delta.y);
+    if scroll_dy != 0.0 {
+        if let Some(pos) = hover_pos {
+            if rect.contains(pos) {
+                st.right_panel_scroll = (st.right_panel_scroll - scroll_dy).clamp(0.0, max_scroll);
+            }
+        }
+    }
+    // Clamp existing scroll in case n_active shrank
+    st.right_panel_scroll = st.right_panel_scroll.clamp(0.0, max_scroll);
+    let scroll = st.right_panel_scroll;
+
+    // Clip drawing to body rect so overflowing rows don't bleed into footer
+    let prev_clip = ui.clip_rect();
+    ui.set_clip_rect(rect);
+
+    let row_x = rect.min.x + pad;
+    let row_w = rect.width() - pad * 2.0;
+    let row_y = |i: usize| rect.min.y + pad + i as f32 * (row_h + row_gap) - scroll;
+
     match st.right_tab {
         RightTab::Pitch => {
             for i in 0..n_active {
-                let r = Rect::from_min_size(
-                    Pos2::new(rect.min.x + pad, rect.min.y + pad + i as f32 * (row_h + row_gap)),
-                    Vec2::new(rect.width() - pad * 2.0, row_h),
-                );
+                let y = row_y(i);
+                // Skip rows fully outside the visible area to save work
+                if y + row_h < rect.min.y || y > rect.max.y { continue; }
+                let r = Rect::from_min_size(Pos2::new(row_x, y), Vec2::new(row_w, row_h));
                 tap_row_pitch(ui, r, i, &params.taps[i], setter);
             }
         }
         RightTab::Pan => {
             let ms_mode = params.channel_mode.value() == ChannelMode::MidSide;
             for i in 0..n_active {
-                let r = Rect::from_min_size(
-                    Pos2::new(rect.min.x + pad, rect.min.y + pad + i as f32 * (row_h + row_gap)),
-                    Vec2::new(rect.width() - pad * 2.0, row_h),
-                );
+                let y = row_y(i);
+                if y + row_h < rect.min.y || y > rect.max.y { continue; }
+                let r = Rect::from_min_size(Pos2::new(row_x, y), Vec2::new(row_w, row_h));
                 if ms_mode {
                     // In M/S mode: pan = -1 → all Mid, pan = 0 → balanced, pan = +1 → all Side
                     tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].pan, setter,
@@ -1150,10 +1193,9 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
         }
         RightTab::Gain => {
             for i in 0..n_active {
-                let r = Rect::from_min_size(
-                    Pos2::new(rect.min.x + pad, rect.min.y + pad + i as f32 * (row_h + row_gap)),
-                    Vec2::new(rect.width() - pad * 2.0, row_h),
-                );
+                let y = row_y(i);
+                if y + row_h < rect.min.y || y > rect.max.y { continue; }
+                let r = Rect::from_min_size(Pos2::new(row_x, y), Vec2::new(row_w, row_h));
                 tap_row_slider(ui, r, i, &params.taps[i].active, &params.taps[i].gain_db, setter,
                                -60.0, 6.0, false, |v| format!("{:.0} dB", v));
             }
@@ -1161,6 +1203,31 @@ fn draw_right_body(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter: &
         RightTab::Filter => stub_panel(ui, rect, "Filter", "Per-tap SVF coming soon."),
         RightTab::XFeed  => stub_panel(ui, rect, "Crossfeed", "Route tap outputs into adjacent taps or the opposite stereo channel."),
         RightTab::Diffuse => stub_panel(ui, rect, "Diffusion", "Allpass network per tap — blurs transients into smear."),
+    }
+
+    // Restore previous clip rect — so the footer and tabs paint normally
+    ui.set_clip_rect(prev_clip);
+
+    // Slim scrollbar indicator on the right edge when content overflows
+    if max_scroll > 0.5 {
+        let track_x = rect.max.x - 4.0;
+        let track_top = rect.min.y + pad;
+        let track_bot = rect.max.y - pad;
+        let track_h = (track_bot - track_top).max(1.0);
+        let p = ui.painter();
+        p.line_segment(
+            [Pos2::new(track_x, track_top), Pos2::new(track_x, track_bot)],
+            Stroke::new(1.0, c::LINE_SOFT),
+        );
+        let visible_frac = (body_inner_h / total_h).clamp(0.05, 1.0);
+        let thumb_h = (track_h * visible_frac).max(12.0);
+        let scroll_frac = if max_scroll > 0.0 { scroll / max_scroll } else { 0.0 };
+        let thumb_top = track_top + (track_h - thumb_h) * scroll_frac;
+        let thumb_rect = Rect::from_min_size(
+            Pos2::new(track_x - 1.5, thumb_top),
+            Vec2::new(3.0, thumb_h),
+        );
+        p.rect_filled(thumb_rect, RR, c::INK_DIM);
     }
 }
 
@@ -1363,13 +1430,14 @@ fn draw_right_footer(ui: &mut Ui, rect: Rect, params: &Arc<PetalParams>, setter:
     if drag_resp.drag_started() {
         setter.begin_set_parameter(&params.num_taps_active);
         st.tap_count_drag_accum = 0.0;
+        st.tap_count_drag_start = n;  // anchor to current value
     }
     if drag_resp.dragged() {
-        st.tap_count_drag_accum -= drag_resp.drag_delta().y; // drag up = positive = more taps
-        let steps = (st.tap_count_drag_accum / 10.0) as i32;
-        if steps != 0 {
-            st.tap_count_drag_accum -= steps as f32 * 10.0;
-            let new_n = (n + steps).clamp(1, NUM_TAPS as i32);
+        // Drag up = positive = more taps. Absolute tracking: each 18px = 1 tap.
+        st.tap_count_drag_accum -= drag_resp.drag_delta().y;
+        let target = st.tap_count_drag_start + (st.tap_count_drag_accum / 18.0).round() as i32;
+        let new_n = target.clamp(1, NUM_TAPS as i32);
+        if new_n != n {
             setter.set_parameter(&params.num_taps_active, new_n);
         }
     }
