@@ -1,5 +1,5 @@
-use nih_plug::prelude::*;
-use nih_plug_egui::EguiState;
+use nice_plug::prelude::*;
+use nice_plug_egui::EguiState;
 use std::sync::Arc;
 
 pub const NUM_TAPS: usize = 16;

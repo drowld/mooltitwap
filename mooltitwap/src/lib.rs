@@ -5,7 +5,7 @@ mod gui;
 mod params;
 mod topology;
 
-use nih_plug::prelude::*;
+use nice_plug::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -343,8 +343,8 @@ impl Plugin for Mooltitwap {
         let wobble_amt = p.wobble_amount.value();
         let lfo_inc = lfo_rate / sr;
 
-        let input_gain = nih_plug::util::db_to_gain(p.input_gain.value());
-        let output_gain = nih_plug::util::db_to_gain(p.output_gain.value());
+        let input_gain = nice_plug::util::db_to_gain(p.input_gain.value());
+        let output_gain = nice_plug::util::db_to_gain(p.output_gain.value());
         let dry_wet = p.dry_wet.value();
         let feedback = p.feedback.value();
         let soft = p.soft_clip.value();
@@ -403,7 +403,7 @@ impl Plugin for Mooltitwap {
         for i in 0..NUM_TAPS {
             let active = p.taps[i].active.value() && i < n_active;
             tap_gain[i] = if active {
-                nih_plug::util::db_to_gain(p.taps[i].gain_db.value())
+                nice_plug::util::db_to_gain(p.taps[i].gain_db.value())
             } else { 0.0 };
             let pan = p.taps[i].pan.value();
             let angle = (pan + 1.0) * 0.25 * core::f32::consts::PI;
@@ -608,5 +608,5 @@ impl Vst3Plugin for Mooltitwap {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Delay, Vst3SubCategory::Stereo];
 }
 
-nih_export_clap!(Mooltitwap);
-nih_export_vst3!(Mooltitwap);
+nice_export_clap!(Mooltitwap);
+nice_export_vst3!(Mooltitwap);
