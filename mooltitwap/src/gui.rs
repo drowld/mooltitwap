@@ -17,8 +17,10 @@ use crate::params::{
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
 pub const WINDOW_W: u32 = 1080;
-pub const WINDOW_H: u32 = 720;
+pub const WINDOW_H: u32 = 636;
 const BASE_W: f32 = 1080.0;
+/// Shared card body height (logical px, pre-scale) so the three cards align.
+const CARD_BODY_H: f32 = 486.0;
 
 #[inline]
 fn read_tempo(tempo_atomic: &Arc<AtomicU32>) -> f32 {
@@ -96,8 +98,14 @@ pub fn create_editor(
             theme::install_fonts(ctx);
         },
         move |ui, setter, _queue, st| {
-            let w = egui_state_size.size().0 as f32;
-            theme::apply_zoom(ui.ctx(), (w / BASE_W).clamp(0.5, 2.5));
+            // Snap the persisted window height to the design ratio (keeps the
+            // content-fit layout correct after older sessions / width changes).
+            let (cur_w, cur_h) = egui_state_size.size();
+            let want_h = (cur_w as f32 * WINDOW_H as f32 / WINDOW_W as f32).round() as u32;
+            if cur_h.abs_diff(want_h) > 2 {
+                egui_state_size.set_requested_size((cur_w, want_h));
+            }
+            theme::apply_zoom(ui.ctx(), (cur_w as f32 / BASE_W).clamp(0.5, 2.5));
             let tempo = read_tempo(&tempo_bpm_shared);
             draw_plugin(ui, &params, setter, st, tempo);
         },
@@ -124,6 +132,7 @@ fn draw_plugin(
     let left_w = 240.0 * s;
     let right_w = 300.0 * s;
     let center_w = (avail - left_w - right_w - 2.0 * gap).max(200.0 * s);
+    let body_h = CARD_BODY_H * s;
 
     // Read tab state out of `st` so the card body closures don't need it.
     let mut viz_mode = st.viz_mode;
@@ -134,13 +143,14 @@ fn draw_plugin(
         ui.spacing_mut().item_spacing.x = gap;
 
         epo::card(ui, "DELAY", theme::INK2(), left_w, &mut |ui| {
+            ui.set_min_height(body_h);
             draw_left_body(ui, params, setter, tempo);
         });
 
         let (vc, _) = epo::card_tabs(
             ui, "VIEW", &["STEMS", "GRID"],
             if viz_mode == VizMode::Stems { 0 } else { 1 },
-            center_w, 380.0 * s,
+            center_w, body_h,
             &mut |ui| draw_center_body(ui, params, setter, viz_mode, tempo),
             None,
         );
@@ -152,7 +162,7 @@ fn draw_plugin(
             RightTab::XFeed => 3, RightTab::Diffuse => 4,
         };
         let (rc, _) = epo::card_tabs(
-            ui, "TAPS", &tabs, active_tab, right_w, 380.0 * s,
+            ui, "TAPS", &tabs, active_tab, right_w, body_h,
             &mut |ui| draw_right_body(ui, params, setter, right_tab),
             None,
         );
@@ -284,7 +294,7 @@ fn section_label(ui: &mut egui::Ui, text: &str, s: f32) {
 fn draw_center_body(
     ui: &mut egui::Ui,
     params: &Arc<PetalParams>,
-    _setter: &ParamSetter,
+    setter: &ParamSetter,
     viz_mode: VizMode,
     tempo: f32,
 ) {
@@ -323,6 +333,75 @@ fn draw_center_body(
         VizMode::Stems => draw_stems(&p, rect, params, &viz, tempo, is_sync, s),
         VizMode::Grid => draw_grid_viz(&p, rect, params, &viz, tempo, is_sync, s),
     }
+
+    // ── Shaping strip: two XY pads (per-channel topology shaping) ──────────
+    ui.add_space(theme::SP_SM * s);
+    let strip_h = (ui.available_height() - theme::SP_SM * s).max(96.0 * s);
+    let (strip, _) = ui.allocate_exact_size(Vec2::new(w, strip_h), Sense::hover());
+    let pad_gap = theme::SP_SM * s;
+    let pad_w = (strip.width() - pad_gap) * 0.5;
+    let l_rect = Rect::from_min_size(strip.min, Vec2::new(pad_w, strip_h));
+    let r_rect = Rect::from_min_size(Pos2::new(strip.min.x + pad_w + pad_gap, strip.min.y), Vec2::new(pad_w, strip_h));
+    let linked = params.shape_linked.value();
+    draw_xy_pad(ui, l_rect, "shape_l", "SHAPE L", &params.shape_x_l, &params.shape_y_l, setter, false, n_active, s);
+    let (xr, yr) = if linked { (&params.shape_x_l, &params.shape_y_l) } else { (&params.shape_x_r, &params.shape_y_r) };
+    draw_xy_pad(ui, r_rect, "shape_r", "SHAPE R", xr, yr, setter, linked, n_active, s);
+}
+
+// ─── XY shaping pad (rect-driven; interacts via ui.interact so it composes
+// inside an already-allocated strip). ──────────────────────────────────────
+#[allow(clippy::too_many_arguments)]
+fn draw_xy_pad(ui: &mut egui::Ui, rect: Rect, salt: &str, label: &str,
+               x_param: &FloatParam, y_param: &FloatParam, setter: &ParamSetter,
+               dim: bool, n_active: usize, s: f32) {
+    let alpha = if dim { 0.4 } else { 1.0 };
+    let sense = if dim { Sense::hover() } else { Sense::click_and_drag() };
+    let resp = ui.interact(rect, ui.id().with(salt), sense);
+    let p = ui.painter();
+    p.rect_filled(rect, 8.0 * s, theme::INSET());
+    p.rect_stroke(rect, 8.0 * s, Stroke::new(1.0 * s, theme::line2()), StrokeKind::Inside);
+    for i in 1..=2 {
+        let x = rect.min.x + i as f32 * rect.width() / 3.0;
+        dashed_v(p, Pos2::new(x, rect.min.y + 4.0 * s), rect.height() - 8.0 * s, theme::line(), s);
+        let y = rect.min.y + i as f32 * rect.height() / 3.0;
+        dashed_h(p, Pos2::new(rect.min.x + 4.0 * s, y), rect.width() - 8.0 * s, theme::line(), s);
+    }
+
+    let x_norm = (x_param.value() + 1.0) * 0.5;
+    let y_norm = y_param.value();
+    if !dim {
+        if resp.drag_started() { setter.begin_set_parameter(x_param); setter.begin_set_parameter(y_param); }
+        if resp.dragged() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                let nx = ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0);
+                let ny = ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0);
+                setter.set_parameter(x_param, nx * 2.0 - 1.0);
+                setter.set_parameter(y_param, 1.0 - ny);
+            }
+        }
+        if resp.drag_stopped() { setter.end_set_parameter(x_param); setter.end_set_parameter(y_param); }
+        if resp.double_clicked() {
+            for pp in [x_param, y_param] {
+                setter.begin_set_parameter(pp);
+                setter.set_parameter_normalized(pp, pp.default_normalized_value());
+                setter.end_set_parameter(pp);
+            }
+        }
+    }
+
+    let cx = rect.min.x + x_norm * rect.width();
+    let cy = rect.min.y + (1.0 - y_norm) * rect.height();
+    let accent = theme::accent(2).linear_multiply(alpha);
+    p.line_segment([Pos2::new(rect.min.x, cy), Pos2::new(rect.max.x, cy)], Stroke::new(0.6 * s, accent.linear_multiply(0.4)));
+    p.line_segment([Pos2::new(cx, rect.min.y), Pos2::new(cx, rect.max.y)], Stroke::new(0.6 * s, accent.linear_multiply(0.4)));
+    p.circle_filled(Pos2::new(cx, cy), 10.0 * s, accent.linear_multiply(0.25));
+    p.circle_filled(Pos2::new(cx, cy), 5.0 * s, accent);
+    p.text(Pos2::new(rect.min.x + 8.0 * s, rect.min.y + 6.0 * s), Align2::LEFT_TOP, label,
+           FontId::new(8.5 * s, FontFamily::Proportional), theme::FAINT());
+    p.text(Pos2::new(rect.min.x + 8.0 * s, rect.max.y - 4.0 * s), Align2::LEFT_BOTTOM, "← tap 1",
+           FontId::new(8.0 * s, FontFamily::Monospace), theme::FAINT());
+    p.text(Pos2::new(rect.max.x - 8.0 * s, rect.max.y - 4.0 * s), Align2::RIGHT_BOTTOM,
+           &format!("tap {} →", n_active), FontId::new(8.0 * s, FontFamily::Monospace), theme::FAINT());
 }
 
 // ─── Topology mirror (matches topology.rs / lib.rs exactly) ────────────────
@@ -504,6 +583,15 @@ fn dashed_h(p: &egui::Painter, start: Pos2, width: f32, color: Color32, s: f32) 
         let x2 = (x + dash).min(start.x + width);
         p.line_segment([Pos2::new(x, start.y), Pos2::new(x2, start.y)], Stroke::new(0.8 * s, color));
         x += dash + gap;
+    }
+}
+fn dashed_v(p: &egui::Painter, start: Pos2, height: f32, color: Color32, s: f32) {
+    let (dash, gap) = (3.0 * s, 4.0 * s);
+    let mut y = start.y;
+    while y < start.y + height {
+        let y2 = (y + dash).min(start.y + height);
+        p.line_segment([Pos2::new(start.x, y), Pos2::new(start.x, y2)], Stroke::new(0.4 * s, color));
+        y += dash + gap;
     }
 }
 
