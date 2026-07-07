@@ -148,6 +148,11 @@ pub struct PetalParams {
     #[persist = "editor"]
     pub editor_state: Arc<EguiState>,
 
+    /// Cosmetic: dark (true) / light (false) theme choice, persisted so the
+    /// editor reopens in the user's chosen theme.
+    #[persist = "theme-dark"]
+    pub theme_dark: Arc<std::sync::atomic::AtomicBool>,
+
     // ---- Topology (Layer 1) ----
     /// Free mode: time in ms. Sync mode: time as 0..1 normalized over SYNC_DIVS.
     #[id = "base_time_l"]
@@ -337,6 +342,7 @@ impl Default for PetalParams {
         let time_default = 0.25; // normalized → ~125 ms in Free mode, 1/4 in Sync mode
         Self {
             editor_state: EguiState::from_size(crate::gui::WINDOW_W, crate::gui::WINDOW_H),
+            theme_dark: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             base_time_l: FloatParam::new(
                 "Base Time L",
                 time_default,

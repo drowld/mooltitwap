@@ -3,6 +3,7 @@ mod diffusion;
 mod filter;
 mod gui;
 mod params;
+mod presets;
 mod topology;
 
 use nice_plug::prelude::*;

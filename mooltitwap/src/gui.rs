@@ -41,10 +41,37 @@ pub struct EditorState {
     pub right_tab: RightTab,
     /// Tap currently being dragged in the Grid view (None = idle).
     pub drag_tap: Option<usize>,
+    /// Options (hamburger) menu open.
+    pub menu_open: bool,
+    /// One-time seed of theme/font from the persisted params.
+    pub inited: bool,
+    /// Live dark(true)/light(false); `_applied` is the edge-detect twin so the
+    /// theme is only re-applied (and persisted) when it actually changes.
+    pub theme_dark: bool,
+    pub theme_dark_applied: bool,
+    /// Font pairing: 0 = Space Grotesk / Spline Mono, 1 = Karla / Inconsolata.
+    pub font_face: u8,
+    pub font_face_applied: u8,
+    /// Window resize-drag accumulator: (start_w, start_h, acc_dx) + throttle cooldown.
+    pub drag_resize: Option<(f32, f32, f32)>,
+    pub drag_cool: u8,
+    /// Preset library (lazily loaded on first use), the currently-loaded preset
+    /// name, the browser-modal open flag, and the save-as name buffer.
+    pub library: Option<crate::presets::Library>,
+    pub current_preset: Option<String>,
+    pub browser_open: bool,
+    pub save_name: String,
 }
 impl Default for EditorState {
     fn default() -> Self {
-        Self { viz_mode: VizMode::Stems, right_tab: RightTab::Gain, drag_tap: None }
+        Self {
+            viz_mode: VizMode::Stems, right_tab: RightTab::Gain, drag_tap: None,
+            menu_open: false, inited: false,
+            theme_dark: true, theme_dark_applied: true,
+            font_face: 0, font_face_applied: 0,
+            drag_resize: None, drag_cool: 0,
+            library: None, current_preset: None, browser_open: false, save_name: String::new(),
+        }
     }
 }
 
@@ -101,20 +128,41 @@ pub fn create_editor(
         Default::default(),
         |ctx, _queue, _st| {
             theme::set_touch(false);
-            theme::set_theme(true); // dark
             theme::install_fonts(ctx);
         },
         move |ui, setter, _queue, st| {
-            // Snap the persisted window height to the design ratio (keeps the
-            // content-fit layout correct after older sessions / width changes).
+            // Seed theme from the persisted param once, forcing a single apply.
+            if !st.inited {
+                st.inited = true;
+                st.theme_dark = params.theme_dark.load(Ordering::Relaxed);
+                st.theme_dark_applied = !st.theme_dark;
+            }
+            // Apply-if-changed (before apply_zoom so the palette is correct this
+            // frame) and write the choice back to the persisted param.
+            if st.theme_dark != st.theme_dark_applied {
+                theme::set_theme(st.theme_dark);
+                params.theme_dark.store(st.theme_dark, Ordering::Relaxed);
+                st.theme_dark_applied = st.theme_dark;
+            }
+            if st.font_face != st.font_face_applied {
+                let choice = if st.font_face == 1 { theme::FontChoice::KarlaInconsolata }
+                             else { theme::FontChoice::GroteskMono };
+                theme::apply_fonts(ui.ctx(), choice);
+                st.font_face_applied = st.font_face;
+            }
+            // Window resize (aspect-locked to the design ratio) is driven by a
+            // corner grip inside draw_plugin; only snap height here when the
+            // width changed without a drag in progress.
             let (cur_w, cur_h) = egui_state_size.size();
-            let want_h = (cur_w as f32 * WINDOW_H as f32 / WINDOW_W as f32).round() as u32;
-            if cur_h.abs_diff(want_h) > 2 {
-                egui_state_size.set_requested_size((cur_w, want_h));
+            if st.drag_resize.is_none() {
+                let want_h = (cur_w as f32 * WINDOW_H as f32 / WINDOW_W as f32).round() as u32;
+                if cur_h.abs_diff(want_h) > 2 {
+                    egui_state_size.set_requested_size((cur_w, want_h));
+                }
             }
             theme::apply_zoom(ui.ctx(), (cur_w as f32 / BASE_W).clamp(0.5, 2.5));
             let tempo = read_tempo(&tempo_bpm_shared);
-            draw_plugin(ui, &params, setter, st, tempo);
+            draw_plugin(ui, &params, setter, st, &egui_state_size, tempo);
         },
     )
 }
@@ -125,13 +173,14 @@ fn draw_plugin(
     params: &Arc<PetalParams>,
     setter: &ParamSetter,
     st: &mut EditorState,
+    egui_state: &EguiState,
     tempo: f32,
 ) {
     let s = theme::ui_scale(ui);
     ui.painter().rect_filled(ui.max_rect(), 0.0, theme::PAPER());
 
     let margin = theme::SP_XL * s;
-    draw_header(ui, params, s);
+    draw_header(ui, params, setter, st, s);
     ui.add_space(theme::SP_MD * s);
 
     let avail = ui.available_width() - 2.0 * margin;
@@ -187,27 +236,213 @@ fn draw_plugin(
 
     ui.add_space(theme::SP_MD * s);
     draw_footer(ui, params, setter, tempo, margin, s);
+
+    draw_menu(ui, st, margin, s);
+    draw_browser(ui, params, setter, st, s);
+    draw_resize_grip(ui, st, egui_state, s);
+}
+
+// ─── Preset helpers ────────────────────────────────────────────────────────
+fn ensure_library(st: &mut EditorState) {
+    if st.library.is_none() {
+        st.library = Some(crate::presets::Library::load());
+    }
+}
+fn preset_load(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, name: &str) {
+    ensure_library(st);
+    let snap = st.library.as_ref()
+        .and_then(|l| l.get(name))
+        .map(|p| (p.values.clone(), p.values_format));
+    if let Some((values, fmt)) = snap {
+        crate::presets::apply(params, setter, &values, fmt);
+        st.current_preset = Some(name.to_string());
+    }
+}
+fn preset_step(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, delta: i32) {
+    ensure_library(st);
+    let names = st.library.as_ref().map(|l| l.names()).unwrap_or_default();
+    if names.is_empty() { return; }
+    let cur = st.current_preset.as_ref()
+        .and_then(|c| names.iter().position(|n| n == c))
+        .unwrap_or(0);
+    let next = (cur as i32 + delta).rem_euclid(names.len() as i32) as usize;
+    let name = names[next].clone();
+    preset_load(st, params, setter, &name);
+}
+fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) {
+    ensure_library(st);
+    if let Some(lib) = st.library.as_mut() {
+        if lib.save_as(name, params) {
+            st.current_preset = Some(name.to_string());
+        }
+    }
+}
+
+// ─── Preset browser modal ──────────────────────────────────────────────────
+fn draw_browser(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState, s: f32) {
+    if !st.browser_open { return; }
+    let screen = ui.ctx().screen_rect();
+    let names = st.library.as_ref().map(|l| l.names()).unwrap_or_default();
+    let cur = st.current_preset.clone();
+    let mut do_load: Option<String> = None;
+    let mut do_save = false;
+    let mut do_close = false;
+
+    // scrim (own Area, drawn under the panel)
+    egui::Area::new(egui::Id::new("mtw_browser_scrim"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ui.ctx(), |ui| {
+            let backdrop = ui.allocate_rect(screen, Sense::click());
+            ui.painter().rect_filled(screen, 0.0, theme::scrim());
+            if backdrop.clicked() { do_close = true; }
+        });
+
+    // panel (Area on top)
+    let w = 420.0 * s;
+    egui::Area::new(egui::Id::new("mtw_browser_panel"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(Pos2::new(screen.center().x - w * 0.5, screen.min.y + 72.0 * s))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(theme::FRAME())
+                .stroke(Stroke::new(1.0 * s, theme::line2()))
+                .corner_radius(12.0 * s)
+                .inner_margin(egui::Margin::same((theme::SP_MD * s) as i8))
+                .show(ui, |ui| {
+                    ui.set_width(w);
+                    ui.spacing_mut().item_spacing = Vec2::splat(theme::SP_XS * s);
+                    ui.label(RichText::new("PRESETS").size(theme::FS_LABEL * s).color(theme::SOFT()).strong());
+                    ui.add_space(theme::SP_XS * s);
+                    egui::ScrollArea::vertical().max_height(240.0 * s).show(ui, |ui| {
+                        if names.is_empty() {
+                            epo::hint(ui, "no saved presets yet — set the controls and SAVE below");
+                        }
+                        for n in &names {
+                            let sel = cur.as_deref() == Some(n.as_str());
+                            if epo::chip(ui, n, sel) { do_load = Some(n.clone()); }
+                        }
+                    });
+                    ui.add_space(theme::SP_SM * s);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut st.save_name)
+                            .hint_text("save as…")
+                            .desired_width(w * 0.5));
+                        if epo::chip(ui, "SAVE", false) { do_save = true; }
+                        if epo::chip(ui, "CLOSE", false) { do_close = true; }
+                    });
+                });
+        });
+
+    if let Some(n) = do_load { preset_load(st, params, setter, &n); st.browser_open = false; }
+    if do_save {
+        let n = st.save_name.trim().to_string();
+        if !n.is_empty() { preset_save(st, params, &n); st.save_name.clear(); st.browser_open = false; }
+    }
+    if do_close { st.browser_open = false; }
+}
+
+// ─── Options menu (hamburger) — egui Area anchored under the header ────────
+fn draw_menu(ui: &mut egui::Ui, st: &mut EditorState, margin: f32, s: f32) {
+    if !st.menu_open { return; }
+    let anchor = ui.ctx().screen_rect().min + Vec2::new(margin, 44.0 * s);
+    egui::Area::new(egui::Id::new("mtw_options_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(anchor)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(theme::PANEL())
+                .stroke(Stroke::new(1.0 * s, theme::line2()))
+                .corner_radius(10.0 * s)
+                .inner_margin(egui::Margin::same((theme::SP_MD * s) as i8))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(theme::SP_SM * s);
+                    ui.label(RichText::new("OPTIONS").size(theme::FS_LABEL * s).color(theme::SOFT()).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("THEME").size(theme::FS_LABEL * s).color(theme::FAINT()));
+                        if epo::chip(ui, if st.theme_dark { "DARK" } else { "LIGHT" }, true) {
+                            st.theme_dark = !st.theme_dark;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("FONT").size(theme::FS_LABEL * s).color(theme::FAINT()));
+                        if epo::chip(ui, "GROTESK", st.font_face == 0) { st.font_face = 0; }
+                        if epo::chip(ui, "KARLA", st.font_face == 1) { st.font_face = 1; }
+                    });
+                    ui.add_space(theme::SP_XS * s);
+                    if epo::chip(ui, "✕ CLOSE", false) { st.menu_open = false; }
+                });
+        });
+}
+
+// ─── Resize grip — bottom-right, aspect-locked to the design ratio ─────────
+fn draw_resize_grip(ui: &mut egui::Ui, st: &mut EditorState, egui_state: &EguiState, s: f32) {
+    let screen = ui.ctx().screen_rect();
+    let grip = 22.0 * s;
+    egui::Area::new(egui::Id::new("mtw_resize_grip"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(screen.max.x - grip, screen.max.y - grip))
+        .show(ui.ctx(), |aui| {
+            let (rect, resp) = aui.allocate_exact_size(Vec2::new(grip, grip), Sense::drag());
+            let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+            let col = if resp.hovered() || resp.dragged() { theme::INK2() } else { theme::FAINT() };
+            for i in 1..=3 {
+                let off = grip * (i as f32) / 4.0;
+                aui.painter().line_segment(
+                    [egui::pos2(rect.max.x - off, rect.max.y - 2.0 * s), egui::pos2(rect.max.x - 2.0 * s, rect.max.y - off)],
+                    Stroke::new(1.4 * s, col),
+                );
+            }
+            if resp.drag_started() {
+                let (w, h) = egui_state.size();
+                st.drag_resize = Some((w as f32, h as f32, 0.0));
+            }
+            if let Some((w0, h0, acc0)) = st.drag_resize {
+                let acc = acc0 + resp.drag_delta().x;
+                st.drag_resize = Some((w0, h0, acc));
+                st.drag_cool = st.drag_cool.saturating_sub(1);
+                let new_w = (w0 + acc).clamp(BASE_W * 0.6, BASE_W * 2.2).round();
+                let new_h = (new_w * WINDOW_H as f32 / WINDOW_W as f32).round(); // aspect lock
+                let cur_w = egui_state.size().0;
+                if resp.drag_stopped() {
+                    egui_state.set_requested_size((new_w as u32, new_h as u32));
+                    st.drag_resize = None;
+                } else if st.drag_cool == 0 && (new_w as i64 - cur_w as i64).abs() >= 8 {
+                    egui_state.set_requested_size((new_w as u32, new_h as u32));
+                    st.drag_cool = 3;
+                }
+            }
+        });
 }
 
 // ─── Header ──────────────────────────────────────────────────────────────
-fn draw_header(ui: &mut egui::Ui, _params: &Arc<PetalParams>, s: f32) {
+fn draw_header(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState, s: f32) {
+    let mut open_browser = false;
+    let mut step = 0i32;
     ui.add_space(theme::SP_SM * s);
     ui.horizontal(|ui| {
         ui.add_space(theme::SP_LG * s);
         ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
-        let _ = epo::menu_button(ui);
+        if epo::menu_button(ui) { st.menu_open = !st.menu_open; }
         ui.label(RichText::new("mooltitwap").size(19.0 * s).color(theme::INK()).strong());
         ui.label(RichText::new("·").size(19.0 * s).color(theme::accent(2)));
         ui.label(
             RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                 .family(FontFamily::Monospace).size(11.0 * s).color(theme::SOFT()),
         );
-        // centered preset pill
+        // centered preset pill: ◀ prev / name → browser / ▶ next
         let pill_w = theme::PILL_MIN_W * s;
         let pad = ((ui.available_width() - pill_w) * 0.5 - theme::SP_LG * s).max(0.0);
         ui.add_space(pad);
-        let _ = epo::preset_slot(ui, "DEFAULT", theme::PILL_MIN_W, theme::TBBTN_H, "preset");
+        let label = st.current_preset.clone().unwrap_or_else(|| "INIT".to_string());
+        match epo::preset_slot(ui, &label, theme::PILL_MIN_W, theme::TBBTN_H, "preset") {
+            2 => open_browser = true,
+            d if d != 0 => step = d,
+            _ => {}
+        }
     });
+    if open_browser { st.browser_open = !st.browser_open; if st.browser_open { ensure_library(st); } }
+    if step != 0 { preset_step(st, params, setter, step); }
     ui.add_space(theme::SP_XS * s);
     let r = ui.max_rect();
     let y = ui.cursor().top();

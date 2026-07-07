@@ -1,6 +1,6 @@
 [package]
 name = "mooltitwap"
-version = "2.16.5"
+version = "2.17.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Emmanuel Bussien"]
@@ -26,3 +26,6 @@ egui = { version = "0.34.1", default-features = false, features = ["bytemuck", "
 # The shared Epoché UI kit (theme + epo painted widgets + fonts + formatters).
 epoche-ui = { path = "../../Dev/epoche-ui" }
 crossbeam = "0.8"
+# Named-preset serialization (one JSON file per preset in the user data dir).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
