@@ -1,6 +1,6 @@
 [package]
 name = "mooltitwap"
-version = "2.17.0"
+version = "2.17.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Emmanuel Bussien"]

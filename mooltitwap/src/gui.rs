@@ -18,7 +18,7 @@ use crate::params::{
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
 pub const WINDOW_W: u32 = 1080;
-pub const WINDOW_H: u32 = 636;
+pub const WINDOW_H: u32 = 656;
 const BASE_W: f32 = 1080.0;
 /// Shared card body height (logical px, pre-scale) so the three cards align.
 const CARD_BODY_H: f32 = 486.0;
@@ -60,7 +60,13 @@ pub struct EditorState {
     pub library: Option<crate::presets::Library>,
     pub current_preset: Option<String>,
     pub browser_open: bool,
+    /// Frames to ignore backdrop clicks right after opening (swallows the
+    /// opening click so the browser doesn't instantly dismiss).
+    pub browser_guard: u8,
     pub save_name: String,
+    /// Drag-on-number state: (value at drag start, accumulated px).
+    pub taps_drag: Option<(i32, f32)>,
+    pub fb_drag: Option<(f32, f32)>,
 }
 impl Default for EditorState {
     fn default() -> Self {
@@ -70,7 +76,8 @@ impl Default for EditorState {
             theme_dark: true, theme_dark_applied: true,
             font_face: 0, font_face_applied: 0,
             drag_resize: None, drag_cool: 0,
-            library: None, current_preset: None, browser_open: false, save_name: String::new(),
+            library: None, current_preset: None, browser_open: false, browser_guard: 0,
+            save_name: String::new(), taps_drag: None, fb_drag: None,
         }
     }
 }
@@ -235,7 +242,7 @@ fn draw_plugin(
     st.right_tab = right_tab;
 
     ui.add_space(theme::SP_MD * s);
-    draw_footer(ui, params, setter, tempo, margin, s);
+    draw_footer(ui, params, setter, st, tempo, margin, s);
 
     draw_menu(ui, st, margin, s);
     draw_browser(ui, params, setter, st, s);
@@ -278,7 +285,9 @@ fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) {
     }
 }
 
-// ─── Preset browser modal ──────────────────────────────────────────────────
+// ─── Preset browser modal — cumulus command-palette pattern: ONE Area at
+// Foreground, backdrop + panel click targets allocated inside it, scrim and
+// panel hand-painted, and a guard that swallows the opening click. ─────────
 fn draw_browser(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState, s: f32) {
     if !st.browser_open { return; }
     let screen = ui.ctx().screen_rect();
@@ -288,56 +297,93 @@ fn draw_browser(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSett
     let mut do_save = false;
     let mut do_close = false;
 
-    // scrim (own Area, drawn under the panel)
-    egui::Area::new(egui::Id::new("mtw_browser_scrim"))
+    let w = 460.0 * s;
+    let row_h = 30.0 * s;
+    let list_h = row_h * (names.len().clamp(1, 9) as f32);
+    let head_h = 34.0 * s;
+    let foot_h = 44.0 * s;
+    let panel = Rect::from_min_size(
+        Pos2::new(screen.center().x - w * 0.5, screen.min.y + 72.0 * s),
+        Vec2::new(w, head_h + list_h + foot_h + theme::SP_MD * s * 2.0),
+    );
+    let r12 = 12.0 * s;
+
+    egui::Area::new(egui::Id::new("mtw_browser"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .show(ui.ctx(), |ui| {
             let backdrop = ui.allocate_rect(screen, Sense::click());
-            ui.painter().rect_filled(screen, 0.0, theme::scrim());
-            if backdrop.clicked() { do_close = true; }
-        });
+            let block = ui.allocate_rect(panel, Sense::click());
+            let p = ui.painter();
+            p.rect_filled(screen, 0.0, theme::scrim());
+            p.rect_filled(panel.translate(Vec2::new(0.0, 10.0 * s)).expand(2.0 * s), r12,
+                          Color32::from_black_alpha(120));
+            p.rect_filled(panel, r12, theme::FRAME());
+            p.rect_stroke(panel, r12, Stroke::new(1.0 * s, theme::line2()), StrokeKind::Inside);
 
-    // panel (Area on top)
-    let w = 420.0 * s;
-    egui::Area::new(egui::Id::new("mtw_browser_panel"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::new(screen.center().x - w * 0.5, screen.min.y + 72.0 * s))
-        .show(ui.ctx(), |ui| {
-            egui::Frame::new()
-                .fill(theme::FRAME())
-                .stroke(Stroke::new(1.0 * s, theme::line2()))
-                .corner_radius(12.0 * s)
-                .inner_margin(egui::Margin::same((theme::SP_MD * s) as i8))
-                .show(ui, |ui| {
-                    ui.set_width(w);
-                    ui.spacing_mut().item_spacing = Vec2::splat(theme::SP_XS * s);
-                    ui.label(RichText::new("PRESETS").size(theme::FS_LABEL * s).color(theme::SOFT()).strong());
-                    ui.add_space(theme::SP_XS * s);
-                    egui::ScrollArea::vertical().max_height(240.0 * s).show(ui, |ui| {
-                        if names.is_empty() {
-                            epo::hint(ui, "no saved presets yet — set the controls and SAVE below");
-                        }
-                        for n in &names {
-                            let sel = cur.as_deref() == Some(n.as_str());
-                            if epo::chip(ui, n, sel) { do_load = Some(n.clone()); }
-                        }
-                    });
-                    ui.add_space(theme::SP_SM * s);
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut st.save_name)
-                            .hint_text("save as…")
-                            .desired_width(w * 0.5));
-                        if epo::chip(ui, "SAVE", false) { do_save = true; }
-                        if epo::chip(ui, "CLOSE", false) { do_close = true; }
-                    });
-                });
+            // header
+            p.text(Pos2::new(panel.min.x + theme::SP_MD * s, panel.min.y + head_h * 0.5),
+                   Align2::LEFT_CENTER, "PRESETS",
+                   FontId::new(theme::FS_HEADING * s, FontFamily::Proportional), theme::INK());
+            p.text(Pos2::new(panel.max.x - theme::SP_MD * s, panel.min.y + head_h * 0.5),
+                   Align2::RIGHT_CENTER, "click outside to close",
+                   FontId::new(8.5 * s, FontFamily::Monospace), theme::FAINT());
+            p.line_segment([Pos2::new(panel.min.x, panel.min.y + head_h),
+                            Pos2::new(panel.max.x, panel.min.y + head_h)],
+                           Stroke::new(1.0 * s, theme::line()));
+
+            // preset rows (hand-painted; hover wash + accent name on select)
+            if names.is_empty() {
+                p.text(Pos2::new(panel.center().x, panel.min.y + head_h + row_h * 0.5),
+                       Align2::CENTER_CENTER, "no presets yet — type a name below and SAVE",
+                       FontId::new(9.0 * s, FontFamily::Monospace), theme::SOFT());
+            }
+            for (i, n) in names.iter().take(9).enumerate() {
+                let rr = Rect::from_min_size(
+                    Pos2::new(panel.min.x, panel.min.y + head_h + i as f32 * row_h),
+                    Vec2::new(w, row_h),
+                );
+                let resp = ui.interact(rr, ui.id().with(("preset_row", i)), Sense::click());
+                let sel = cur.as_deref() == Some(n.as_str());
+                if resp.hovered() { p.rect_filled(rr.shrink2(Vec2::new(4.0 * s, 1.0 * s)), 6.0 * s, theme::sel_bg()); }
+                let col = if sel { theme::G() } else if resp.hovered() { theme::INK() } else { theme::INK2() };
+                p.text(Pos2::new(rr.min.x + theme::SP_MD * s, rr.center().y), Align2::LEFT_CENTER,
+                       n, FontId::new(11.0 * s, FontFamily::Proportional), col);
+                if sel {
+                    p.text(Pos2::new(rr.max.x - theme::SP_MD * s, rr.center().y), Align2::RIGHT_CENTER,
+                           "●", FontId::new(8.0 * s, FontFamily::Proportional), theme::G());
+                }
+                if resp.clicked() { do_load = Some(n.clone()); }
+            }
+
+            // footer: save-as field + SAVE chip (laid out as child ui over the footer band)
+            let foot = Rect::from_min_size(
+                Pos2::new(panel.min.x + theme::SP_MD * s, panel.max.y - foot_h - theme::SP_SM * s),
+                Vec2::new(w - theme::SP_MD * s * 2.0, foot_h),
+            );
+            p.line_segment([Pos2::new(panel.min.x, foot.min.y), Pos2::new(panel.max.x, foot.min.y)],
+                           Stroke::new(1.0 * s, theme::line()));
+            let mut fui = ui.new_child(egui::UiBuilder::new().max_rect(foot.shrink2(Vec2::new(0.0, 6.0 * s))));
+            fui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
+                ui.add(egui::TextEdit::singleline(&mut st.save_name)
+                    .hint_text("save as…")
+                    .desired_width(w * 0.55));
+                if epo::chip(ui, "SAVE", false) { do_save = true; }
+            });
+
+            // click-outside dismiss, guarded against the opening click
+            if st.browser_guard > 0 {
+                st.browser_guard -= 1;
+            } else if backdrop.clicked() && !block.clicked() {
+                do_close = true;
+            }
         });
 
     if let Some(n) = do_load { preset_load(st, params, setter, &n); st.browser_open = false; }
     if do_save {
         let n = st.save_name.trim().to_string();
-        if !n.is_empty() { preset_save(st, params, &n); st.save_name.clear(); st.browser_open = false; }
+        if !n.is_empty() { preset_save(st, params, &n); st.save_name.clear(); }
     }
     if do_close { st.browser_open = false; }
 }
@@ -441,7 +487,13 @@ fn draw_header(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSette
             _ => {}
         }
     });
-    if open_browser { st.browser_open = !st.browser_open; if st.browser_open { ensure_library(st); } }
+    if open_browser {
+        st.browser_open = !st.browser_open;
+        if st.browser_open {
+            ensure_library(st);
+            st.browser_guard = 3; // swallow the opening click
+        }
+    }
     if step != 0 { preset_step(st, params, setter, step); }
     ui.add_space(theme::SP_XS * s);
     let r = ui.max_rect();
@@ -699,17 +751,26 @@ pub struct VizData {
     pub ping_pong: bool,
 }
 
+// Pick the smallest "nice" x-axis range covering `needed_secs`. The old
+// floors (2 bars / 2 s) meant short clusters never filled the view — now the
+// range adapts down to 1 beat / 250 ms so the content always fills.
 fn pick_nice_range(needed_secs: f32, sync_mode: SyncMode, tempo_bpm: f32) -> f32 {
     match sync_mode {
         SyncMode::Sync => {
             let beat_secs = 60.0 / tempo_bpm;
-            let needed_beats = (needed_secs / beat_secs).max(8.0);
-            let nice: &[f32] = &[8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0, 96.0, 128.0, 192.0, 256.0];
+            let needed_beats = (needed_secs / beat_secs).max(1.0);
+            let nice: &[f32] = &[
+                1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0,
+                64.0, 96.0, 128.0, 192.0, 256.0,
+            ];
             nice.iter().copied().find(|&r| needed_beats <= r * 1.05).unwrap_or(256.0) * beat_secs
         }
         SyncMode::Free => {
-            let nice_ms: &[f32] = &[2000.0, 3000.0, 4000.0, 6000.0, 8000.0, 12000.0, 16000.0, 24000.0, 32000.0, 48000.0, 64000.0];
-            let needed_ms = (needed_secs * 1000.0).max(2000.0);
+            let nice_ms: &[f32] = &[
+                250.0, 375.0, 500.0, 750.0, 1000.0, 1500.0, 2000.0, 3000.0, 4000.0,
+                6000.0, 8000.0, 12000.0, 16000.0, 24000.0, 32000.0, 48000.0, 64000.0,
+            ];
+            let needed_ms = (needed_secs * 1000.0).max(250.0);
             nice_ms.iter().copied().find(|&r| needed_ms <= r * 1.05).unwrap_or(64000.0) * 0.001
         }
     }
@@ -865,6 +926,8 @@ fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &Vi
     paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, viz.grid_range_secs, tempo_bpm, is_sync, rect.max.y - 6.0 * s, s);
 
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+    // Bar width scales with the smallest gap between direct taps: chunky
+    // rounded pills when there's room, hairlines when the cluster is dense.
     let bar_w = {
         let mut min_gap_px = draw_w;
         let mut prev_x: Option<f32> = None;
@@ -874,7 +937,17 @@ fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &Vi
             if let Some(px) = prev_x { let g = (x - px).abs(); if g > 0.5 { min_gap_px = min_gap_px.min(g); } }
             prev_x = Some(x);
         }
-        (min_gap_px * 0.55).clamp(0.5, (4.0 * s).max(0.5))
+        (min_gap_px * 0.6).clamp(1.5 * s, 8.0 * s)
+    };
+    // Rounded pill bar: |x| centered, from y0 (top) to y1 (bottom).
+    let bar = |x: f32, y0: f32, y1: f32, w: f32, col: Color32| {
+        if y1 - y0 < 0.5 { return; }
+        let hw = (w * 0.5).max(0.5);
+        p.rect_filled(
+            Rect::from_min_max(Pos2::new(x - hw, y0), Pos2::new(x + hw, y1)),
+            hw, // full rounding = pill caps
+            col,
+        );
     };
 
     for k in 0..=viz.n_echo_cycles {
@@ -885,7 +958,7 @@ fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &Vi
             let tap = &params.taps[i];
             let active = tap.active.value();
             let height_scale = if k == 0 { 1.0 } else { cycle_gain.cbrt() };
-            let opacity_scale = if k == 0 { 1.0 } else { cycle_gain.sqrt().max(0.18) };
+            let opacity_scale = if k == 0 { 1.0 } else { (cycle_gain.sqrt() * 0.7).max(0.12) };
             let op = if active { opacity_scale } else { 0.22 };
             let gain_n = (gain_db_to_pos(tap.gain_db.value()) * height_scale).clamp(0.0, 1.0);
             let raw_pan = tap.pan.value();
@@ -898,33 +971,30 @@ fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &Vi
             let x_r = draw_l + t_b.min(1.0) * draw_w;
             let (in_l, in_r) = (t_a <= 1.0, t_b <= 1.0);
             let col = tap_color(i, n_active).linear_multiply(op);
-            let bw = if k == 0 { bar_w } else { (bar_w * 0.7).max(0.5) };
+            let bw = if k == 0 { bar_w } else { (bar_w * 0.6).max(1.0) };
             match ch_mode {
                 ChannelMode::Stereo => {
                     let l_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).cos();
                     let r_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).sin();
                     let (h_l, h_r) = (gain_n * l_w * max_bar, gain_n * r_w * max_bar);
-                    if in_l && h_l > 0.5 { p.line_segment([Pos2::new(x_l, mid_y), Pos2::new(x_l, mid_y - h_l)], Stroke::new(bw, col)); }
-                    if in_r && h_r > 0.5 { p.line_segment([Pos2::new(x_r, mid_y), Pos2::new(x_r, mid_y + h_r)], Stroke::new(bw, col)); }
+                    if in_l { bar(x_l, mid_y - h_l, mid_y, bw, col); }
+                    if in_r { bar(x_r, mid_y, mid_y + h_r, bw, col); }
                 }
                 ChannelMode::MidSide => {
                     let mid_amt = ((1.0 - pan) * 0.5).clamp(0.0, 1.0);
                     let side_amt = ((1.0 + pan) * 0.5).clamp(0.0, 1.0);
                     let mid_h = gain_n * max_bar * 0.5 * mid_amt;
                     let side_h = gain_n * max_bar * 0.35 * side_amt;
-                    let half_w = (bw * 0.5).max(0.5);
-                    if in_l && mid_h > 0.5 {
-                        p.rect_filled(Rect::from_min_max(Pos2::new(x_l - half_w, mid_y - mid_h), Pos2::new(x_l + half_w, mid_y + mid_h)), 2.0 * s, col);
-                    }
-                    if in_r && side_h > 0.5 {
+                    if in_l { bar(x_l, mid_y - mid_h, mid_y + mid_h, bw, col); }
+                    if in_r {
                         let (st_y, sb_y) = (mid_y - max_bar * 0.65, mid_y + max_bar * 0.65);
-                        p.line_segment([Pos2::new(x_r, st_y - side_h), Pos2::new(x_r, st_y + side_h)], Stroke::new(bw, col));
-                        p.line_segment([Pos2::new(x_r, sb_y - side_h), Pos2::new(x_r, sb_y + side_h)], Stroke::new(bw, col));
+                        bar(x_r, st_y - side_h, st_y + side_h, bw, col);
+                        bar(x_r, sb_y - side_h, sb_y + side_h, bw, col);
                     }
                 }
                 ChannelMode::Mono => {
                     let h = gain_n * max_bar;
-                    if in_l && h > 0.5 { p.line_segment([Pos2::new(x_l, mid_y - h * 0.5), Pos2::new(x_l, mid_y + h * 0.5)], Stroke::new(bw, col)); }
+                    if in_l { bar(x_l, mid_y - h * 0.5, mid_y + h * 0.5, bw, col); }
                 }
             }
         }
@@ -1060,8 +1130,13 @@ fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamS
                     if epo::chip(ui, lab, cur == m) { set_enum(setter, &params.crossfeed_mode, m); }
                 }
             });
-            ui.add_space(theme::SP_MD * s);
-            epo::slider(ui, setter, &params.crossfeed, "AMT", tw, cap, acc, false);
+            ui.add_space(theme::SP_XL * s);
+            let v = params.crossfeed.value();
+            let amt_str = if v < 0.01 { "OFF".to_string() } else { format!("{:.0}%", v * 100.0) };
+            ui.horizontal(|ui| {
+                ui.add_space((tw - theme::KNOB_DIAM_INSPECT - theme::KNOB_PAD_W * s) * 0.5);
+                epo::knob_ex(ui, setter, &params.crossfeed, "AMOUNT", theme::KNOB_DIAM_INSPECT, acc, false, None, Some(&amt_str));
+            });
         }
         RightTab::Diffuse => {
             let acc = Accent::Raw(tab_hue(RightTab::Diffuse));
@@ -1073,9 +1148,19 @@ fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamS
                     if epo::chip(ui, lab, cur == m) { set_enum(setter, &params.diffuse_routing, m); }
                 }
             });
+            ui.add_space(theme::SP_XL * s);
+            let v_amt = params.diffuse_amount.value();
+            let amt_str = if v_amt < 0.01 { "OFF".to_string() } else { format!("{:.0}%", v_amt * 100.0) };
+            let size_str = format!("{:.2}\u{00D7}", params.diffuse_size.value());
+            let cell = theme::KNOB_DIAM_INSPECT + theme::KNOB_PAD_W * s;
+            ui.horizontal(|ui| {
+                ui.add_space((tw - 2.0 * cell - theme::KNOB_GAP * s).max(0.0) * 0.5);
+                ui.spacing_mut().item_spacing.x = theme::KNOB_GAP * s;
+                epo::knob_ex(ui, setter, &params.diffuse_amount, "AMOUNT", theme::KNOB_DIAM_INSPECT, acc, false, None, Some(&amt_str));
+                epo::knob_ex(ui, setter, &params.diffuse_size, "SIZE", theme::KNOB_DIAM_INSPECT, acc, false, None, Some(&size_str));
+            });
             ui.add_space(theme::SP_MD * s);
-            epo::slider(ui, setter, &params.diffuse_amount, "AMT", tw, cap, acc, false);
-            epo::slider(ui, setter, &params.diffuse_size, "SIZE", tw, cap, acc, false);
+            epo::hint(ui, "8× Schroeder allpass · smaller SIZE = tighter & brighter");
         }
     }
 }
@@ -1085,6 +1170,7 @@ fn draw_footer(
     ui: &mut egui::Ui,
     params: &Arc<PetalParams>,
     setter: &ParamSetter,
+    st: &mut EditorState,
     tempo: f32,
     margin: f32,
     s: f32,
@@ -1097,18 +1183,100 @@ fn draw_footer(
         Stroke::new(1.0 * s, theme::line()),
     );
     ui.add_space(theme::SP_SM * s);
+
+    let locked = params.feedback_time_locked.value();
+    // Locked: FB TIME follows the cluster span (last active tap) — display it live.
+    let fb_time_str = if locked {
+        let n = (params.num_taps_active.value() as f32).max(1.0);
+        let base_l = params.base_time_seconds(params.base_time_l.value(), tempo);
+        let base_r = if params.time_linked.value() { base_l }
+                     else { params.base_time_seconds(params.base_time_r.value(), tempo) };
+        let span = (n * base_l).max(n * base_r);
+        if span < 1.0 { format!("{:.0} ms", span * 1000.0) } else { format!("{:.2} s", span) }
+    } else {
+        params.format_feedback_time(tempo)
+    };
+
     ui.horizontal(|ui| {
         ui.add_space(margin);
         ui.spacing_mut().item_spacing.x = theme::SP_LG * s;
         let fb_str = format!("{:.0}%", params.feedback.value() * 100.0);
         // feedback is color-coded coral (its domain)
         epo::knob_ex(ui, setter, &params.feedback, "FEEDBACK", theme::KNOB_DIAM_FX, Accent::Head(1), false, None, Some(&fb_str));
-        // FB TIME + TAPS readouts pushed to the right edge
+
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(margin);
             ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
-            let _ = epo::readout_chip(ui, "TAPS", &format!("{}", params.num_taps_active.value()));
-            let _ = epo::readout_chip(ui, "FB TIME", &params.format_feedback_time(tempo));
+
+            // TAPS — drag-on-number (vertical drag or scroll steps the count)
+            let taps_resp = epo::readout_chip(ui, "TAPS", &format!("{}", params.num_taps_active.value()))
+                .interact(Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+            let n = params.num_taps_active.value();
+            if taps_resp.drag_started() {
+                setter.begin_set_parameter(&params.num_taps_active);
+                st.taps_drag = Some((n, 0.0));
+            }
+            if let Some((n0, acc0)) = st.taps_drag {
+                let acc = acc0 - taps_resp.drag_delta().y;
+                st.taps_drag = Some((n0, acc));
+                let target = (n0 + (acc / (18.0 * s)).round() as i32).clamp(1, NUM_TAPS as i32);
+                if target != n { setter.set_parameter(&params.num_taps_active, target); }
+                if taps_resp.drag_stopped() {
+                    setter.end_set_parameter(&params.num_taps_active);
+                    st.taps_drag = None;
+                }
+            }
+            if taps_resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll.abs() > 4.0 {
+                    setter.begin_set_parameter(&params.num_taps_active);
+                    setter.set_parameter(&params.num_taps_active, (n + scroll.signum() as i32).clamp(1, NUM_TAPS as i32));
+                    setter.end_set_parameter(&params.num_taps_active);
+                }
+            }
+
+            // FB TIME mode + lock chips (mode only matters when unlocked)
+            if !locked {
+                let mode = params.feedback_time_mode.value();
+                let lab = if mode == SyncMode::Sync { "SYNC" } else { "FREE" };
+                if epo::chip_sm(ui, lab, false) {
+                    let next = if mode == SyncMode::Sync { SyncMode::Free } else { SyncMode::Sync };
+                    set_enum(setter, &params.feedback_time_mode, next);
+                }
+            }
+            if epo::chip_sm(ui, if locked { "LOCK" } else { "free" }, locked) {
+                setter.begin_set_parameter(&params.feedback_time_locked);
+                setter.set_parameter(&params.feedback_time_locked, !locked);
+                setter.end_set_parameter(&params.feedback_time_locked);
+            }
+
+            // FB TIME — drag to edit when unlocked
+            let fb_resp = epo::readout_chip(ui, "FB TIME", &fb_time_str);
+            if !locked {
+                let fb_resp = fb_resp.interact(Sense::click_and_drag())
+                    .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                if fb_resp.drag_started() {
+                    setter.begin_set_parameter(&params.feedback_time);
+                    st.fb_drag = Some((params.feedback_time.value(), 0.0));
+                }
+                if let Some((v0, acc0)) = st.fb_drag {
+                    let acc = acc0 - fb_resp.drag_delta().y;
+                    st.fb_drag = Some((v0, acc));
+                    let new_norm = if params.feedback_time_mode.value() == SyncMode::Sync {
+                        let n_divs = crate::params::SYNC_DIVS.len() as f32 - 1.0;
+                        let start_idx = (v0 * n_divs).round();
+                        ((start_idx + (acc / (14.0 * s)).round()) / n_divs).clamp(0.0, 1.0)
+                    } else {
+                        (v0 + acc * 0.003).clamp(0.0, 1.0)
+                    };
+                    setter.set_parameter(&params.feedback_time, new_norm);
+                    if fb_resp.drag_stopped() {
+                        setter.end_set_parameter(&params.feedback_time);
+                        st.fb_drag = None;
+                    }
+                }
+            }
         });
     });
 }
