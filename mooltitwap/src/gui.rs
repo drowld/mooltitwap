@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::params::{
-    ChannelMode, DelayMode, PetalParams, SyncMode, NUM_TAPS,
+    snap_to_div, ChannelMode, DelayMode, PetalParams, SpacingMode, SyncMode, NUM_TAPS,
 };
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
@@ -50,13 +50,33 @@ fn gain_db_to_pos(db: f32) -> f32 {
     ((db + 60.0) / 66.0).clamp(0.0, 1.0).powf(1.0 / GAIN_SKEW)
 }
 
-/// Per-tap gradient: tap 0 = violet accent, tap n-1 = light violet.
+/// Lighten a color toward white by `amt` (0 = unchanged, 1 = white).
+fn lighten(c: Color32, amt: f32) -> Color32 {
+    let f = |v: u8| (v as f32 + (255.0 - v as f32) * amt).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
+}
+
+/// Identity hue for each right-panel tab (the Inertia accent ring).
+fn tab_hue(tab: RightTab) -> Color32 {
+    theme::accent(match tab {
+        RightTab::Pan => 0,     // teal
+        RightTab::Gain => 4,    // green
+        RightTab::Filter => 3,  // amber
+        RightTab::XFeed => 1,   // coral
+        RightTab::Diffuse => 2, // violet
+    })
+}
+
+/// One color per tab, gradient bright (tap 0) → light (tap n-1).
+fn tab_grad(tab: RightTab, i: usize, n_active: usize) -> Color32 {
+    let t = if n_active <= 1 { 0.0 } else { i as f32 / (n_active - 1) as f32 };
+    lighten(tab_hue(tab), t * 0.6)
+}
+
+/// Visualizer per-tap gradient — mooltitwap's violet signature, bright → light.
 fn tap_color(i: usize, n_active: usize) -> Color32 {
     let t = if n_active <= 1 { 0.0 } else { i as f32 / (n_active - 1) as f32 };
-    let r = (0xa0_u8 as f32 + t * (0xc9_u8 - 0xa0_u8) as f32).round() as u8;
-    let g = (0x86_u8 as f32 + t * (0xb8_u8 - 0x86_u8) as f32).round() as u8;
-    let b = (0xe8_u8 as f32 + t * (0xf2_u8 - 0xe8_u8) as f32).round() as u8;
-    Color32::from_rgb(r, g, b)
+    lighten(theme::accent(2), t * 0.55)
 }
 
 // ─── Editor entry ────────────────────────────────────────────────────────
@@ -260,43 +280,359 @@ fn section_label(ui: &mut egui::Ui, text: &str, s: f32) {
     ui.add_space(theme::SP_XS * s);
 }
 
-// ─── CENTER card body — visualizer (placeholder well for first cut) ────────
+// ─── CENTER card body — the delay visualizer (stems / grid) ────────────────
 fn draw_center_body(
     ui: &mut egui::Ui,
     params: &Arc<PetalParams>,
     _setter: &ParamSetter,
-    _viz_mode: VizMode,
-    _tempo: f32,
+    viz_mode: VizMode,
+    tempo: f32,
 ) {
     let s = theme::ui_scale(ui);
+    let viz = compute_viz_data(params, tempo);
+    let is_sync = params.sync_mode.value() == SyncMode::Sync;
+    let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+
     let w = ui.available_width();
     let h = 300.0 * s;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-    let p = ui.painter();
+    let p = ui.painter().clone();
+    // kit `.viz` well: INSET fill + strong hairline border.
     p.rect_filled(rect, 13.0 * s, theme::INSET());
     p.rect_stroke(rect, 13.0 * s, Stroke::new(1.0 * s, theme::line2()), StrokeKind::Inside);
 
-    let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
-    // Minimal stems preview: evenly spaced tap bars (real time-domain viz ported next).
-    let pad = 16.0 * s;
-    let inner = Rect::from_min_max(
-        Pos2::new(rect.left() + pad, rect.top() + pad),
-        Pos2::new(rect.right() - pad, rect.bottom() - pad),
-    );
-    let mid = inner.center().y;
-    for i in 0..n_active {
-        let t = (i as f32 + 0.5) / n_active as f32;
-        let x = inner.left() + t * inner.width();
-        let gain_n = gain_db_to_pos(params.taps[i].gain_db.value());
-        let hgt = gain_n * inner.height() * 0.45;
-        let col = tap_color(i, n_active);
-        p.line_segment([Pos2::new(x, mid), Pos2::new(x, mid - hgt)], Stroke::new(3.0 * s, col));
-        p.line_segment([Pos2::new(x, mid), Pos2::new(x, mid + hgt)], Stroke::new(3.0 * s, col));
-    }
-    p.text(Pos2::new(rect.left() + pad, rect.top() + pad), Align2::LEFT_TOP,
-           "STEMS", FontId::new(9.0 * s, FontFamily::Monospace), theme::SOFT());
+    // corner caption
+    let ch_label = match params.channel_mode.value() {
+        ChannelMode::Stereo => "STEREO", ChannelMode::MidSide => "MID/SIDE", ChannelMode::Mono => "MONO",
+    };
+    let len_str = match params.sync_mode.value() {
+        SyncMode::Sync => {
+            let beats = viz.grid_range_secs * tempo / 60.0;
+            if beats == beats.floor() { format!("{:.0}/1", beats) } else { format!("{:.1} beat", beats) }
+        }
+        SyncMode::Free => {
+            if viz.grid_range_secs < 1.0 { format!("{:.0} ms", viz.grid_range_secs * 1000.0) }
+            else { format!("{:.2} s", viz.grid_range_secs) }
+        }
+    };
+    p.text(Pos2::new(rect.max.x - 13.0 * s, rect.min.y + 9.0 * s), Align2::RIGHT_TOP,
+           &format!("{} · TAPS {} · {}", ch_label, n_active, len_str),
+           FontId::new(9.0 * s, FontFamily::Monospace), theme::SOFT());
 
-    epo::hint(ui, "visualizer port in progress — bars are a placeholder");
+    match viz_mode {
+        VizMode::Stems => draw_stems(&p, rect, params, &viz, tempo, is_sync, s),
+        VizMode::Grid => draw_grid_viz(&p, rect, params, &viz, tempo, is_sync, s),
+    }
+}
+
+// ─── Topology mirror (matches topology.rs / lib.rs exactly) ────────────────
+fn compute_positions(spacing: SpacingMode, shape_x: f32, shape_y: f32, n_active: usize) -> [f32; NUM_TAPS] {
+    let n_active = n_active.clamp(1, NUM_TAPS);
+    let first = 1.0 / NUM_TAPS as f32;
+    let last = n_active as f32 / NUM_TAPS as f32;
+    let mut out = [0.0; NUM_TAPS];
+    for i in 0..NUM_TAPS {
+        if i < n_active {
+            let t = if n_active == 1 { 0.0 } else { i as f32 / (n_active - 1) as f32 };
+            let base = match spacing {
+                SpacingMode::Linear => t,
+                SpacingMode::Exponential => t.powf(2.0).min(1.0),
+                SpacingMode::Logarithmic => t.sqrt(),
+                SpacingMode::Euclidean => t,
+            };
+            out[i] = first + bias_curve(sigmoid_blend(base, shape_y), shape_x) * (last - first);
+        } else {
+            out[i] = (i + 1) as f32 / NUM_TAPS as f32;
+        }
+    }
+    out
+}
+fn sigmoid_blend(x: f32, y: f32) -> f32 {
+    if y <= 0.0 { return x; }
+    let sm = x * x * (3.0 - 2.0 * x);
+    x * (1.0 - y) + sm * y
+}
+fn bias_curve(v: f32, x: f32) -> f32 {
+    if x.abs() < 1e-6 { return v; }
+    let power = if x >= 0.0 { 1.0 / (1.0 + 2.0 * x) } else { 1.0 + 2.0 * (-x) };
+    v.powf(power)
+}
+
+const MAX_ECHO_CYCLES: usize = 64;
+const ECHO_THRESHOLD: f32 = 0.001;
+
+pub struct VizData {
+    pub times_l: [f32; NUM_TAPS],
+    pub times_r: [f32; NUM_TAPS],
+    pub grid_range_secs: f32,
+    pub times_l_grid: [f32; NUM_TAPS],
+    pub grid_range_secs_taps_only: f32,
+    pub fb_cycle_norm_l: f32,
+    pub fb_cycle_norm_r: f32,
+    pub n_echo_cycles: usize,
+    pub feedback: f32,
+    pub ping_pong: bool,
+}
+
+fn pick_nice_range(needed_secs: f32, sync_mode: SyncMode, tempo_bpm: f32) -> f32 {
+    match sync_mode {
+        SyncMode::Sync => {
+            let beat_secs = 60.0 / tempo_bpm;
+            let needed_beats = (needed_secs / beat_secs).max(8.0);
+            let nice: &[f32] = &[8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0, 96.0, 128.0, 192.0, 256.0];
+            nice.iter().copied().find(|&r| needed_beats <= r * 1.05).unwrap_or(256.0) * beat_secs
+        }
+        SyncMode::Free => {
+            let nice_ms: &[f32] = &[2000.0, 3000.0, 4000.0, 6000.0, 8000.0, 12000.0, 16000.0, 24000.0, 32000.0, 48000.0, 64000.0];
+            let needed_ms = (needed_secs * 1000.0).max(2000.0);
+            nice_ms.iter().copied().find(|&r| needed_ms <= r * 1.05).unwrap_or(64000.0) * 0.001
+        }
+    }
+}
+
+fn compute_viz_data(params: &PetalParams, tempo_bpm: f32) -> VizData {
+    let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+    let pos_l = compute_positions(params.spacing_mode.value(), params.shape_x_l.value(), params.shape_y_l.value(), n_active);
+    let pos_r = if params.shape_linked.value() { pos_l }
+        else { compute_positions(params.spacing_mode.value(), params.shape_x_r.value(), params.shape_y_r.value(), n_active) };
+
+    let time_l_norm = params.base_time_l.value();
+    let time_r_norm = if params.time_linked.value() { time_l_norm } else { params.base_time_r.value() };
+    let base_secs_l = params.base_time_seconds(time_l_norm, tempo_bpm);
+    let base_secs_r = params.base_time_seconds(time_r_norm, tempo_bpm);
+    let span_l = NUM_TAPS as f32 * base_secs_l;
+    let span_r = NUM_TAPS as f32 * base_secs_r;
+    let max_tap_secs = (pos_l[n_active - 1] * span_l).max(pos_r[n_active - 1] * span_r).max(0.001);
+
+    let feedback = params.feedback.value();
+    let cluster_span_secs = max_tap_secs;
+    let fb_cycle_secs = if params.feedback_time_locked.value() { cluster_span_secs }
+        else { params.feedback_time_seconds(tempo_bpm).max(cluster_span_secs) }.max(1e-6);
+
+    let n_echo_cycles = if feedback < 1e-3 || fb_cycle_secs < 1e-6 { 0 }
+        else if feedback >= 0.999 { MAX_ECHO_CYCLES }
+        else { ((ECHO_THRESHOLD.ln() / feedback.ln()).ceil() as usize).min(MAX_ECHO_CYCLES) };
+
+    let sync_mode = params.sync_mode.value();
+    // Show the cluster + a readable handful of repeats (not the full -60 dB tail).
+    const SHOWN_ECHO_CYCLES: usize = 4;
+    let shown = n_echo_cycles.min(SHOWN_ECHO_CYCLES);
+    let grid_range_secs = pick_nice_range(max_tap_secs * 2.0 + shown as f32 * fb_cycle_secs, sync_mode, tempo_bpm);
+    let grid_range_secs_taps_only = pick_nice_range(max_tap_secs * 1.10, sync_mode, tempo_bpm);
+
+    let mut times_l = [0.0f32; NUM_TAPS];
+    let mut times_r = [0.0f32; NUM_TAPS];
+    let mut times_l_grid = [0.0f32; NUM_TAPS];
+    for i in 0..NUM_TAPS {
+        let offset = params.taps[i].time_offset.value();
+        times_l[i] = ((pos_l[i] * span_l / grid_range_secs) + offset).clamp(0.0, 1.0);
+        times_r[i] = ((pos_r[i] * span_r / grid_range_secs) + offset).clamp(0.0, 1.0);
+        times_l_grid[i] = ((pos_l[i] * span_l / grid_range_secs_taps_only) + offset).clamp(0.0, 1.0);
+    }
+
+    let ping_pong = matches!(params.crossfeed_mode.value(), crate::params::CrossfeedMode::PingPong);
+    VizData {
+        times_l, times_r, grid_range_secs, times_l_grid, grid_range_secs_taps_only,
+        fb_cycle_norm_l: fb_cycle_secs / grid_range_secs,
+        fb_cycle_norm_r: fb_cycle_secs / grid_range_secs,
+        n_echo_cycles, feedback, ping_pong,
+    }
+}
+
+// ─── Timeline grid (beats in Sync, ms in Free) ─────────────────────────────
+#[allow(clippy::too_many_arguments)]
+fn paint_timeline_grid(
+    p: &egui::Painter, draw_l: f32, draw_r: f32, draw_t: f32, draw_b: f32,
+    grid_range_secs: f32, tempo_bpm: f32, is_sync: bool, label_y: f32, s: f32,
+) {
+    let draw_w = draw_r - draw_l;
+    if is_sync {
+        let beat_secs = 60.0 / tempo_bpm;
+        let total_beats = (grid_range_secs / beat_secs).max(0.001);
+        let (major, minor) = if total_beats <= 0.5 { (0.125_f32, 0.0625_f32) }
+            else if total_beats <= 1.0 { (0.25, 0.125) } else if total_beats <= 2.0 { (0.5, 0.25) }
+            else if total_beats <= 4.0 { (1.0, 0.5) } else if total_beats <= 8.0 { (2.0, 1.0) }
+            else if total_beats <= 16.0 { (4.0, 2.0) } else if total_beats <= 32.0 { (8.0, 4.0) }
+            else if total_beats <= 64.0 { (16.0, 8.0) } else if total_beats <= 128.0 { (32.0, 16.0) }
+            else { (64.0, 32.0) };
+        let mut beat = 0.0_f32;
+        let eps = minor * 0.01;
+        while beat <= total_beats + eps {
+            let x = draw_l + (beat / total_beats) * draw_w;
+            let is_major = (beat / major - (beat / major).round()).abs() < 0.02;
+            let (sw, col) = if is_major { (1.0 * s, theme::line2()) } else { (0.5 * s, theme::line()) };
+            p.line_segment([Pos2::new(x, draw_t), Pos2::new(x, draw_b)], Stroke::new(sw, col));
+            if is_major {
+                let rounded = (beat * 100.0).round() / 100.0;
+                let label = if rounded == 0.0 { "0".to_string() }
+                    else if rounded == rounded.floor() { format!("{:.0}", rounded) }
+                    else if (rounded * 2.0).round() == rounded * 2.0 { format!("{:.1}", rounded) }
+                    else { format!("{:.2}", rounded) };
+                p.text(Pos2::new(x, label_y), Align2::CENTER_BOTTOM, &label,
+                       FontId::new(9.0 * s, FontFamily::Monospace), theme::FAINT());
+            }
+            beat += minor;
+        }
+    } else {
+        let total_ms = grid_range_secs * 1000.0;
+        let (major, minor) = if total_ms <= 250.0 { (50.0_f32, 25.0_f32) }
+            else if total_ms <= 500.0 { (100.0, 50.0) } else if total_ms <= 1000.0 { (200.0, 100.0) }
+            else if total_ms <= 2000.0 { (500.0, 250.0) } else if total_ms <= 5000.0 { (1000.0, 500.0) }
+            else if total_ms <= 10000.0 { (2000.0, 1000.0) } else { (4000.0, 2000.0) };
+        let mut ms = 0.0_f32;
+        let eps = minor * 0.01;
+        while ms <= total_ms + eps {
+            let x = draw_l + (ms / total_ms) * draw_w;
+            let is_major = (ms / major - (ms / major).round()).abs() < 0.02;
+            let (sw, col) = if is_major { (1.0 * s, theme::line2()) } else { (0.5 * s, theme::line()) };
+            p.line_segment([Pos2::new(x, draw_t), Pos2::new(x, draw_b)], Stroke::new(sw, col));
+            if is_major {
+                let label = if ms < 1.0 { "0".to_string() }
+                    else if ms < 1000.0 { format!("{:.0}", ms) } else { format!("{:.1}s", ms * 0.001) };
+                p.text(Pos2::new(x, label_y), Align2::CENTER_BOTTOM, &label,
+                       FontId::new(9.0 * s, FontFamily::Monospace), theme::FAINT());
+            }
+            ms += minor;
+        }
+    }
+}
+
+fn dashed_h(p: &egui::Painter, start: Pos2, width: f32, color: Color32, s: f32) {
+    let (dash, gap) = (4.0 * s, 4.0 * s);
+    let mut x = start.x;
+    while x < start.x + width {
+        let x2 = (x + dash).min(start.x + width);
+        p.line_segment([Pos2::new(x, start.y), Pos2::new(x2, start.y)], Stroke::new(0.8 * s, color));
+        x += dash + gap;
+    }
+}
+
+// ─── STEMS visualizer ──────────────────────────────────────────────────────
+fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &VizData, tempo_bpm: f32, is_sync: bool, s: f32) {
+    let (pad_l, pad_r, pad_t, pad_b) = (36.0 * s, 24.0 * s, 18.0 * s, 24.0 * s);
+    let draw_l = rect.min.x + pad_l;
+    let draw_r = rect.max.x - pad_r;
+    let draw_t = rect.min.y + pad_t;
+    let draw_b = rect.max.y - pad_b;
+    let mid_y = (draw_t + draw_b) * 0.5;
+    let max_bar = (draw_b - draw_t) * 0.5 - 10.0 * s;
+    let draw_w = draw_r - draw_l;
+    let ch_mode = params.channel_mode.value();
+
+    let (top_lab, bot_lab) = match ch_mode {
+        ChannelMode::Stereo => ("L", "R"), ChannelMode::MidSide => ("MID", "SIDE"), ChannelMode::Mono => ("M", "M"),
+    };
+    p.text(Pos2::new(rect.min.x + 10.0 * s, draw_t + 4.0 * s), Align2::LEFT_TOP, top_lab,
+           FontId::new(9.0 * s, FontFamily::Proportional), theme::FAINT());
+    p.text(Pos2::new(rect.min.x + 10.0 * s, draw_b - 4.0 * s), Align2::LEFT_BOTTOM, bot_lab,
+           FontId::new(9.0 * s, FontFamily::Proportional), theme::FAINT());
+
+    dashed_h(p, Pos2::new(draw_l, mid_y), draw_w, theme::WAVE(), s);
+    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, viz.grid_range_secs, tempo_bpm, is_sync, rect.max.y - 6.0 * s, s);
+
+    let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+    let bar_w = {
+        let mut min_gap_px = draw_w;
+        let mut prev_x: Option<f32> = None;
+        for i in 0..n_active {
+            if !params.taps[i].active.value() { continue; }
+            let x = draw_l + viz.times_l[i].min(1.0) * draw_w;
+            if let Some(px) = prev_x { let g = (x - px).abs(); if g > 0.5 { min_gap_px = min_gap_px.min(g); } }
+            prev_x = Some(x);
+        }
+        (min_gap_px * 0.55).clamp(0.5, (4.0 * s).max(0.5))
+    };
+
+    for k in 0..=viz.n_echo_cycles {
+        let cycle_gain = if k == 0 { 1.0 } else { viz.feedback.powi(k as i32) };
+        if cycle_gain < ECHO_THRESHOLD { break; }
+        let swap_lr = viz.ping_pong && (k % 2 == 1);
+        for i in 0..n_active {
+            let tap = &params.taps[i];
+            let active = tap.active.value();
+            let height_scale = if k == 0 { 1.0 } else { cycle_gain.cbrt() };
+            let opacity_scale = if k == 0 { 1.0 } else { cycle_gain.sqrt().max(0.18) };
+            let op = if active { opacity_scale } else { 0.22 };
+            let gain_n = (gain_db_to_pos(tap.gain_db.value()) * height_scale).clamp(0.0, 1.0);
+            let raw_pan = tap.pan.value();
+            let pan = if swap_lr { -raw_pan } else { raw_pan };
+            let t_l = viz.times_l[i] + k as f32 * viz.fb_cycle_norm_l;
+            let t_r = viz.times_r[i] + k as f32 * viz.fb_cycle_norm_r;
+            if t_l > 1.0 && t_r > 1.0 { continue; }
+            let (t_a, t_b) = if swap_lr { (t_r, t_l) } else { (t_l, t_r) };
+            let x_l = draw_l + t_a.min(1.0) * draw_w;
+            let x_r = draw_l + t_b.min(1.0) * draw_w;
+            let (in_l, in_r) = (t_a <= 1.0, t_b <= 1.0);
+            let col = tap_color(i, n_active).linear_multiply(op);
+            let bw = if k == 0 { bar_w } else { (bar_w * 0.7).max(0.5) };
+            match ch_mode {
+                ChannelMode::Stereo => {
+                    let l_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).cos();
+                    let r_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).sin();
+                    let (h_l, h_r) = (gain_n * l_w * max_bar, gain_n * r_w * max_bar);
+                    if in_l && h_l > 0.5 { p.line_segment([Pos2::new(x_l, mid_y), Pos2::new(x_l, mid_y - h_l)], Stroke::new(bw, col)); }
+                    if in_r && h_r > 0.5 { p.line_segment([Pos2::new(x_r, mid_y), Pos2::new(x_r, mid_y + h_r)], Stroke::new(bw, col)); }
+                }
+                ChannelMode::MidSide => {
+                    let mid_amt = ((1.0 - pan) * 0.5).clamp(0.0, 1.0);
+                    let side_amt = ((1.0 + pan) * 0.5).clamp(0.0, 1.0);
+                    let mid_h = gain_n * max_bar * 0.5 * mid_amt;
+                    let side_h = gain_n * max_bar * 0.35 * side_amt;
+                    let half_w = (bw * 0.5).max(0.5);
+                    if in_l && mid_h > 0.5 {
+                        p.rect_filled(Rect::from_min_max(Pos2::new(x_l - half_w, mid_y - mid_h), Pos2::new(x_l + half_w, mid_y + mid_h)), 2.0 * s, col);
+                    }
+                    if in_r && side_h > 0.5 {
+                        let (st_y, sb_y) = (mid_y - max_bar * 0.65, mid_y + max_bar * 0.65);
+                        p.line_segment([Pos2::new(x_r, st_y - side_h), Pos2::new(x_r, st_y + side_h)], Stroke::new(bw, col));
+                        p.line_segment([Pos2::new(x_r, sb_y - side_h), Pos2::new(x_r, sb_y + side_h)], Stroke::new(bw, col));
+                    }
+                }
+                ChannelMode::Mono => {
+                    let h = gain_n * max_bar;
+                    if in_l && h > 0.5 { p.line_segment([Pos2::new(x_l, mid_y - h * 0.5), Pos2::new(x_l, mid_y + h * 0.5)], Stroke::new(bw, col)); }
+                }
+            }
+        }
+    }
+}
+
+// ─── GRID visualizer (read-only scatter; drag editing lands with st threading) ─
+fn draw_grid_viz(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &VizData, tempo_bpm: f32, is_sync: bool, s: f32) {
+    let times_l = &viz.times_l_grid;
+    let (pad_l, pad_r, pad_t, pad_b) = (40.0 * s, 24.0 * s, 18.0 * s, 28.0 * s);
+    let draw_l = rect.min.x + pad_l;
+    let draw_r = rect.max.x - pad_r;
+    let draw_t = rect.min.y + pad_t;
+    let draw_b = rect.max.y - pad_b;
+    let (draw_w, draw_h) = (draw_r - draw_l, draw_b - draw_t);
+
+    for &db in &[6.0_f32, 0.0, -6.0, -12.0, -18.0, -24.0] {
+        let y = draw_t + (1.0 - gain_db_to_pos(db)) * draw_h;
+        if db == 0.0 { p.line_segment([Pos2::new(draw_l, y), Pos2::new(draw_r, y)], Stroke::new(1.0 * s, theme::line2())); }
+        else { dashed_h(p, Pos2::new(draw_l, y), draw_w, theme::line(), s); }
+        let label = if db > 0.0 { format!("+{:.0}", db) } else if db == 0.0 { "0".into() } else { format!("{:.0}", db) };
+        p.text(Pos2::new(rect.min.x + pad_l - 6.0 * s, y), Align2::RIGHT_CENTER, &label,
+               FontId::new(9.0 * s, FontFamily::Monospace), theme::FAINT());
+    }
+    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, viz.grid_range_secs_taps_only, tempo_bpm, is_sync, rect.max.y - 6.0 * s, s);
+
+    let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+    for i in 0..n_active {
+        let tap = &params.taps[i];
+        let op = if tap.active.value() { 1.0 } else { 0.25 };
+        let x = draw_l + times_l[i] * draw_w;
+        let y = draw_t + (1.0 - gain_db_to_pos(tap.gain_db.value())) * draw_h;
+        let r = 9.0 * s;
+        let tap_col = tap_color(i, n_active);
+        p.line_segment([Pos2::new(x, draw_b), Pos2::new(x, y)],
+                       Stroke::new(3.0 * s, tap_col.linear_multiply(if tap.active.value() { 0.45 } else { 0.1 })));
+        p.circle_filled(Pos2::new(x, y), r + 6.0 * s, tap_col.linear_multiply(op * 0.12));
+        p.circle_filled(Pos2::new(x, y), r, tap_col.linear_multiply(op));
+        p.circle_stroke(Pos2::new(x, y), r, Stroke::new(1.0 * s, theme::with_alpha(theme::INK(), 64)));
+        p.text(Pos2::new(x, y), Align2::CENTER_CENTER, &format!("{}", i + 1),
+               FontId::new(9.0 * s, FontFamily::Monospace), theme::PAPER());
+    }
 }
 
 // ─── RIGHT card body — per-tap controls ────────────────────────────────────
@@ -305,22 +641,25 @@ fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamS
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
     let tw = ui.available_width();
     let cap = theme::SLIDER_CAP_2COL * s;
+    let grad = |i| Accent::Raw(tab_grad(tab, i, n_active));
     match tab {
         RightTab::Gain => for i in 0..n_active {
-            epo::slider(ui, setter, &params.taps[i].gain_db, &format!("{:02}", i + 1), tw, cap, Accent::Head(i), false);
+            epo::slider(ui, setter, &params.taps[i].gain_db, &format!("{:02}", i + 1), tw, cap, grad(i), false);
         },
         RightTab::Pan => for i in 0..n_active {
-            epo::slider(ui, setter, &params.taps[i].pan, &format!("{:02}", i + 1), tw, cap, Accent::Head(i), true);
+            epo::slider(ui, setter, &params.taps[i].pan, &format!("{:02}", i + 1), tw, cap, grad(i), true);
         },
         RightTab::Filter => for i in 0..n_active {
-            epo::slider(ui, setter, &params.taps[i].filter_cutoff, &format!("{:02}", i + 1), tw, cap, Accent::Head(i), false);
+            epo::slider(ui, setter, &params.taps[i].filter_cutoff, &format!("{:02}", i + 1), tw, cap, grad(i), false);
         },
         RightTab::XFeed => {
-            epo::slider(ui, setter, &params.crossfeed, "XFEED", tw, cap, Accent::M, false);
+            let acc = Accent::Raw(tab_hue(RightTab::XFeed));
+            epo::slider(ui, setter, &params.crossfeed, "XFEED", tw, cap, acc, false);
         }
         RightTab::Diffuse => {
-            epo::slider(ui, setter, &params.diffuse_amount, "AMOUNT", tw, cap, Accent::M, false);
-            epo::slider(ui, setter, &params.diffuse_size, "SIZE", tw, cap, Accent::M, false);
+            let acc = Accent::Raw(tab_hue(RightTab::Diffuse));
+            epo::slider(ui, setter, &params.diffuse_amount, "AMOUNT", tw, cap, acc, false);
+            epo::slider(ui, setter, &params.diffuse_size, "SIZE", tw, cap, acc, false);
         }
     }
 }
