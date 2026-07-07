@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::params::{
-    snap_to_div, ChannelMode, DelayMode, PetalParams, SpacingMode, SyncMode, NUM_TAPS,
+    ChannelMode, DelayMode, PetalParams, SpacingMode, SyncMode, NUM_TAPS,
 };
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
@@ -38,10 +38,12 @@ pub enum RightTab { Pan, Gain, Filter, XFeed, Diffuse }
 pub struct EditorState {
     pub viz_mode: VizMode,
     pub right_tab: RightTab,
+    /// Tap currently being dragged in the Grid view (None = idle).
+    pub drag_tap: Option<usize>,
 }
 impl Default for EditorState {
     fn default() -> Self {
-        Self { viz_mode: VizMode::Stems, right_tab: RightTab::Gain }
+        Self { viz_mode: VizMode::Stems, right_tab: RightTab::Gain, drag_tap: None }
     }
 }
 
@@ -50,6 +52,10 @@ const GAIN_SKEW: f32 = 0.333;
 #[inline]
 fn gain_db_to_pos(db: f32) -> f32 {
     ((db + 60.0) / 66.0).clamp(0.0, 1.0).powf(1.0 / GAIN_SKEW)
+}
+#[inline]
+fn pos_to_gain_db(pos: f32) -> f32 {
+    -60.0 + pos.clamp(0.0, 1.0).powf(GAIN_SKEW) * 66.0
 }
 
 /// Lighten a color toward white by `amt` (0 = unchanged, 1 = white).
@@ -134,9 +140,11 @@ fn draw_plugin(
     let center_w = (avail - left_w - right_w - 2.0 * gap).max(200.0 * s);
     let body_h = CARD_BODY_H * s;
 
-    // Read tab state out of `st` so the card body closures don't need it.
+    // Read mutable state out of `st` into locals so each card body closure
+    // captures only what it needs (avoids nested &mut st borrows).
     let mut viz_mode = st.viz_mode;
     let mut right_tab = st.right_tab;
+    let mut drag_tap = st.drag_tap;
 
     ui.horizontal_top(|ui| {
         ui.add_space(margin);
@@ -151,7 +159,7 @@ fn draw_plugin(
             ui, "VIEW", &["STEMS", "GRID"],
             if viz_mode == VizMode::Stems { 0 } else { 1 },
             center_w, body_h,
-            &mut |ui| draw_center_body(ui, params, setter, viz_mode, tempo),
+            &mut |ui| draw_center_body(ui, params, setter, viz_mode, tempo, &mut drag_tap),
             None,
         );
         if let Some(i) = vc { viz_mode = if i == 0 { VizMode::Stems } else { VizMode::Grid }; }
@@ -172,6 +180,7 @@ fn draw_plugin(
         }
     });
 
+    st.drag_tap = drag_tap;
     st.viz_mode = viz_mode;
     st.right_tab = right_tab;
 
@@ -297,6 +306,7 @@ fn draw_center_body(
     setter: &ParamSetter,
     viz_mode: VizMode,
     tempo: f32,
+    drag_tap: &mut Option<usize>,
 ) {
     let s = theme::ui_scale(ui);
     let viz = compute_viz_data(params, tempo);
@@ -331,7 +341,7 @@ fn draw_center_body(
 
     match viz_mode {
         VizMode::Stems => draw_stems(&p, rect, params, &viz, tempo, is_sync, s),
-        VizMode::Grid => draw_grid_viz(&p, rect, params, &viz, tempo, is_sync, s),
+        VizMode::Grid => draw_grid_viz(ui, rect, params, setter, &viz, tempo, is_sync, drag_tap, s),
     }
 
     // ── Shaping strip: two XY pads (per-channel topology shaping) ──────────
@@ -685,8 +695,10 @@ fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &Vi
     }
 }
 
-// ─── GRID visualizer (read-only scatter; drag editing lands with st threading) ─
-fn draw_grid_viz(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &VizData, tempo_bpm: f32, is_sync: bool, s: f32) {
+// ─── GRID visualizer — draggable tap balls (X = time offset, Y = gain) ─────
+#[allow(clippy::too_many_arguments)]
+fn draw_grid_viz(ui: &mut egui::Ui, rect: Rect, params: &Arc<PetalParams>, setter: &ParamSetter,
+                 viz: &VizData, tempo_bpm: f32, is_sync: bool, drag_tap: &mut Option<usize>, s: f32) {
     let times_l = &viz.times_l_grid;
     let (pad_l, pad_r, pad_t, pad_b) = (40.0 * s, 24.0 * s, 18.0 * s, 28.0 * s);
     let draw_l = rect.min.x + pad_l;
@@ -694,28 +706,62 @@ fn draw_grid_viz(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: 
     let draw_t = rect.min.y + pad_t;
     let draw_b = rect.max.y - pad_b;
     let (draw_w, draw_h) = (draw_r - draw_l, draw_b - draw_t);
+    let p = ui.painter().clone();
 
     for &db in &[6.0_f32, 0.0, -6.0, -12.0, -18.0, -24.0] {
         let y = draw_t + (1.0 - gain_db_to_pos(db)) * draw_h;
         if db == 0.0 { p.line_segment([Pos2::new(draw_l, y), Pos2::new(draw_r, y)], Stroke::new(1.0 * s, theme::line2())); }
-        else { dashed_h(p, Pos2::new(draw_l, y), draw_w, theme::line(), s); }
+        else { dashed_h(&p, Pos2::new(draw_l, y), draw_w, theme::line(), s); }
         let label = if db > 0.0 { format!("+{:.0}", db) } else if db == 0.0 { "0".into() } else { format!("{:.0}", db) };
         p.text(Pos2::new(rect.min.x + pad_l - 6.0 * s, y), Align2::RIGHT_CENTER, &label,
                FontId::new(9.0 * s, FontFamily::Monospace), theme::FAINT());
     }
-    paint_timeline_grid(p, draw_l, draw_r, draw_t, draw_b, viz.grid_range_secs_taps_only, tempo_bpm, is_sync, rect.max.y - 6.0 * s, s);
+    paint_timeline_grid(&p, draw_l, draw_r, draw_t, draw_b, viz.grid_range_secs_taps_only, tempo_bpm, is_sync, rect.max.y - 6.0 * s, s);
+    p.text(Pos2::new(draw_l + 8.0 * s, draw_t + 6.0 * s), Align2::LEFT_TOP,
+           "DRAG · X = TIME · Y = GAIN", FontId::new(9.0 * s, FontFamily::Proportional), theme::FAINT());
 
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+    let snap = params.tap_snap.value();
     for i in 0..n_active {
         let tap = &params.taps[i];
-        let op = if tap.active.value() { 1.0 } else { 0.25 };
+        let active = tap.active.value();
+        let op = if active { 1.0 } else { 0.25 };
         let x = draw_l + times_l[i] * draw_w;
-        let y = draw_t + (1.0 - gain_db_to_pos(tap.gain_db.value())) * draw_h;
+        let gain_n = gain_db_to_pos(tap.gain_db.value());
+        let y = draw_t + (1.0 - gain_n) * draw_h;
         let r = 9.0 * s;
+
+        let resp = ui.interact(Rect::from_center_size(Pos2::new(x, y), Vec2::splat(r * 2.5)),
+                               ui.id().with(("gridball", i)), Sense::click_and_drag());
+        if resp.drag_started() {
+            *drag_tap = Some(i);
+            setter.begin_set_parameter(&tap.gain_db);
+            setter.begin_set_parameter(&tap.time_offset);
+        }
+        if resp.dragged() && *drag_tap == Some(i) {
+            let dy = -resp.drag_delta().y / draw_h;
+            setter.set_parameter(&tap.gain_db, pos_to_gain_db((gain_n + dy).clamp(0.0, 1.0)));
+            let dx = resp.drag_delta().x / draw_w;
+            if dx.abs() > 1e-5 {
+                let mut new_off = tap.time_offset.value() + dx;
+                if snap && !ui.input(|inp| inp.modifiers.shift) {
+                    let step = 1.0 / 16.0;
+                    new_off = (new_off / step).round() * step;
+                }
+                setter.set_parameter(&tap.time_offset, new_off.clamp(-0.5, 0.5));
+            }
+        }
+        if resp.drag_stopped() && *drag_tap == Some(i) {
+            setter.end_set_parameter(&tap.gain_db);
+            setter.end_set_parameter(&tap.time_offset);
+            *drag_tap = None;
+        }
+
         let tap_col = tap_color(i, n_active);
+        let glow = tap_col.linear_multiply(op * (if *drag_tap == Some(i) { 0.30 } else { 0.12 }));
         p.line_segment([Pos2::new(x, draw_b), Pos2::new(x, y)],
-                       Stroke::new(3.0 * s, tap_col.linear_multiply(if tap.active.value() { 0.45 } else { 0.1 })));
-        p.circle_filled(Pos2::new(x, y), r + 6.0 * s, tap_col.linear_multiply(op * 0.12));
+                       Stroke::new(3.0 * s, tap_col.linear_multiply(if active { 0.45 } else { 0.1 })));
+        p.circle_filled(Pos2::new(x, y), r + 6.0 * s, glow);
         p.circle_filled(Pos2::new(x, y), r, tap_col.linear_multiply(op));
         p.circle_stroke(Pos2::new(x, y), r, Stroke::new(1.0 * s, theme::with_alpha(theme::INK(), 64)));
         p.text(Pos2::new(x, y), Align2::CENTER_CENTER, &format!("{}", i + 1),
