@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::params::{
-    ChannelMode, DelayMode, PetalParams, SpacingMode, SyncMode, NUM_TAPS,
+    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FilterType, PetalParams, SpacingMode,
+    SyncMode, NUM_TAPS,
 };
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
@@ -784,15 +785,45 @@ fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamS
             epo::slider(ui, setter, &params.taps[i].pan, &format!("{:02}", i + 1), tw, cap, grad(i), true);
         },
         RightTab::Filter => for i in 0..n_active {
-            epo::slider(ui, setter, &params.taps[i].filter_cutoff, &format!("{:02}", i + 1), tw, cap, grad(i), false);
+            let tap = &params.taps[i];
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SP_XS * s;
+                // type-cycle chip (LP → BP → HP)
+                let (lab, next) = match tap.filter_type.value() {
+                    FilterType::LowPass => ("LP", FilterType::BandPass),
+                    FilterType::BandPass => ("BP", FilterType::HighPass),
+                    FilterType::HighPass => ("HP", FilterType::LowPass),
+                };
+                if epo::chip_sm(ui, lab, false) { set_enum(setter, &tap.filter_type, next); }
+                let sw = ui.available_width();
+                epo::slider(ui, setter, &tap.filter_cutoff, &format!("{:02}", i + 1), sw, cap, grad(i), false);
+            });
         },
         RightTab::XFeed => {
             let acc = Accent::Raw(tab_hue(RightTab::XFeed));
-            epo::slider(ui, setter, &params.crossfeed, "XFEED", tw, cap, acc, false);
+            section_label(ui, "MODE", s);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SP_TIGHT * s;
+                let cur = params.crossfeed_mode.value();
+                for (lab, m) in [("MIX", CrossfeedMode::Mix), ("PING", CrossfeedMode::PingPong), ("DIFF", CrossfeedMode::Diffuse)] {
+                    if epo::chip(ui, lab, cur == m) { set_enum(setter, &params.crossfeed_mode, m); }
+                }
+            });
+            ui.add_space(theme::SP_MD * s);
+            epo::slider(ui, setter, &params.crossfeed, "AMT", tw, cap, acc, false);
         }
         RightTab::Diffuse => {
             let acc = Accent::Raw(tab_hue(RightTab::Diffuse));
-            epo::slider(ui, setter, &params.diffuse_amount, "AMOUNT", tw, cap, acc, false);
+            section_label(ui, "ROUTING", s);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SP_TIGHT * s;
+                let cur = params.diffuse_routing.value();
+                for (lab, m) in [("INPUT", DiffuseRouting::Input), ("FB", DiffuseRouting::Feedback), ("OUT", DiffuseRouting::Output)] {
+                    if epo::chip(ui, lab, cur == m) { set_enum(setter, &params.diffuse_routing, m); }
+                }
+            });
+            ui.add_space(theme::SP_MD * s);
+            epo::slider(ui, setter, &params.diffuse_amount, "AMT", tw, cap, acc, false);
             epo::slider(ui, setter, &params.diffuse_size, "SIZE", tw, cap, acc, false);
         }
     }
