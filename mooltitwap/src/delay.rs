@@ -1,4 +1,9 @@
-use crate::params::NUM_TAPS;
+use crate::params::{DelayMode, NUM_TAPS};
+
+/// Equal-power crossfade window length for DelayMode::Fade (samples).
+/// ~21 ms at 48 kHz — long enough to hide click artifacts from large jumps,
+/// short enough that the user perceives parameter changes as immediate.
+pub const FADE_SAMPLES: usize = 1024;
 
 /// A single-channel ring buffer for delay. Reads at fractional sample
 /// positions using cubic Hermite interpolation. Writes are sample-by-sample.
@@ -31,8 +36,17 @@ impl DelayLine {
         self.write_idx = (self.write_idx + 1) & mask;
     }
 
-    /// Read at a fractional delay in samples. `delay_samples` must be >= 1.0
-    /// and < capacity - 2 (to leave room for cubic neighbors).
+    /// Read at a fractional delay in samples using 4-point Lagrange
+    /// interpolation. `delay_samples` must be >= 1.0 and < capacity - 2.
+    ///
+    /// Why Lagrange vs cubic Hermite: at a fractional offset of 0.5, cubic
+    /// Hermite has measurable HF rolloff (~1 dB near Nyquist), while at offset
+    /// 0.0 it's flat. With two read heads at different fractional offsets
+    /// (any dual-head pitch shifter), this creates a timbral modulation at
+    /// the grain rate → audible "detune" at integer pitch ratios. 4-point
+    /// Lagrange has a much flatter passband across all fractional offsets,
+    /// which essentially eliminates that artifact. Cost: 3 extra multiplies
+    /// per sample.
     #[inline]
     pub fn read(&self, delay_samples: f32) -> f32 {
         let mask = self.capacity - 1;
@@ -52,22 +66,51 @@ impl DelayLine {
         let y2 = self.buffer[i2];
         let y3 = self.buffer[i3];
 
-        cubic_hermite(y0, y1, y2, y3, frac)
+        lagrange4(y0, y1, y2, y3, frac)
     }
 }
 
+/// 4-point Lagrange interpolation, sample points at x = -1, 0, 1, 2.
+/// `t` is the fractional offset in [0, 1] between y1 and y2.
+///
+/// Frequency response is significantly flatter across all fractional offsets
+/// than cubic Hermite — passband ripple drops from ~1 dB to well under 0.1 dB
+/// for normal audio bandwidths. This is the same interpolator used by
+/// chowdsp_PitchShifter (`DelayLineInterpolationTypes::Lagrange3rd`) in
+/// Chowdhury's ChowMatrix.
 #[inline]
-fn cubic_hermite(y0: f32, y1: f32, y2: f32, y3: f32, t: f32) -> f32 {
-    let c0 = y1;
-    let c1 = 0.5 * (y2 - y0);
-    let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
-    let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
-    ((c3 * t + c2) * t + c1) * t + c0
+fn lagrange4(y0: f32, y1: f32, y2: f32, y3: f32, t: f32) -> f32 {
+    // Lagrange basis with denominators precomputed:
+    //   L0(t) = -t·(t-1)·(t-2) / 6      = ((-t³ + 3t² - 2t)) / 6
+    //   L1(t) =  (t+1)·(t-1)·(t-2) / 2  = (( t³ - 2t² - t + 2)) / 2
+    //   L2(t) = -(t+1)·t·(t-2) / 2      = ((-t³ + t² + 2t)) / 2
+    //   L3(t) =  (t+1)·t·(t-1) / 6      = (( t³ - t)) / 6
+    // Evaluated with Horner-style nested form for speed.
+    let d0 = t;
+    let d1 = t - 1.0;
+    let d2 = t - 2.0;
+    let dm1 = t + 1.0;
+
+    let l0 = -d0 * d1 * d2 * (1.0 / 6.0);
+    let l1 =  dm1 * d1 * d2 * 0.5;
+    let l2 = -dm1 * d0 * d2 * 0.5;
+    let l3 =  dm1 * d0 * d1 * (1.0 / 6.0);
+
+    y0 * l0 + y1 * l1 + y2 * l2 + y3 * l3
 }
 
-/// Per-tap slewed delay time. Smoothing the delay time = varispeed pitch.
-/// Internal target updates instantly; the smoothed value drifts toward it
-/// at a controlled rate (Doppler shift = pitch).
+// ─── Pitch shifter removed in v2.4.0 ────────────────────────────────────────
+// A granular Hann pitch shifter (chowdsp-style dual-head + WSOLA/AMDF alignment)
+// lived here through v2.3.5. It had audible artifacts on sustained tones that
+// couldn't be eliminated without either a phase vocoder (heavy per-tap CPU) or
+// PSOLA + a pitch tracker (broken on polyphony). Both out of scope for a delay.
+// The full implementation is preserved in git history at the v2.3.5 tag if
+// pitch shifting is ever revisited as a separate plugin.
+
+/// Per-tap slewed delay time. Smoothing the delay time produces a tape-style
+/// glide when the nominal delay moves (sync-division change, wobble LFO,
+/// per-tap time offset drag) — same mechanism that produces the characteristic
+/// Doppler bend of tape echoes.
 pub struct SlewedTime {
     current: f32,
     target: f32,
@@ -114,233 +157,122 @@ impl Default for SlewedTime {
     fn default() -> Self { Self::new() }
 }
 
-/// One grain in the PSOLA-style pitch shifter.
-#[derive(Default, Clone, Copy)]
-struct PsolaGrain {
-    active: bool,
-    /// Constant delay (in delay-line samples) captured at grain start.
-    /// While active the grain reads at this delay every sample, which gives
-    /// natural-rate playback of consecutive source samples (since write_pos
-    /// also advances 1 per sample).
-    delay_samples: f32,
-    /// Age in samples since grain start.
-    age: f32,
-    /// Total grain duration in samples (≈ 2 × period).
-    duration: f32,
-}
-
-/// Max simultaneous grains in the PSOLA shifter. With grain duration ≈ 2T
-/// and output epoch interval = T/pitch_factor, the average grain density is
-/// roughly 2·pitch_factor. 6 is safe up to ~3× pitch up.
-const PSOLA_MAX_GRAINS: usize = 6;
-
-/// Per-tap delay reader with three pitch modes:
+/// Per-tap delay reader supporting three transition modes:
 ///
-/// 1. **TAPE BEND** (`read_tape_bend`): single read head at the slewed
-///    nominal delay time. Pitch is encoded by changing the nominal delay
-///    (caller sets `set_nominal` to `base_delay * 2^(-semis/12)`); the slew
-///    of `SlewedTime` produces the Doppler bend during transition. Steady
-///    state = no pitch, just a delayed read. No clicks, no grain artifacts.
-///
-/// 2. **PSOLA** (`read_psola`): pitch-period-synchronous granular shifter.
-///    Takes an externally estimated pitch period and places grains at output
-///    epochs spaced `period / pitch_factor` apart. Each grain reads at a
-///    constant delay (captured at grain start) and lasts ~2·period samples
-///    with a Hann window. Adjacent grains overlap and OLA. Because grain
-///    spacing aligns with pitch periods, the algorithm preserves the local
-///    waveform shape and avoids the phase cancellation that plagues the
-///    fixed-window dual-head approach.
-///
-/// 3. **Hann dual-head** (`read_continuous_hann`): the older fixed-window
-///    shifter. Kept as a fallback when the pitch tracker reports unpitched
-///    content (the PSOLA path needs a valid period to work).
-///
-/// Pitch param changes are smoothed by a 5 ms one-pole lowpass to suppress
-/// the click that an instant pitch_factor jump would create.
+/// * **Repitch** (default, classic tape) — `SlewedTime` glides the read
+///   position; gliding a delay-buffer read = Doppler pitch shift. Wobble
+///   feeds the same mechanism for its modulation.
+/// * **Fade** — keep the old read position alive while a new one fades in
+///   over `FADE_SAMPLES` with an equal-power (cos/sin) crossfade. Pitch
+///   neutral. Wobble bypassed (it would re-trigger fades every sample).
+/// * **Jump** — snap to the new delay. Audible click on big jumps but zero
+///   pitch artifact. Best paired with snap-on-discrete-event externally.
 pub struct TapReader {
+    mode: DelayMode,
+    // Repitch state
     nominal: SlewedTime,
-    /// Target pitch factor (2^(semis/12)) set by set_pitch_semitones.
-    pitch_target: f32,
-    /// Smoothed pitch factor — actually applied to the drift computation.
-    pitch_current: f32,
-    /// One-pole LP coefficient for pitch smoothing.
-    pitch_smooth_coef: f32,
-    /// Grain phasor [0,1) for the Hann fallback shifter.
-    phase: f32,
-    /// Hann window length in samples (fallback only).
-    window_samples: f32,
-    /// PSOLA grain pool.
-    psola_grains: [PsolaGrain; PSOLA_MAX_GRAINS],
-    /// Samples until the next PSOLA grain trigger (fractional, in output time).
-    psola_next_trigger_in: f32,
+    // Fade / Jump state
+    target_delay: f32,
+    current_delay: f32,   // for Fade: the "old" position being faded out
+    fade_counter: usize,  // 0 = just started; >= FADE_SAMPLES = done
 }
 
 impl TapReader {
     pub fn new() -> Self {
         Self {
+            mode: DelayMode::Repitch,
             nominal: SlewedTime::new(),
-            pitch_target: 1.0,
-            pitch_current: 1.0,
-            pitch_smooth_coef: 0.005,
-            phase: 0.0,
-            window_samples: 2880.0,
-            psola_grains: [PsolaGrain::default(); PSOLA_MAX_GRAINS],
-            psola_next_trigger_in: 0.0,
+            target_delay: 1.0,
+            current_delay: 1.0,
+            fade_counter: FADE_SAMPLES, // start in "done" state (no fade)
         }
     }
 
-    pub fn set_window_ms(&mut self, ms: f32, sample_rate: f32) {
-        self.window_samples = (ms * 0.001 * sample_rate).max(64.0);
-        // 5ms pitch smoothing to suppress clicks when pitch param changes.
-        let tc = (0.005 * sample_rate).max(1.0);
-        self.pitch_smooth_coef = 1.0 - (-1.0_f32 / tc).exp();
+    /// Switch transition mode. When changing modes, the new mode's state is
+    /// seeded from the current target so there's no discontinuity.
+    /// Idempotent: calling with the same mode is a no-op (safe to call every
+    /// block as the GUI param value is polled).
+    pub fn set_mode(&mut self, mode: DelayMode) {
+        if mode as u8 == self.mode as u8 {
+            return;
+        }
+        // Re-align all state to a single value so the mode switch is silent.
+        let t = self.target_delay.max(1.0);
+        self.nominal.snap_to(t);
+        self.current_delay = t;
+        self.fade_counter = FADE_SAMPLES;
+        self.mode = mode;
     }
 
+    /// Request a new nominal delay. Behavior depends on mode.
     pub fn set_nominal(&mut self, delay_samples: f32) {
-        self.nominal.set_target(delay_samples);
+        let target = delay_samples.max(1.0);
+        match self.mode {
+            DelayMode::Jump => {
+                self.target_delay = target;
+                self.current_delay = target;
+                self.nominal.snap_to(target);
+            }
+            DelayMode::Repitch => {
+                self.target_delay = target;
+                self.nominal.set_target(target);
+            }
+            DelayMode::Fade => {
+                // Only restart on meaningful changes — otherwise wobble-like
+                // continuous tiny variations would re-trigger every sample.
+                if (target - self.target_delay).abs() > 1.0 {
+                    // Whatever target we had IS the "old" head from now on.
+                    // If a previous fade is still mid-flight a slight click
+                    // is possible — acceptable tradeoff for arbitrary rapid
+                    // parameter changes.
+                    self.current_delay = self.target_delay;
+                    self.target_delay = target;
+                    self.fade_counter = 0;
+                }
+            }
+        }
     }
 
     pub fn snap_to(&mut self, delay_samples: f32) {
-        self.nominal.snap_to(delay_samples);
-        self.phase = 0.0;
-        self.pitch_current = self.pitch_target;
-        for g in self.psola_grains.iter_mut() { g.active = false; }
-        self.psola_next_trigger_in = 0.0;
-    }
-
-    pub fn set_pitch_semitones(&mut self, semis: f32) {
-        self.pitch_target = 2.0_f32.powf(semis / 12.0);
+        let t = delay_samples.max(1.0);
+        self.nominal.snap_to(t);
+        self.target_delay = t;
+        self.current_delay = t;
+        self.fade_counter = FADE_SAMPLES;
     }
 
     pub fn set_nominal_slew_rate(&mut self, rate: f32) {
         self.nominal.set_rate(rate);
     }
 
-    /// TAPE BEND mode — single read at slewed nominal.
     #[inline]
-    pub fn read_tape_bend(&mut self, delay: &DelayLine) -> f32 {
-        let n = self.nominal.tick();
-        delay.read(n.max(1.0))
-    }
-
-    /// PSOLA-style pitch-period-synchronous shifter.
-    ///
-    /// `period_samples` is the externally detected pitch period of the source
-    /// signal. When the period is valid (the tracker reports a confident
-    /// fundamental), grains are placed at output epochs of `period /
-    /// pitch_factor`, each lasting 2·period samples with a Hann window.
-    /// Adjacent grains overlap and OLA. Because grain hops align with the
-    /// source's pitch periods, the local waveform is preserved across grains
-    /// → no phase cancellation between grains, no perceived detune.
-    ///
-    /// When `period_samples <= 0` (unpitched / noisy / silent input), falls
-    /// back to the fixed-window dual-head Hann shifter.
-    #[inline]
-    pub fn read_psola(&mut self, delay: &DelayLine, period_samples: f32) -> f32 {
-        let n = self.nominal.tick();
-
-        // Smooth the pitch_factor (kills param-change clicks)
-        self.pitch_current +=
-            self.pitch_smooth_coef * (self.pitch_target - self.pitch_current);
-        let pf = self.pitch_current.max(0.0625); // clamp to 4 oct down
-
-        if (pf - 1.0).abs() < 1e-5 {
-            // No pitch shift — just read at nominal.
-            return delay.read(n.max(1.0));
-        }
-
-        // Bail to Hann fallback when no usable period is reported
-        if period_samples < 32.0 {
-            return self.read_continuous_hann(delay);
-        }
-
-        // Clamp period to musical range
-        let period = period_samples.clamp(32.0, 2400.0);
-        // Output epoch spacing in output-time samples
-        let out_step = (period / pf).max(8.0);
-        // Grain duration = 2 periods so adjacent grains have 50% overlap at pf=1
-        let grain_dur = 2.0 * period;
-
-        // Step the trigger counter and fire a new grain at each epoch
-        self.psola_next_trigger_in -= 1.0;
-        while self.psola_next_trigger_in <= 0.0 {
-            self.psola_next_trigger_in += out_step;
-            // Find an inactive slot or evict the oldest
-            let slot = self.allocate_grain_slot();
-            let g = &mut self.psola_grains[slot];
-            g.active = true;
-            g.delay_samples = n;
-            g.age = 0.0;
-            g.duration = grain_dur;
-        }
-
-        // Sum all active grains with Hann window weights. Window sum is *not*
-        // guaranteed to be 1.0 for arbitrary pitch_factor, so normalize by it.
-        let tau = std::f32::consts::TAU;
-        let mut output = 0.0_f32;
-        let mut win_sum = 0.0_f32;
-        for g in self.psola_grains.iter_mut() {
-            if !g.active { continue; }
-            if g.age >= g.duration {
-                g.active = false;
-                continue;
+    pub fn read(&mut self, delay: &DelayLine) -> f32 {
+        match self.mode {
+            DelayMode::Jump => {
+                delay.read(self.target_delay.max(1.0))
             }
-            let phase = g.age / g.duration;
-            let w = 0.5 * (1.0 - (phase * tau).cos());
-            // Constant delay = natural-rate playback through delay buffer
-            let s = delay.read(g.delay_samples.max(1.0));
-            output += s * w;
-            win_sum += w;
-            g.age += 1.0;
+            DelayMode::Repitch => {
+                let n = self.nominal.tick();
+                delay.read(n.max(1.0))
+            }
+            DelayMode::Fade => {
+                if self.fade_counter < FADE_SAMPLES {
+                    // Equal-power cos/sin crossfade. As `t` goes 0 → 1, the
+                    // old head fades cos→0 and the new head fades 0→sin.
+                    let t = self.fade_counter as f32 / FADE_SAMPLES as f32;
+                    let arg = t * core::f32::consts::FRAC_PI_2;
+                    let val_old = delay.read(self.current_delay.max(1.0));
+                    let val_new = delay.read(self.target_delay.max(1.0));
+                    self.fade_counter += 1;
+                    if self.fade_counter >= FADE_SAMPLES {
+                        self.current_delay = self.target_delay;
+                    }
+                    val_old * arg.cos() + val_new * arg.sin()
+                } else {
+                    delay.read(self.target_delay.max(1.0))
+                }
+            }
         }
-        if win_sum > 1e-4 {
-            output / win_sum
-        } else {
-            // Coverage hole — fall back to direct read
-            delay.read(n.max(1.0))
-        }
-    }
-
-    fn allocate_grain_slot(&mut self) -> usize {
-        // Prefer inactive slot
-        for i in 0..PSOLA_MAX_GRAINS {
-            if !self.psola_grains[i].active { return i; }
-        }
-        // All active — evict the one furthest along its life
-        let mut best = 0;
-        let mut best_ratio = -1.0_f32;
-        for i in 0..PSOLA_MAX_GRAINS {
-            let g = &self.psola_grains[i];
-            let r = g.age / g.duration.max(1.0);
-            if r > best_ratio { best_ratio = r; best = i; }
-        }
-        best
-    }
-
-    /// Fixed-window dual-head Hann shifter (fallback used by PSOLA when
-    /// no pitch is detected). Same algorithm as before.
-    #[inline]
-    fn read_continuous_hann(&mut self, delay: &DelayLine) -> f32 {
-        let n = self.nominal.current();
-        let drift = self.pitch_current - 1.0;
-
-        self.phase += 1.0 / self.window_samples;
-        if self.phase >= 1.0 { self.phase -= 1.0; }
-
-        let phase_a = self.phase;
-        let phase_b = if self.phase < 0.5 { self.phase + 0.5 } else { self.phase - 0.5 };
-
-        let tau = std::f32::consts::TAU;
-        let win_a = 0.5 * (1.0 - (phase_a * tau).cos());
-        let win_b = 0.5 * (1.0 - (phase_b * tau).cos());
-
-        let head_a = n - drift * self.window_samples * phase_a;
-        let head_b = n - drift * self.window_samples * phase_b;
-
-        let sa = delay.read(head_a.max(1.0));
-        let sb = delay.read(head_b.max(1.0));
-
-        sa * win_a + sb * win_b
     }
 }
 
