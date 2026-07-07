@@ -5,15 +5,15 @@
 
 use nice_plug::prelude::*;
 use nice_plug_egui::{create_egui_editor, EguiState};
-use egui::{Align2, Color32, FontFamily, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Align, Align2, Color32, FontFamily, FontId, Layout, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
 use epoche_ui::epo::{self, Accent};
 use epoche_ui::theme;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::params::{
-    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FilterType, PetalParams, SpacingMode,
-    SyncMode, NUM_TAPS,
+    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FilterSlope, FilterType, PetalParams,
+    SpacingMode, SyncMode, NUM_TAPS,
 };
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
@@ -789,14 +789,30 @@ fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamS
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = theme::SP_XS * s;
                 // type-cycle chip (LP → BP → HP)
-                let (lab, next) = match tap.filter_type.value() {
+                let (tl, tn) = match tap.filter_type.value() {
                     FilterType::LowPass => ("LP", FilterType::BandPass),
                     FilterType::BandPass => ("BP", FilterType::HighPass),
                     FilterType::HighPass => ("HP", FilterType::LowPass),
                 };
-                if epo::chip_sm(ui, lab, false) { set_enum(setter, &tap.filter_type, next); }
-                let sw = ui.available_width();
-                epo::slider(ui, setter, &tap.filter_cutoff, &format!("{:02}", i + 1), sw, cap, grad(i), false);
+                if epo::chip_sm(ui, tl, false) { set_enum(setter, &tap.filter_type, tn); }
+                // slope-cycle chip (12 → 24 → 48 dB/oct)
+                let (sl, sn) = match tap.filter_slope.value() {
+                    FilterSlope::Db12 => ("12", FilterSlope::Db24),
+                    FilterSlope::Db24 => ("24", FilterSlope::Db48),
+                    FilterSlope::Db48 => ("48", FilterSlope::Db12),
+                };
+                if epo::chip_sm(ui, sl, false) { set_enum(setter, &tap.filter_slope, sn); }
+                // cutoff (wide) + Q (narrow) share the remaining row width; shrunk
+                // value columns via slider_ex so all four controls fit the card.
+                let rem = ui.available_width();
+                let q_w = (rem * 0.4).clamp(56.0 * s, 96.0 * s);
+                let cut_w = rem - q_w - theme::SP_XS * s;
+                let mut co = epo::SliderOpts::default();
+                co.value_w = 40.0 * s;
+                epo::slider_ex(ui, setter, &tap.filter_cutoff, &format!("{:02}", i + 1), cut_w, 20.0 * s, grad(i), &co);
+                let mut qo = epo::SliderOpts::default();
+                qo.value_w = 26.0 * s;
+                epo::slider_ex(ui, setter, &tap.filter_q, "Q", q_w, 12.0 * s, grad(i), &qo);
             });
         },
         RightTab::XFeed => {
@@ -838,13 +854,27 @@ fn draw_footer(
     margin: f32,
     s: f32,
 ) {
+    // full-width divider to anchor the footer as a strip
+    let top = ui.cursor().top();
+    let full = ui.max_rect();
+    ui.painter().line_segment(
+        [Pos2::new(full.left(), top), Pos2::new(full.right(), top)],
+        Stroke::new(1.0 * s, theme::line()),
+    );
+    ui.add_space(theme::SP_SM * s);
     ui.horizontal(|ui| {
         ui.add_space(margin);
         ui.spacing_mut().item_spacing.x = theme::SP_LG * s;
         let fb_str = format!("{:.0}%", params.feedback.value() * 100.0);
+        // feedback is color-coded coral (its domain)
         epo::knob_ex(ui, setter, &params.feedback, "FEEDBACK", theme::KNOB_DIAM_FX, Accent::Head(1), false, None, Some(&fb_str));
-        let _ = epo::readout_chip(ui, "FB TIME", &params.format_feedback_time(tempo));
-        let _ = epo::readout_chip(ui, "TAPS", &format!("{}", params.num_taps_active.value()));
+        // FB TIME + TAPS readouts pushed to the right edge
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(margin);
+            ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
+            let _ = epo::readout_chip(ui, "TAPS", &format!("{}", params.num_taps_active.value()));
+            let _ = epo::readout_chip(ui, "FB TIME", &params.format_feedback_time(tempo));
+        });
     });
 }
 
