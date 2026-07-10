@@ -1,13 +1,40 @@
 # Mooltitwap — Developer Handoff
 
-**Last updated:** for v2.13.0
-**Author of record:** Emmanuel Bussien (telkmx@gmail.com)
-**What it is:** A 16-tap multitap delay "garden" VST3 + CLAP plugin, inspired by
-Rainbow Circuit's *Petal* and Cableguys/Kilohearts-style *Cluster Delay*. Written
-in Rust on the `nih-plug` framework with an `egui` (via `nih_plug_egui`) custom GUI.
+**What it is:** A 16-tap multitap delay "garden" (VST3 + CLAP + standalone), inspired
+by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
-This document is intended to be **the only thing a new developer needs** to pick up
-the project. Read it top to bottom once.
+---
+
+## ⭐ CURRENT STATE — v2.17.1 · 2026-07-07 · branch `nice-plug-port`
+
+The plugin was **ported off nih-plug onto nice-plug + nice-plug-egui + epoche-ui**
+(egui 0.31→0.34) and the editor fully rebuilt on the shared Epoché widget kit so it
+matches the **cumulus** plugin. See ARCHITECTURE.md (current) + DECISIONS.md (why).
+
+- Framework/editor port: **done**, builds clean, bundles CLAP/VST3/standalone
+  (`cargo nice-plug bundle mooltitwap --release`), installed to `~/Library/Audio/Plug-Ins`.
+- Editor: header (hamburger menu w/ persisted dark-light + font), 3 epo cards, real
+  stems/grid viz + XY pads (theme-colored), per-tab gradient tap colors, full
+  PAN/GAIN/FILTER/XFEED/DIFFUSE tabs, footer (feedback + drag TAPS + FB-TIME lock/drag),
+  aspect-locked resize grip, named preset system (`src/presets.rs`).
+- git: `main` holds the pristine pre-port v2.15 checkpoint (`be061d8`); all port work is
+  on **`nice-plug-port`**. epoche-ui got an additive `Accent::Raw` (committed `d43c2fa`).
+
+**Next:** hand-test the v2.17.1 interactions in a DAW (TAPS drag/scroll, FB-TIME
+unlock+drag, preset browser open→click-out→reopen, XFEED/DIFFUSE knobs — verified only
+by code+screenshot); then merge `nice-plug-port`→`main`; then the Wobble→Ducker swap
+(never started). Full list in TASKS.md.
+
+**Verification workflow:** `cargo build --release --bin mooltitwap`, launch the
+standalone, find the window via a Swift `CGWindowListCopyWindowInfo` snippet,
+`screencapture -x -o -l <id>`. `cliclick` is unreliable (window on a negative-Y
+display) — to shoot a specific tab/menu/modal, temporarily flip its default in code,
+build, shoot, revert.
+
+> ⚠️ **§1–§11 below predate the nice-plug port** (v2.13-era, nih-plug/nih_plug_egui,
+> old manual-rect gui.rs). The DSP sections (§2–§4 signal architecture, feedback,
+> delay modes, diffusion) are still accurate; the framework/build/GUI-scaling notes
+> are historical. Trust ARCHITECTURE.md for current structure.
 
 ---
 
