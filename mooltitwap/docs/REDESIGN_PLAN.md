@@ -118,7 +118,31 @@ These don't change the sound; once smoothing has settled, the output should be b
 - [ ] **MIDI and transport:** there's no MIDI input today. Add it only if a new function needs it (for example, retriggering). The tempo falls back to 120; check what happens with no transport and on loop wraps.
 
 ### Phase 2 · Mock both pages · medium
-- [ ] Put Wide and Tall on the design canvas, the tall one on a real iPad board (1112 × 834 pt).
+Canvas: https://claude.ai/artifact/6osu4gEG6f8RzfBqfsCr7Z.
+- **First pass, 2026-10-27:** Wide (Field and List views), the tall page and the wide page on iPad boards at real size, and today's v2.27.0 for comparison.
+- **Second pass, same day:**
+  - the desktop page grew to 1366 × 720;
+  - the palette is Epoché's cool foundation with the violet accent (Tide is warm with slate);
+  - **Bars** replaces the List rows: the same Y axis with the taps in order;
+  - the Echo lane is drawn as one band per cycle.
+
+  The earlier list and lane styles stay in Tweaks to compare.
+- **Third pass, same day:** the functions you picked are on the page:
+  - the Pattern menu (Spread, Tilt, Reset; it works in Play);
+  - Echo and Motion tabs in the lane;
+  - Freeze, and a Tone row (Damp, Low cut);
+  - Euclid spacing (Steps, Rotate; the Shape pad is off in Euclid);
+  - Duck and Release in Output.
+
+  A new row of boards shows 16 and 32 taps: Bars and Field on desktop, and 32 on iPad drawn by finger.
+- **Fix, version 9:** every control cell was losing its layout, and the SVG axis, value and band labels didn't draw. Two runtime behaviours caused it (below). Checked by rendering every board locally.
+- **Two canvas runtime gotchas, for any future mock:**
+  - It drops a `style` that *starts* with a `{{hole}}`, so put whole-declaration holes at the end.
+  - It wraps every text hole in an HTML `<span>`, which never draws inside an SVG `<text>`. Put labels in HTML over the SVG instead.
+  - Tide's canvas uses `<text>{{…}}</text>` in the same way, so its labels are probably invisible too. Not checked.
+- **To settle before building:** the kit's `theme.rs` `DARK` and `design/palette.json` `dark_cool` differ slightly (paper `#101215` against `#121417`). Pick the canonical one.
+
+- [x] Put Wide and Tall on the design canvas, the tall one on a real iPad board (1112 × 834 pt).
 - [ ] Decide:
   - the Y picker;
   - Echo lane gestures;
@@ -139,13 +163,49 @@ These don't change the sound; once smoothing has settled, the output should be b
 - [ ] **Retire the old editors:** remove v2 (`gui.rs`) and v3 (`gui_v3.rs`) and the `V3_PREVIEW` switch once the new page matches them. There's no "old UI" option, as with Tide.
 
 ### Phase 4 · New functions · size depends on D3
-**This needs your list.** Ideas already on the backlog, or reusable from Tide:
-- **Modulation** of tap positions, the SHAPE XY pad or the filter. Tide's LFO shapes (Smooth, S&H, Glider…), tempo rate, envelope follower and retrigger are documented in [DSP_FOR_REUSE.md §3](../../../y-flanger/DSP_FOR_REUSE.md). Wobble was removed in v2.17.5, partly because it fought Fade mode. Any new modulation needs an answer for Fade mode.
-- **Ducker:** a sidechain envelope follower that ducks the wet signal.
-- **Real Euclidean spacing:** it's a copy of Linear today.
-- **Feedback cycle as AUTO, FREE or SYNC,** from the ECHO strip sketch (it lives in the Echo lane).
-- **FB tilt** (low-pass or high-pass on the feedback only), [DSP_FOR_REUSE.md §5](../../../y-flanger/DSP_FOR_REUSE.md).
-- **SATURATE:** keep it or remove it (your open question from July).
+Proposed and decided on 2026-10-27.
+- **In:** loop tone, Freeze, ducking, pattern tools, Motion, real Euclidean spacing.
+- **Out:** shift in the loop. You judged it would be messy and sound meh in a multitap.
+- **Later, in an update after release:** 32 taps. Keep 16 for the redesign.
+- **Not answered yet:** Swing (it came paired with Euclidean), and the other larger items.
+
+Sizes are rough: S is a day or two, M about a week, L more than that.
+
+**Small, and each fills a real gap:**
+
+| Function | What it does | Why Afterecho needs it | Size | Where it goes |
+|---|---|---|---|---|
+| **Loop tone** | Low-pass and high-pass on the feedback only (Tide's FB tilt, [DSP_FOR_REUSE.md §5](../../../y-flanger/DSP_FOR_REUSE.md)). | Nothing filters the loop today unless Tape, Diffuse or Saturate is routed to FB, so repeats stay as bright as the first pass. Darkening repeats are the dub and tape sound. | S | Echo lane, Loop row |
+| **Freeze** | Stops writing input and loops the current cluster at unity, bypassing the loop's saturation and colour so it doesn't wear away. | A performance control, and a good one on iPad. Afterecho's buffer already holds the whole cluster, so this is cheap. Entering and leaving need click-free fades. | S–M | Echo lane header |
+| **Ducking** | Ducks the wet signal while the dry input is loud. | Long feedback stays usable in a mix. The FB curve already has an envelope follower to build on. | S | Output (the dashed slot) |
+| **Pattern tools** | Act on every tap at once for the picked Y axis: Spread (alternate, ramp, random), Tilt (fade the taps out or in), Randomise (seeded, undoable), Reset. | Today, shaping 8–16 taps means 8–16 separate edits. These write the existing per-tap parameters from the GUI, so the engine doesn't change. | S–M | Picture header, for Field and Bars |
+
+**Medium:**
+
+| Function | What it does | Watch out for | Size |
+|---|---|---|---|
+| **Motion** | Tide's LFO shapes (Smooth, S&H, Glider…), tempo rate and envelope follower ([DSP_FOR_REUSE.md §3](../../../y-flanger/DSP_FOR_REUSE.md)). They drive a per-tap Scatter (each tap wanders on its own) and/or the Shape pad. This is the "show the modulation" idea from the playbook. | Wobble had to be bypassed in Fade mode, because moving a delay time retriggers the fades. In Fade and Jump, modulate pan, gain and cutoff, not time. | M |
+| **Swing and real Euclidean** | Swing pushes every other tap late in Sync. Euclidean gets pulses, steps and rotate; today it's a copy of Linear. | It lives in `topology.rs`, which the visuals share, so they stay in step. | S–M |
+| **Shift in the loop** | A frequency shifter on the feedback (Tide's Hilbert pair): repeats climb or fall in pitch without per-tap pitch shifting. | Keep the shift range small by default; large shifts turn into a siren. | M |
+
+**Larger, later:**
+- **32 taps:** deferred on 2026-10-27 to an update after release. If it ships, show a short warning when you go past 16, about CPU and memory at high sample rates and long times. Raise `NUM_TAPS` from 16 to 32 (M). What it costs:
+  - Every per-tap array doubles: readers, 4 SVF stages per tap and channel, and the visualiser's arrays.
+  - Per-tap parameters go from 128 to 256 (8 per tap). The new IDs are additive, so old sessions still load.
+  - The cluster span is `NUM_TAPS × base`, and the buffer is 32 s (`MAX_DELAY_SECONDS`). 16 taps at a 2 s base already fill it. 32 taps need 64 s (about 98 MB for both channels at 192 kHz), or else the far taps drop out at long times.
+  - CPU per tap doubles. Measure it on the iPad.
+  - The page needs the dense rules mocked on the canvas: values only for the selected tap, numbers every fourth tap, and drawing across the bars on touch.
+- **Reverse taps:** per-tap reverse windows (L). Risky in the same way the old pitch shifter was.
+- **Pattern morph:** two stored tap patterns and one automatable knob between them (M–L).
+- **MIDI resonator:** a note sets the base time to its period, so at short times the taps become a tuned comb (M). There's no MIDI input today.
+
+**Not recommended:** per-tap pitch shifting. It was removed in v2.4 for flutter and AM artifacts (HANDOFF §8).
+
+**My pick for the first pass:** loop tone, Freeze, ducking and the pattern tools, plus Motion as the one medium feature.
+
+**Also open from July:**
+- the feedback cycle as Auto, Free or Sync (already drawn in the Echo lane);
+- whether to keep SATURATE.
 
 ### Phase 5 · iPad and release · medium
 - [ ] **Hosts:**
@@ -178,7 +238,7 @@ These don't change the sound; once smoothing has settled, the output should be b
 |---|---|---|
 | **D1** | **The kit.** Move Tide's `epo`, `theme` and `tokens` changes into `Dev/epoche-ui` (additive, so cumulus doesn't break), or copy them into Afterecho? | **Move them into epoche-ui.** A third diverging copy makes every later fix three fixes. It costs one merge pass, and cumulus needs a check afterwards. |
 | **D2** | **Identity.** Change the IDs to Soft Systems now? This breaks Ableton sessions that use the dev builds. | **Yes, now.** Nothing has shipped, and the IDs are permanent once on the App Store. Keep the crate name. |
-| **D3** | **New functions.** Which ones? | Your call. Settle them before the mock. |
+| **D3** | **New functions.** Which ones? | **Decided 2026-10-27:** see Phase 4. 32 taps waits for an update after release; Swing and the larger items are still open. |
 | **D4** | **Audio scope.** Only the clean-up (Phase 1), or sound changes too (SATURATE, FB curve, modulation)? | Do the clean-up first. Make sound changes one at a time against the baseline renders. |
 | **D5** | **Per-tap lists.** Keep them as a page, or rely on the field plus last-touched? | Decide in the mock. Rows are the easier touch target for 16 taps. |
 | **D6** | **Branches.** Merge `nice-plug-port` into `main` before starting, or start the redesign on a new branch from it? | Commit, merge into `main`, then work on `ui/scope-first`, as Tide does. |
