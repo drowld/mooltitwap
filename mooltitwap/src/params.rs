@@ -429,7 +429,12 @@ impl Default for PetalParams {
     fn default() -> Self {
         let time_default = 0.25; // normalized → ~125 ms in Free mode, 1/4 in Sync mode
         Self {
-            editor_state: EguiState::from_size(crate::gui::WINDOW_W, crate::gui::WINDOW_H),
+            // The scope page follows the host's bounds on iOS and picks its shape
+            // there (gui_scope.rs `Shape::pick`); the v3 canvas stays fixed.
+            editor_state: {
+                let st = EguiState::from_size(crate::gui::WINDOW_W, crate::gui::WINDOW_H);
+                if crate::gui::SCOPE_PAGE { st.with_host_resize() } else { st }
+            },
             theme_dark: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             base_time_l: FloatParam::new(
                 "Base Time L",
@@ -475,6 +480,9 @@ impl Default for PetalParams {
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.05 },
             )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
             // Default: Sync mode, 1/4 note (index 8 of 17 divs → 8/17 ≈ 0.47)
             feedback_time: FloatParam::new(
@@ -487,6 +495,9 @@ impl Default for PetalParams {
             feedback_time_locked: BoolParam::new("Feedback Time Locked", true),
 
             crossfeed: FloatParam::new("Crossfeed", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage())
                 .with_smoother(SmoothingStyle::Linear(20.0)),
             crossfeed_mode: EnumParam::new("Crossfeed Mode", CrossfeedMode::Mix),
 
@@ -495,6 +506,9 @@ impl Default for PetalParams {
                 0.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
             diffuse_routing: EnumParam::new("Diffuse Routing", DiffuseRouting::Output),
             diffuse_size: FloatParam::new(
@@ -502,6 +516,8 @@ impl Default for PetalParams {
                 1.0,
                 FloatRange::Skewed { min: 0.25, max: 2.0, factor: FloatRange::skew_factor(-0.5) },
             )
+            .with_value_to_string(Arc::new(|v| format!("{v:.2}×")))
+            .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches(['×', 'x']).trim().parse().ok()))
             .with_smoother(SmoothingStyle::Logarithmic(50.0)),
 
             degrade_amount: FloatParam::new(
@@ -509,18 +525,25 @@ impl Default for PetalParams {
                 0.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
             degrade_drive: FloatParam::new(
                 "Degrade Drive",
                 0.0,
                 FloatRange::Linear { min: -12.0, max: 24.0 },
             )
-            .with_unit(" dB"),
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
             degrade_wear: FloatParam::new(
                 "Degrade Wear",
                 0.25,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
-            ),
+            )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage()),
             degrade_type: EnumParam::new("Degrade Tape Type", TapeType::I),
             degrade_routing: EnumParam::new("Degrade Routing", DiffuseRouting::Output),
 
@@ -529,6 +552,9 @@ impl Default for PetalParams {
                 0.0,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
             sat_drive: FloatParam::new(
                 "Saturate Drive",
@@ -536,6 +562,7 @@ impl Default for PetalParams {
                 FloatRange::Linear { min: 0.0, max: 24.0 },
             )
             .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1))
             .with_smoother(SmoothingStyle::Linear(20.0)),
             sat_routing: EnumParam::new("Saturate Routing", DiffuseRouting::Output),
 
@@ -570,6 +597,7 @@ impl Default for PetalParams {
                 FloatRange::Linear { min: -24.0, max: 12.0 },
             )
             .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1))
             .with_smoother(SmoothingStyle::Linear(20.0)),
             soft_clip: BoolParam::new("Soft Clip", false),
             dry_wet: FloatParam::new(
@@ -577,6 +605,9 @@ impl Default for PetalParams {
                 0.5,
                 FloatRange::Linear { min: 0.0, max: 1.0 },
             )
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
             output_gain: FloatParam::new(
                 "Output Gain",
@@ -584,6 +615,7 @@ impl Default for PetalParams {
                 FloatRange::Linear { min: -24.0, max: 12.0 },
             )
             .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1))
             .with_smoother(SmoothingStyle::Linear(20.0)),
         }
     }

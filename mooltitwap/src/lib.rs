@@ -2,6 +2,7 @@ mod delay;
 mod diffusion;
 mod filter;
 mod gui;
+mod gui_scope;
 mod gui_v3;
 mod palette_v3;
 mod params;
@@ -9,6 +10,7 @@ mod presets;
 mod tape;
 mod tokens;
 mod topology;
+mod ui;
 
 use nice_plug::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};

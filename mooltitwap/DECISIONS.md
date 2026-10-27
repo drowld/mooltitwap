@@ -2,6 +2,56 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-27 · Scope-first page, first pass, on Tide's own UI layer (v2.28.0)
+
+**The redesign is built on a local copy of Tide's UI layer, not on epoche-ui.**
+- Owner, 2026-10-27: we stopped using epoche-ui. Tide keeps its own copy of the
+  Epoché widgets, theme and tokens, and that copy is the current one: it has the
+  multitouch layer (`touch_interact`, `tap_or_click`, `knob_drive`), the cell
+  grammar and the Settings-menu styling.
+- Copied into `src/ui/{epo,theme,tokens}.rs`, with only the paths changed. Keep
+  them close to Tide's so fixes can move between the two plug-ins.
+- Fonts: Karla, Inconsolata, IBM Plex and GFS Didot come with their OFL licences.
+- The v2/v3 editors stay on epoche-ui until the new page replaces them. Then they
+  and the `epoche-ui` dependency go together, so nothing is ported twice.
+
+**The new page, `src/gui_scope.rs`**, is modelled on Tide's `editor_scope.rs`
+and switched by `gui::SCOPE_PAGE` (`false` brings the v3 editor back).
+- Region tables follow the canvas:
+  - Wide is 1366 × 720 (desktop, and iPad in short host panels).
+  - Tall is 1050 × 780 (iPad full screen).
+  - `Shape::pick` takes the larger zoom, with tests for the picking rule and for
+    every region fitting without overlap.
+  - iOS uses `with_host_resize`.
+  - `AFTERECHO_SHAPE=tall` previews the tall page on desktop.
+- Element sizes are Tide's: dial 28, control row 30, name and value rows 13.
+- The look follows Tide's model: theme, accent, font and text size are saved once
+  per device in `appearance.json` beside the presets folder, not with the
+  project. Afterecho's defaults are the cool foundation and the violet accent.
+- Built this pass:
+  - the header: ☰, wordmark, channel modes, preset ‹ › stepping, A/B, light/dark;
+  - Tide's Settings menu;
+  - Last touched;
+  - Time & taps, including the Shape pad with the real tap positions;
+  - Colour (Diffuse, Tape and Saturate on tabs);
+  - Output;
+  - the Echo lane's Cross and Loop rows.
+- Still placeholders: the tap field and the Echo lane drawing. Feedback is a knob
+  until the lane's drag handles exist.
+
+**Display text for the global params.** The page shows each parameter's own
+text, and most 0–1 parameters had none, so they printed raw values like "0.5".
+- Percent: Feedback, Crossfeed, Dry/Wet, the Diffuse, Tape and Saturate amounts,
+  and Tape wear.
+- `×`: Diffuse size.
+- One decimal: the dB parameters.
+- Display only; values and saved state are unchanged. Hosts' automation lanes
+  now read the same text.
+
+_Rejected:_
+- Adding Tide's pieces to epoche-ui: the owner no longer uses that crate.
+- Porting the v3 editor onto the new layer first: it would be thrown away.
+
 ## 2026-07-11 · Spotlight preset palette · dark-mode variants · A/B sizing (v2.18.0)
 Three big items, all ported from y-flanger (which itself ported cumulus).
 - **Preset system**: full spotlight command palette in new `src/palette_v3.rs`

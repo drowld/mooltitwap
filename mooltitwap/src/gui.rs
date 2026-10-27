@@ -24,9 +24,14 @@ use crate::MAX_DELAY_SECONDS;
 /// Figma frame. Flip to `false` to get the v2.17 editor back.
 pub const V3_PREVIEW: bool = true;
 
+/// The redesigned scope-first page (gui_scope.rs, on the Tide-derived `ui`
+/// layer). Flip to `false` to get the v3 editor back while the new page is
+/// being built; both old editors go once it matches them.
+pub const SCOPE_PAGE: bool = true;
+
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
-pub const WINDOW_W: u32 = if V3_PREVIEW { 1194 } else { 1080 };
-pub const WINDOW_H: u32 = if V3_PREVIEW { 834 } else { 660 };
+pub const WINDOW_W: u32 = if SCOPE_PAGE { 1366 } else if V3_PREVIEW { 1194 } else { 1080 };
+pub const WINDOW_H: u32 = if SCOPE_PAGE { 720 } else if V3_PREVIEW { 834 } else { 660 };
 const BASE_W: f32 = WINDOW_W as f32;
 /// Shared card body height (logical px, pre-scale) so the three cards align and
 /// fill down to the bottom page margin. The right card carries the
@@ -135,6 +140,8 @@ pub struct EditorState {
     pub palette_tag_for: Option<String>,     // row whose add-tag field is open
     pub palette_tag_buf: String,
     pub palette_tag_focus: bool,
+    /// The scope-first page's own state (gui_scope.rs).
+    pub scope: crate::gui_scope::ScopeState,
 }
 impl Default for EditorState {
     fn default() -> Self {
@@ -164,6 +171,7 @@ impl Default for EditorState {
             palette_name_buf: String::new(), palette_name_focus: false,
             palette_rename_from: None, palette_del_confirm: None,
             palette_tag_for: None, palette_tag_buf: String::new(), palette_tag_focus: false,
+            scope: Default::default(),
         }
     }
 }
@@ -224,9 +232,19 @@ pub fn create_editor(
             // knobs, 44pt hit floors, and the title_size control (title_fs only
             // honors set_title_size on touch). Desktop stays pointer-mode.
             theme::set_touch(cfg!(target_os = "ios"));
-            theme::install_fonts(ctx);
+            crate::ui::theme::set_touch(cfg!(target_os = "ios"));
+            if SCOPE_PAGE {
+                crate::ui::theme::install_fonts(ctx);
+            } else {
+                theme::install_fonts(ctx);
+            }
         },
         move |ui, setter, _queue, st| {
+            if SCOPE_PAGE {
+                let tempo = read_tempo(&tempo_bpm_shared);
+                crate::gui_scope::frame(ui, &params, setter, st, &egui_state_size, tempo);
+                return;
+            }
             // Seed theme from the persisted param once, forcing a single apply.
             if !st.inited {
                 st.inited = true;

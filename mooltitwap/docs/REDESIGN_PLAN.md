@@ -152,6 +152,22 @@ Canvas: https://claude.ai/artifact/6osu4gEG6f8RzfBqfsCr7Z.
 - [ ] Measure in points: dial about 29 pt or more, text about 11 pt or more, whole-cell touch targets (aiming for 44 pt).
 
 ### Phase 3 · Build the new page · large
+**Progress, 2026-10-27 (v2.28.0, branch `ui/scope-first`):** the first pass is built and checked in the standalone, on both shapes.
+- Done:
+  - the page frame;
+  - the header;
+  - Tide's Settings menu;
+  - Last touched;
+  - Time & taps, with the Shape pad;
+  - Colour;
+  - Output;
+  - the lane's Cross and Loop rows.
+- Next:
+  - the tap field (Field and Bars, the Y picker, dragging taps);
+  - the Echo lane drawing and its drag handles;
+  - restyling the preset browser;
+  - then the new functions (Phase 4).
+
 - [ ] **A new page module** in the style of Tide's `editor_scope.rs`:
   - absolute layout in logical px through `r(o, s, x, y, w, h)`;
   - element sizes in `mod g`;
@@ -236,7 +252,7 @@ Sizes are rough: S is a day or two, M about a week, L more than that.
 
 | # | Question | My recommendation |
 |---|---|---|
-| **D1** | **The kit.** Move Tide's `epo`, `theme` and `tokens` changes into `Dev/epoche-ui` (additive, so cumulus doesn't break), or copy them into Afterecho? | **Move them into epoche-ui.** A third diverging copy makes every later fix three fixes. It costs one merge pass, and cumulus needs a check afterwards. |
+| **D1** | **The kit.** Move Tide's `epo`, `theme` and `tokens` changes into `Dev/epoche-ui`, or copy them into Afterecho? | **Decided 2026-10-27 (owner): copy them, as Tide does.** epoche-ui is no longer used. The local copy is in `src/ui/`; see DECISIONS.md. |
 | **D2** | **Identity.** Change the IDs to Soft Systems now? This breaks Ableton sessions that use the dev builds. | **Yes, now.** Nothing has shipped, and the IDs are permanent once on the App Store. Keep the crate name. |
 | **D3** | **New functions.** Which ones? | **Decided 2026-10-27:** see Phase 4. 32 taps waits for an update after release; Swing and the larger items are still open. |
 | **D4** | **Audio scope.** Only the clean-up (Phase 1), or sound changes too (SATURATE, FB curve, modulation)? | Do the clean-up first. Make sound changes one at a time against the baseline renders. |

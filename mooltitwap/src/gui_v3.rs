@@ -510,7 +510,7 @@ fn draw_v3_space(ui: &mut egui::Ui, region: Rect, params: &Arc<PetalParams>, set
 
 /// A/B compare: save the live params into the current slot, then load the
 /// target (apply its snapshot, or seed it as a copy of the current on first use).
-fn ab_switch(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, target: u8) {
+pub(crate) fn ab_switch(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, target: u8) {
     if st.ab_active == target { return; }
     st.ab_slots[st.ab_active as usize] = Some(crate::presets::capture(params));
     if let Some(snap) = st.ab_slots[target as usize].clone() {

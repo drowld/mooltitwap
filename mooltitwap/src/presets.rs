@@ -95,7 +95,7 @@ pub struct Library {
     pub presets: Vec<Preset>,
 }
 
-fn data_dir() -> PathBuf {
+pub(crate) fn data_dir() -> PathBuf {
     if let Some(h) = std::env::var_os("HOME") {
         return PathBuf::from(h).join("Library/Application Support/Mooltitwap/presets");
     }
