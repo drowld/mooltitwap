@@ -1,6 +1,6 @@
 [package]
 name = "mooltitwap"
-version = "2.17.1"
+version = "2.27.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Emmanuel Bussien"]
@@ -15,11 +15,6 @@ name = "mooltitwap"
 path = "src/main.rs"
 
 [dependencies]
-# nice-plug — the local nih-plug fork shared with cumulus/y-flanger (a cargo
-# workspace at ../../Dev/nice-plug). `standalone` builds the desktop test host;
-# `assert_process_allocs` keeps the RT path allocation-free.
-nice-plug = { path = "../../Dev/nice-plug/crates/nice-plug", features = ["assert_process_allocs", "standalone"] }
-nice-plug-egui = { path = "../../Dev/nice-plug/crates/nice-plug-egui", default-features = false, features = ["opengl"] }
 # egui pinned to the exact version the fork resolves so the editor closure
 # types unify; default_fonts so text renders before install_fonts runs.
 egui = { version = "0.34.1", default-features = false, features = ["bytemuck", "default_fonts"] }
@@ -29,3 +24,17 @@ crossbeam = "0.8"
 # Named-preset serialization (one JSON file per preset in the user data dir).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Desktop (VST3/CLAP/standalone): `standalone` builds the local test host;
+# `assert_process_allocs` keeps the RT path allocation-free. egui via baseview
+# OpenGL. The xtask iOS build passes no --features, so the split MUST live here.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+nice-plug = { path = "../../Dev/nice-plug/crates/nice-plug", features = ["assert_process_allocs", "standalone"] }
+nice-plug-egui = { path = "../../Dev/nice-plug/crates/nice-plug-egui", default-features = false, features = ["opengl"] }
+
+# iOS (AUv3): `auv3` enables the export macro + C shim; NO `standalone`
+# (baseview/jack/cpal are desktop-only) and NO `opengl` on egui (baseview has
+# no UIKit backend — the crate's own iOS renderer is used instead).
+[target.'cfg(target_os = "ios")'.dependencies]
+nice-plug = { path = "../../Dev/nice-plug/crates/nice-plug", features = ["assert_process_allocs", "auv3"] }
+nice-plug-egui = { path = "../../Dev/nice-plug/crates/nice-plug-egui", default-features = false }

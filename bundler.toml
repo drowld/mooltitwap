@@ -1,0 +1,10 @@
+# nice-plug iOS/AUv3 bundler config. The `[<package>]` section feeds
+# `cargo nice-plug bundle-ios <package>`. AU codes MUST match the plugin's
+# `impl AuPlugin` consts in src/lib.rs.
+[mooltitwap]
+name = "Afterecho"
+au_type = "aufx"            # audio effect
+au_subtype = "Aftr"         # matches AU_SUBTYPE
+au_manufacturer = "Busn"    # matches AU_MANUFACTURER
+ios_bundle_id = "com.tlkm.afterecho"   # matches the vendor prefix on team 6ABFQC732N (cumulus/flanger)
+vendor_name = "Bussien"

@@ -245,6 +245,16 @@ impl TapReader {
         self.nominal.set_rate(rate);
     }
 
+    /// Where the reader is *right now*: Repitch = the slewed (in-flight)
+    /// position, Fade/Jump = the committed target. The DSP uses this to
+    /// bound the Repitch glide time (rate ∝ remaining distance).
+    pub fn current_pos(&self) -> f32 {
+        match self.mode {
+            DelayMode::Repitch => self.nominal.current(),
+            _ => self.target_delay,
+        }
+    }
+
     #[inline]
     pub fn read(&mut self, delay: &DelayLine) -> f32 {
         match self.mode {

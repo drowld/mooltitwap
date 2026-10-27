@@ -5,7 +5,194 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.17.1 · 2026-07-07 · branch `nice-plug-port`
+## ⭐ CURRENT STATE — v2.27.0 · 2026-07-14 · branch `nice-plug-port`
+
+**The plugin is απόηχος / Afterecho** (display name; the `mooltitwap` crate/folder
+rename is deferred — see TASKS). It runs as **VST3 + CLAP on desktop AND as a real AUv3
+on the physical iPad** (Bussien team `6ABFQC732N`, bundle `com.tlkm.afterecho`).
+v2.27.0 is installed to `~/Library/Audio/Plug-Ins` (CLAP+VST3) and pushed+launched
+on the iPad.
+> **All of §1–§11 far below predate v2.18** and describe the nih-plug era; trust
+> ARCHITECTURE.md + DECISIONS.md for anything structural. This CURRENT STATE block +
+> DECISIONS.md are the source of truth for v2.18→v2.27.
+
+### What changed 2026-07-14 (v2.25.0 → v2.27.0)
+All editor/UX; no DSP changes. **Still desktop-screenshot-verified only** — the iPad
+multitouch feel and a DAW-by-ear pass remain the standing gate.
+
+**Multitouch (v2.25.0)** — every discrete tap target now works with several fingers at
+once on the iPad. `gui_v3::tap_or_click` wraps the touch/desktop split (kit `chip_rt`
+pattern: on touch, claim the synth pointer over the cell + detect the tap from its OWN
+`epo::tap_touch` finger; desktop keeps the ordinary `clicked()`). Routed through it:
+`v3_button` (all chips/toggles/modes/A-B/curve/lock/sync/link), both mute pills, close-×,
+hamburger, sun. **Desktop behavior is byte-identical** (only `theme::touch()` builds change).
+*Not yet multitouch (still `ui.interact`, the separate handoff item):* PAN/GAIN tracks,
+GRID/STEMS tap dots, XY SHAPE pads — those are drag surfaces needing a raw-touch
+horizontal-drag helper.
+
+**DELAY card centering (v2.25.0)** — `draw_v3_left` was left-anchored at a fixed 13px
+inset; now it centers the 3-cell grid on the card like every other card (`col_x =
+card.center − grp_w/2`, `grp_w = 2·pitch + cell`).
+
+**GRID/STEMS viz overhaul (v2.26.0)** — the three owner viz/UX ideas landed:
+- **Tap panel moved into the SHAPE card** (`draw_strip_tap_panel`) — selecting a dot fills
+  the SHAPE card (tag reads `TAP NN`) instead of a popup floating over the plot (killed the
+  bottom-edge occlusion). `‹ ›` step through active taps (wrap); mute · VOL · **PAN** · CUT ·
+  Q; TYPE + SLOPE are single **click-to-cycle** buttons. × restores the XY pads.
+- **SNAP chip** (both views, `EditorState::snap3`) quantizes a dragged tap's time to base-time
+  multiples (`snap_offset`: quantize `pos+offset` to 1/NUM_TAPS since span = NUM_TAPS·base).
+  A per-drag raw-offset accumulator (`ui.memory` `*_virt`) avoids stickiness.
+- **Filter-mode glyph** — `filter_glyph` (LP ¯\ · BP /¯\ · HP /¯) painted on every TYPE
+  button (`v3_button_glyph`), tap panel + FILTER page.
+- **Feedback ghost in GRID** — first repeat ghosted faint, drawn only if it lands in the
+  existing taps-only range (no x-range rescale, so temporal mapping is unchanged).
+
+**M/S PAN + Mono (v2.27.0)** — `draw_pan_track` is channel-mode aware: **M/S** shows a
+MID(left)↔SIDE(right) balance (fill from the left, no center detent, readout `MID/M·S/SIDE`);
+Stereo unchanged (bipolar L/C/R). **Mono drops the PAN tab entirely** (tab list is
+`GAIN·FILTER·SPACE`, right_tab coerces Pan→Gain) and **greys the panel PAN knob**
+(`disabled_knob` placeholder). Panel PAN readout is mode-aware too.
+
+**Accent → violet (v2.27.0)** — `gui_v3::draw` calls `theme::set_accent(5)` so `G()` /
+`accent_default()` = violet (`#a086e8` = `accent(2)`, the tap color). Fixes the preset
+palette (search icon, save-as icon+label, tag-input border), the header preset name on
+hover, and the header accent dot — all were the kit-default green.
+
+**OLED + high-contrast (v2.27.0, kit change)** — `epoche-ui/theme.rs` gained (additive,
+cumulus-safe): `DARK_OLED` palette = pure-black paper (SHADE ▸ **OLED**, dark_variant 3,
+clamp bumped 2→3); a `HIGH_CONTRAST` atomic + `boost()` (brighter ink family + stronger
+hairlines) with `set_high_contrast`, wired to a hamburger **CONTRAST** toggle
+(`EditorState::high_contrast`, pushed each frame). Both are **session-state, not persisted**
+(like `dark_variant`/`sizing_beta`) — they reset on reload.
+
+**New:** `EditorState::{snap3, high_contrast}`; `gui_v3::{tap_or_click, v3_button_glyph,
+filter_glyph, disabled_knob, snap_offset, draw_strip_tap_panel}`; theme `DARK_OLED` +
+high-contrast. **Default change:** `slider_steps` 0→2 (PAN/GAIN tracks 1.5× by default).
+**Removed:** `field_panel_rect` / `draw_field_panel` (the old floating popup).
+**Uncommitted in the kit:** `set_title_override` (v2.21) + OLED/high-contrast (v2.27).
+
+### What changed this session (v2.18.1 → v2.24.2) — see DECISIONS.md for the "why" on each
+**DSP / feedback**
+- **v2.18.1** — fixed the "digital mash" on delay-mode changes: base-time/sync/tempo
+  moves now route through `TapReader::set_nominal` so Repitch/Fade/Jump actually govern
+  the transition (the old v2.12 "Guard 1" hard-snapped every reader every block). Repitch
+  glide is now bounded (`max(0.02, dist/100ms)`). Feedback head follows the same rules →
+  FB TIME responds fast instead of gliding for ~90 s.
+- **v2.18.2** — **in-loop soft saturation** (`2·tanh(x/2)` just before the buffer write;
+  the loop's only bound, no gain-comp per project rule) → feedback ≥1.0 self-oscillates
+  bounded instead of detonating. With that, the **unlocked-FB-TIME cluster-span floor was
+  removed** (short FB times are now a usable dub-wash zone).
+- **v2.19.0** — **FB TIME follows the main delay SYNC** (`feedback_time_seconds` reads
+  `sync_mode`; the separate `feedback_time_mode` param is deprecated-but-kept).
+- **v2.20.0 / v2.21.0** — **FEEDBACK CURVE** (Natural / Bloom / Gate): envelope-follower
+  inside the loop bends the effective loop gain by level (Bloom = comp-in-loop plateau,
+  Gate = expander-in-loop hold-then-cut). Chips live on the **DELAY card**, between
+  FEEDBACK and TAPS COUNT (v2.21 moved them off the SPACE page). Viz echo bars follow the
+  curve (`cycle_gains[]` in `compute_viz_data`).
+- **SATURATE block** (v2.20) — playable tanh DRIVE stage, routable IN/FB/OUT like DIFFUSE.
+- **DEGRADE block** — **v2.19 shipped a bitcrush (wrong algo), v2.21 replaced it with a
+  real TAPE model** ported from **RE-DEEMER** (`~/re-deemer`, ISC) into `src/tape.rs`:
+  J-A hysteresis (RK4, 2× oversampled, Chowdhury DAFx-19) + record/repro heads EQ +
+  HF self-erasure. Params: TYPE I/II/IV · DRIVE (−12..+24 dB, full makeup) · WEAR ·
+  AMOUNT · routing (FB routing = generation loss). 3 unit tests pass. `src/crush.rs`
+  deleted. The DELAY-card SATURATION toggle was removed (`soft_clip` param deprecated).
+
+**GUI / layout**
+- **SPACE page** now has five sections: XFEED · DIFFUSE · DEGRADE · SATURATE (+ FB CURVE
+  moved out to the DELAY card in v2.21).
+- **Center card is now a `card_tabs` card: VIEW · GRID · STEMS · ECHO** (v2.24):
+  - **GRID** = time × pan plane. Drag a dot: X = `time_offset`, Y = pan (L top / R bottom,
+    relabels MID/SIDE in M/S mode). Dot **size = tap gain**. No baseline bar (v2.24.2).
+  - **STEMS** = time × volume lollipops. Drag Y = gain (DAW-fader skew, dB gridlines),
+    X = time. Fixed dot size. Ghosts only the **first** feedback repeat (v2.24.1).
+  - **ECHO** = the classic read-only L/R bar view w/ full feedback tail (`draw_stems`).
+  - **Tap panel**: click a dot → bottom-center inline card (mute pill · [GAIN in GRID /
+    PAN in STEMS — whichever isn't on the axes] · CUT · Q · LP/BP/HP · 12/24/48 · ×).
+  - **Selection sync**: editing a tap row in the TAPS card (mute/PAN/GAIN track/FILTER
+    chips) selects that tap in the view (via `LAST_TOUCHED` atomic → `st.field_sel`).
+    *Not yet:* CUT/Q knob drags in FILTER blocks (epo knobs return nothing hookable).
+  - State: `EditorState::view3` (u8: 0 GRID / 1 STEMS / 2 ECHO). `viz_mode` is now
+    legacy-v2-editor only. `compute_viz_data_ex(.., shown_cap)` parameterizes the echo
+    x-range reserve (editing views pass 1, ECHO/v2 pass 4).
+- **TAB TEXT** now works on **desktop** too (epoche-ui `set_title_override`, additive;
+  cumulus unchanged). **SLIDERS** hamburger stepper scales PAN/GAIN track thickness (1–4×).
+- **τόπος sizing beta** (v2.22) — `src/tokens.rs` holds two selectable sizing sheets (the
+  original v3/Figma numbers vs the owner's τόπος proposal), toggled live via hamburger ▸
+  **SIZING (V3 / τόπος β)**. Spec exported to **`docs/TOPOS_TOKENS.md`** (portable to other
+  plugins). Knob token corrected to 96@2×=48 (= v3 size; the sheet's `72` contradicted its
+  own cell formula). Both are session-state, not persisted.
+
+**New files:** `src/tape.rs`, `src/tokens.rs`, `docs/TOPOS_TOKENS.md`. **New params:**
+`degrade_{amount,drive,wear,type}`, `degrade_routing`, `sat_{amount,drive}`, `sat_routing`,
+`fb_curve`; deprecated (kept for state-compat): `soft_clip`, `feedback_time_mode`.
+**New EditorState:** `slider_steps`, `sizing_beta`, `field_sel`, `view3`.
+
+### ⭐ owner-directed viz/UX ideas (2026-07-13) — ✅ ALL DONE in v2.26.0–2.27.0
+1. ✅ **GRID tap-panel occlusion** → panel now lives in the SHAPE card
+   (`draw_strip_tap_panel`), not floating over the plot.
+2. ✅ **Snap-to-grid / quantize** → SNAP chip in GRID/STEMS (`snap3` + `snap_offset`).
+3. ✅ **Filter-mode visual cue** → response-curve glyph on every TYPE button
+   (`filter_glyph` / `v3_button_glyph`).
+See the "What changed 2026-07-14" changelog above. Only hand-testing on the iPad + in a
+DAW is left for these.
+
+### iOS / AUv3 (see DECISIONS 2026-07-11)
+`impl AuPlugin` + `nice_export_auv3!` (both `#[cfg(target_os="ios")]`); `bundler.toml` at
+workspace root; target-split deps in Cargo.toml (iOS = `auv3`, no `standalone`/`opengl`).
+iPad runs in **touch mode** (`set_touch(cfg!(target_os="ios"))`).
+**Install recipe (learned the hard way v2.24):**
+- `cargo nice-plug bundle-ios mooltitwap --device` — **always `--device`** (without it you
+  build the *simulator* app). Its own install step errors on a Wi-Fi-tunnel iPad (USB-only
+  discovery) — **ignore that error**, then push directly:
+- `xcrun devicectl device install app --device 4594E238-8C6F-5D0F-A274-7766D3D606DE
+  "…/target/ios/device/Afterecho.app"` then `… process launch … com.tlkm.afterecho`
+  (launch makes iOS re-register the AUv3). Verify the pushed version with
+  `strings …/MooltitwapAU.framework/MooltitwapAU | grep 2.24`.
+- Profiles minted via `scratchpad/afmint` xcodegen + `xcodebuild -allowProvisioningUpdates`;
+  **free-team profiles expire ~2026-07-18 → re-mint then.**
+
+**Verified by build + standalone screenshots (and iPad install) only. Still almost nothing
+is hand-tested by ear on the iPad or in a DAW** — the standing gate (TASKS.md).
+
+### ⭐ NEXT PHASE (owner-directed) — CUSTOM MULTITOUCH GUI, like cumulus
+Goal: make the iPad truly multitouch — several fingers moving different controls at once
+(cumulus does this for "almost every element"). egui delivers ONE pointer, so any element
+built on `ui.interact` is single-touch. The kit already has the raw-touch plumbing:
+- iOS `UITouch` events → `nice-plug-egui/src/editor_ios.rs` (`touches_began/moved/ended/
+  cancelled` + `dispatch_touch`).
+- `theme::touch()` gate; `epo::tap_touch(ui, hit_rect, id)` claims ONE finger for a tap;
+  `epo::knob_rt(...)` is a raw-touch knob (own hit-test, claims a finger, vertical drag).
+- `theme::TOUCH_MIN_HIT = 44.0`.
+
+**What's already multitouch in v3**: knobs (`epo::knob_ex`→`knob_rt`), the
+`preset_slot`/`card_tabs` taps, AND — since **v2.25.0** — every `v3_button` (chips/toggles/
+modes/A-B/curve/lock/sync/link), both mute pills, close-×, hamburger + sun, all via
+`gui_v3::tap_or_click` (the kit `chip_rt` pattern).
+**What is NOT yet (single-pointer `ui.interact`)** and is the remaining port target — all
+DRAG surfaces (need a raw-touch "claim a finger, drag" helper, unlike the tap buttons):
+- the hand-painted PAN / GAIN tracks + FILTER-block sliders + SPACE has knobs (ok) — the
+  tracks need a raw-touch "claim a finger, drag horizontally" like `knob_rt` does vertically.
+- **GRID / STEMS tap dots** (`draw_tap_field` / `draw_tap_stems`, `ui.interact` per dot)
+  — raw-touch claim so several taps drag at once (this view benefits most from multitouch).
+- XY SHAPE pads (`draw_xy_pad`) — raw-touch claim so both pads move at once.
+Plan: study cumulus's custom widgets (its editor.rs uses `tap_touch`/raw-touch pervasively),
+add a raw-touch horizontal-slider + toggle helper to the kit (or v3), swap v3's
+`ui.interact` call sites over. Test with 2+ fingers on the iPad.
+
+**Also outstanding**: finish the multitouch port — the remaining DRAG surfaces (PAN/GAIN
+tracks, FILTER-block sliders, GRID/STEMS tap dots, XY SHAPE pads) need a raw-touch
+horizontal-drag helper (the tap buttons are done, v2.25); hand-test everything on iPad + in
+a DAW (multitouch feel, snap drag, M/S pan, OLED/contrast, palette round-trip, A/B,
+DEGRADE-tape by ear, FB CURVE feel); merge `nice-plug-port`→`main`; the
+`mooltitwap`→`afterecho` crate/folder rename; ECHO-strip feedback-footer redesign (still
+just sketched); optionally **persist** the session-state theme toggles (OLED/`dark_variant`/
+`high_contrast`/`sizing_beta` all reset on reload — would need new persist params).
+**Uncommitted in the shared kit (epoche-ui):** `set_title_override` (v2.21) + the additive
+`DARK_OLED` palette and `HIGH_CONTRAST`/`boost()` (v2.27) — not yet committed there.
+
+---
+
+## ⭐ PRIOR STATE — v2.17.1 · 2026-07-07 · branch `nice-plug-port`
 
 The plugin was **ported off nih-plug onto nice-plug + nice-plug-egui + epoche-ui**
 (egui 0.31→0.34) and the editor fully rebuilt on the shared Epoché widget kit so it
@@ -19,11 +206,6 @@ matches the **cumulus** plugin. See ARCHITECTURE.md (current) + DECISIONS.md (wh
   aspect-locked resize grip, named preset system (`src/presets.rs`).
 - git: `main` holds the pristine pre-port v2.15 checkpoint (`be061d8`); all port work is
   on **`nice-plug-port`**. epoche-ui got an additive `Accent::Raw` (committed `d43c2fa`).
-
-**Next:** hand-test the v2.17.1 interactions in a DAW (TAPS drag/scroll, FB-TIME
-unlock+drag, preset browser open→click-out→reopen, XFEED/DIFFUSE knobs — verified only
-by code+screenshot); then merge `nice-plug-port`→`main`; then the Wobble→Ducker swap
-(never started). Full list in TASKS.md.
 
 **Verification workflow:** `cargo build --release --bin mooltitwap`, launch the
 standalone, find the window via a Swift `CGWindowListCopyWindowInfo` snippet,
@@ -341,11 +523,9 @@ cycles Free/Sync on **right-click** when unlocked.
 ---
 
 ## 10. Outstanding work / backlog (priority order)
-1. **Wobble → Ducker.** The user wants Wobble *removed entirely* and its left-panel
-   space reused for a **ducker** (sidechain-style envelope follower that ducks the
-   wet signal by the dry input's level). Wobble currently still exists and still
-   sounds "ringy" in Repitch/Jump (expected — it's modulating delay time). Fade mode
-   bypasses it. Plan: gut Wobble, add Ducker DSP + UI.
+1. ~~Wobble → Ducker~~ **DONE (v2.17.5): Wobble removed** (params + LFO + UI).
+   Ducker (sidechain envelope follower ducking wet by dry level) remains optional —
+   left-panel space is free for it.
 2. **Scale `draw_center` interior** (stems/grid/shaping) with `s` — currently only
    correct at 100% zoom.
 3. **Robust slider ghost-edit fix** (see §6).

@@ -2,8 +2,12 @@ mod delay;
 mod diffusion;
 mod filter;
 mod gui;
+mod gui_v3;
+mod palette_v3;
 mod params;
 mod presets;
+mod tape;
+mod tokens;
 mod topology;
 
 use nice_plug::prelude::*;
@@ -13,7 +17,8 @@ use std::sync::Arc;
 use crate::delay::{ChannelTaps, SlewedTime};
 use crate::diffusion::Diffusion;
 use crate::filter::{soft_clip, PeakLimiter, Svf};
-use crate::params::{ChannelMode, DelayMode, DiffuseRouting, PetalParams, NUM_TAPS};
+use crate::params::{ChannelMode, DelayMode, DiffuseRouting, FbCurve, PetalParams, TapeType, NUM_TAPS};
+use crate::tape::{TapeDegrade, TapeDegradeParams, TapeKind};
 use crate::topology::TopologyEngine;
 
 /// Per-channel delay buffer capacity in seconds. Tap nominal delays exceeding
@@ -59,6 +64,17 @@ pub struct Mooltitwap {
     diff_wet_l: Diffusion,
     diff_wet_r: Diffusion,
 
+    // DEGRADE block — physically-modeled tape (re-deemer port: J-A
+    // hysteresis at 2× + heads EQ + self-erasure). Stereo; inserted at the
+    // routing point the `degrade_routing` param selects — Input / Feedback /
+    // Output, same grammar as DIFFUSE. Feedback routing = generation loss.
+    tape: TapeDegrade,
+
+    /// Envelope follower on the raw feedback signal (linked max of L/R so
+    /// the stereo image isn't skewed) — drives the FB CURVE gain bending
+    /// (Bloom = compressor-in-the-loop, Gate = expander-in-the-loop).
+    fb_env: f32,
+
     /// Smoothly tracks the target feedback delay time (samples) to avoid
     /// clicks when the user changes `feedback_time` or the tempo jumps.
     fb_time_slew: SlewedTime,
@@ -71,11 +87,6 @@ pub struct Mooltitwap {
     /// pitch drift and a loud stack of taps reading near-zero delay.
     needs_initial_snap: bool,
 
-    /// Nominal base delay (samples) from the previous process block.
-    /// Used to detect sync-division / tempo changes between blocks so we can
-    /// snap immediately instead of letting SlewedTime drift at 0.02 samp/samp.
-    prev_base_samples_l: f32,
-    prev_base_samples_r: f32,
     /// Active-tap count from the previous block. When this changes the
     /// topology anchoring re-distributes ALL intermediate taps, so the
     /// fb_time_slew (and per-tap readers) must SNAP not glide — gliding
@@ -90,9 +101,6 @@ pub struct Mooltitwap {
     // Limiter
     lim_l: PeakLimiter,
     lim_r: PeakLimiter,
-
-    // LFO
-    lfo_phase: f32,
 }
 
 impl Default for Mooltitwap {
@@ -112,21 +120,24 @@ impl Default for Mooltitwap {
             diff_r: Diffusion::new(),
             diff_wet_l: Diffusion::new(),
             diff_wet_r: Diffusion::new(),
+            tape: TapeDegrade::new(48_000.0),
+            fb_env: 0.0,
             fb_time_slew: SlewedTime::new(),
             needs_initial_snap: true,
-            prev_base_samples_l: 0.0,
-            prev_base_samples_r: 0.0,
             prev_n_active: 0,
             prev_tap_active: [false; NUM_TAPS],
             lim_l: PeakLimiter::new(48_000.0),
             lim_r: PeakLimiter::new(48_000.0),
-            lfo_phase: 0.0,
         }
     }
 }
 
 impl Plugin for Mooltitwap {
-    const NAME: &'static str = "Mooltitwap";
+    // Display name (DAW plugin browser). Renamed to Afterecho (2026-07-11) —
+    // "Mooltitwap"/"multitap" branding is retired. The struct/crate/folder are
+    // still `mooltitwap` internally (a bigger rename, deferred); VST3_CLASS_ID
+    // and CLAP_ID are UNCHANGED so existing sessions still recall the plugin.
+    const NAME: &'static str = "Afterecho";
     const VENDOR: &'static str = "Emmanuel Bussien";
     const URL: &'static str = "https://example.com";
     const EMAIL: &'static str = "noreply@example.com";
@@ -175,6 +186,9 @@ impl Plugin for Mooltitwap {
         self.diff_r.reset();
         self.diff_wet_l.reset();
         self.diff_wet_r.reset();
+        // Rebuild at the real sample rate — runs the ~10k-iteration MagParams
+        // calibration, which is why it happens here and not per block.
+        self.tape = TapeDegrade::new(self.sample_rate);
         true
     }
 
@@ -185,16 +199,14 @@ impl Plugin for Mooltitwap {
         for st in self.tap_svf_r.iter_mut() { for s in st.iter_mut() { s.reset(); } }
         self.diff_wet_l.reset();
         self.diff_wet_r.reset();
+        self.tape.reset();
+        self.fb_env = 0.0;
         self.fb_time_slew.snap_to(0.0);
-        self.lfo_phase = 0.0;
         // Tell process() to snap (not slew) the tap delays on the next frame.
         // Otherwise the slow tape-bend slew would take minutes to reach long
         // nominal delays (e.g. 2/1 sync at slow tempo), producing audible
         // pitch drift and a near-zero-delay tap stack in the meantime.
         self.needs_initial_snap = true;
-        // Force the sync-change detector to fire on the next block too.
-        self.prev_base_samples_l = 0.0;
-        self.prev_base_samples_r = 0.0;
         self.prev_n_active = 0;
         self.prev_tap_active = [false; NUM_TAPS];
     }
@@ -214,9 +226,7 @@ impl Plugin for Mooltitwap {
         let time_l_norm = p.base_time_l.value();
         let time_r_norm = if p.time_linked.value() { time_l_norm } else { p.base_time_r.value() };
         let base_sec_l = p.base_time_seconds(time_l_norm, tempo_bpm);
-        let base_sec_r = p.base_time_seconds(time_r_norm, tempo_bpm);
-        let base_samples_l = base_sec_l * sr;
-        let base_samples_r = base_sec_r * sr;
+        let base_sec_r = PetalParams::base_time_seconds_mode(p.sync_mode_r_eff(), time_r_norm, tempo_bpm);
 
         let n_active = (p.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
 
@@ -236,33 +246,56 @@ impl Plugin for Mooltitwap {
         // Tape-style delay-time slew rate: 1 sample of delay-time change per ~50
         // samples of audio. Fast enough to track wobble/offset moves, slow enough
         // to hear the Doppler bend during transitions.
-        let bend_slew_rate = 1.0 / 50.0;
+        let bend_slew_rate: f32 = 1.0 / 50.0;
+        // Repitch glide bound: big delay jumps (sync-division change, tempo
+        // jump, fast knob throws) must finish in ~this long, not minutes at
+        // the fixed tape rate. Per block the rate is raised to
+        // max(bend_slew_rate, remaining_distance / glide_samples) — small
+        // moves keep the classic constant-rate tape bend, large ones become
+        // a fast bounded Doppler sweep (Ableton-Repitch feel).
+        let glide_samples = (0.10 * sr).max(1.0);
         // Out-of-range threshold: anything beyond this gets silenced, not
         // clamped, so over-budget taps don't stack at the buffer edge.
         // We use 95% of the configured max so we never even approach the
         // wrap boundary of the ring buffer.
         let max_delay_samples = MAX_DELAY_SECONDS * sr * 0.95;
         let delay_mode = p.delay_mode.value();
+        let span_secs_l = NUM_TAPS as f32 * base_sec_l;
+        let span_secs_r = NUM_TAPS as f32 * base_sec_r;
         let mut nom_l = [0.0f32; NUM_TAPS];
         let mut nom_r = [0.0f32; NUM_TAPS];
+        let mut t_secs_l = [0.0f32; NUM_TAPS];
+        let mut t_secs_r = [0.0f32; NUM_TAPS];
         let mut tap_in_range = [false; NUM_TAPS];
         for i in 0..NUM_TAPS {
             let active = p.taps[i].active.value() && i < n_active;
 
-            let span_l = NUM_TAPS as f32 * base_samples_l;
-            let span_r = NUM_TAPS as f32 * base_samples_r;
-            let off = p.taps[i].time_offset.value() * span_l;
-            let off_r = p.taps[i].time_offset.value() * span_r;
+            // Seconds-domain tap time from the shared topology helper — the
+            // GUI visualizer calls the exact same function, so the display
+            // and the audio cannot drift apart.
+            let off_norm = p.taps[i].time_offset.value();
+            t_secs_l[i] = topology::tap_delay_secs(pos_l[i], off_norm, span_secs_l);
+            t_secs_r[i] = topology::tap_delay_secs(pos_r[i], off_norm, span_secs_r);
 
-            nom_l[i] = (pos_l[i] * span_l + off).max(2.0);
-            nom_r[i] = (pos_r[i] * span_r + off_r).max(2.0);
-            self.main_l.readers[i].set_nominal_slew_rate(bend_slew_rate);
-            self.main_r.readers[i].set_nominal_slew_rate(bend_slew_rate);
-            // Update the per-tap transition mode (Repitch / Fade / Jump).
+            nom_l[i] = (t_secs_l[i] * sr).max(2.0);
+            nom_r[i] = (t_secs_r[i] * sr).max(2.0);
+            // Update the per-tap transition mode (Repitch / Fade / Jump)
+            // BEFORE the rate calc — set_mode may re-seed the reader state.
             // set_mode re-aligns internal state to the current target so the
             // switch is silent.
             self.main_l.readers[i].set_mode(delay_mode);
             self.main_r.readers[i].set_mode(delay_mode);
+            // Bounded Repitch glide (see glide_samples above).
+            let rate_l = bend_slew_rate
+                .max((nom_l[i] - self.main_l.readers[i].current_pos()).abs() / glide_samples);
+            let rate_r = bend_slew_rate
+                .max((nom_r[i] - self.main_r.readers[i].current_pos()).abs() / glide_samples);
+            self.main_l.readers[i].set_nominal_slew_rate(rate_l);
+            self.main_r.readers[i].set_nominal_slew_rate(rate_r);
+            // Nominal delay is constant across the block (wobble, the only
+            // per-sample modulator, was removed in v2.17.5) — set it here.
+            self.main_l.readers[i].set_nominal(nom_l[i].max(2.0));
+            self.main_r.readers[i].set_nominal(nom_r[i].max(2.0));
 
             // Mark in-range: only taps whose delay fits in the buffer get
             // to play. Out-of-range taps would otherwise be clamped by
@@ -270,50 +303,43 @@ impl Plugin for Mooltitwap {
             // read the same sample → loud saturated stack of overlapping
             // taps at the boundary.
             tap_in_range[i] = active
-                && nom_l[i] <= max_delay_samples
-                && nom_r[i] <= max_delay_samples;
+                && topology::tap_fits(t_secs_l[i], t_secs_r[i], MAX_DELAY_SECONDS);
         }
 
         // ── Snap guards ──────────────────────────────────────────────────
-        // The tape-bend slew (0.02 samp/samp) is intentional for pitch-bend
-        // transitions, but catastrophic when the whole sync grid shifts (e.g.
-        // 1/8 → 1/16): taps have to travel thousands of samples at that rate,
-        // producing loud Doppler ringing for up to 12+ seconds.
+        // Delay-TIME changes (base-time knob, sync division, DAW tempo) are
+        // deliberately NOT snapped here: they go through TapReader's mode
+        // machinery via set_nominal above — Repitch glides (bounded by
+        // glide_samples), Fade crossfades, Jump snaps. Force-snapping them
+        // (pre-v2.18.1 "Guard 1") made every knob drag hard-snap all readers
+        // every block, collapsing all three modes into the same "digital
+        // mash" artifact.
         //
-        // Guard 1 — sync/tempo change: if base_samples changed since the last
-        // block, snap all taps immediately. base_samples encodes tempo × sync-
-        // division but not per-tap pitch, so a change here can only mean the
-        // user changed the sync division or the DAW tempo jumped.
+        // Only genuinely discrete re-anchoring events snap:
+        //
+        // Guard 1 — tap-count change: topology anchoring re-distributes ALL
+        // intermediate taps (potentially by hundreds of samples). Gliding
+        // that sweep is the "mangled / repitched" artifact. Snap.
         //
         // Guard 2 — newly-activated tap: when a tap goes from inactive to
         // active its reader hasn't been tracking the real nominal and starts
         // from wherever it last was (usually 1.0 after reset). Snap it.
         //
         // Guard 3 — initial snap after reset (same as before).
-        let base_changed = (base_samples_l - self.prev_base_samples_l).abs() > 0.5
-            || (base_samples_r - self.prev_base_samples_r).abs() > 0.5;
-        // n_active change re-anchors topology: every intermediate tap's
-        // nominal delay shifts (potentially by hundreds of samples). If we let
-        // SlewedTime glide that, the reads sweep across the buffer and we
-        // hear a pitch sweep — the "mangled / repitched" artifact the user
-        // reported. Detect and snap.
         let n_active_changed = self.prev_n_active != n_active;
-        let topology_jump = base_changed || n_active_changed;
+        let topology_jump = n_active_changed;
+        let initial_snap = self.needs_initial_snap;
 
         for i in 0..NUM_TAPS {
             let active_now = tap_in_range[i] && i < n_active;
             let newly_active = active_now && !self.prev_tap_active[i];
-            if self.needs_initial_snap || topology_jump || newly_active {
+            if initial_snap || topology_jump || newly_active {
                 self.main_l.readers[i].snap_to(nom_l[i].max(2.0));
                 self.main_r.readers[i].snap_to(nom_r[i].max(2.0));
             }
             self.prev_tap_active[i] = active_now;
         }
 
-        if base_changed {
-            self.prev_base_samples_l = base_samples_l;
-            self.prev_base_samples_r = base_samples_r;
-        }
         self.prev_n_active = n_active;
         self.needs_initial_snap = false;
 
@@ -340,21 +366,54 @@ impl Plugin for Mooltitwap {
             };
         }
 
-        let lfo_rate = p.wobble_rate.value();
-        let wobble_amt = p.wobble_amount.value();
-        let lfo_inc = lfo_rate / sr;
-
         let input_gain = nice_plug::util::db_to_gain(p.input_gain.value());
         let output_gain = nice_plug::util::db_to_gain(p.output_gain.value());
         let dry_wet = p.dry_wet.value();
         let feedback = p.feedback.value();
-        let soft = p.soft_clip.value();
+        // (soft_clip param deprecated v2.21.0 — SATURATE routed to IN covers it)
         let diffuse_amount = p.diffuse_amount.value();
         let diffuse_routing = p.diffuse_routing.value();
         let diffuse_size = p.diffuse_size.value();
         // Push SIZE to the diffusion stages per block (allocation-free).
         self.diff_wet_l.set_size(diffuse_size);
         self.diff_wet_r.set_size(diffuse_size);
+
+        // DEGRADE block — configured once per block (filter design happens in
+        // set_params, control rate), inserted per sample at the selected
+        // routing point. Gate on `amount` so the bypass path costs nothing.
+        let degrade_amount = p.degrade_amount.value();
+        let degrade_routing = p.degrade_routing.value();
+        let degrade_on = degrade_amount > 1e-4;
+        if degrade_on {
+            self.tape.set_params(&TapeDegradeParams {
+                kind: match p.degrade_type.value() {
+                    TapeType::I => TapeKind::I,
+                    TapeType::II => TapeKind::II,
+                    TapeType::IV => TapeKind::IV,
+                },
+                drive_db: p.degrade_drive.value(),
+                wear: p.degrade_wear.value(),
+                mix: degrade_amount,
+            });
+        }
+        // SATURATE block — playable tanh drive stage (the loop's fixed safety
+        // tanh is separate and always on). Same routing grammar as DIFFUSE.
+        let sat_amount = p.sat_amount.value();
+        let sat_routing = p.sat_routing.value();
+        let sat_gain = nice_plug::util::db_to_gain(p.sat_drive.value());
+        let sat_on = sat_amount > 1e-4;
+        // out = dry·(1−mix) + tanh(dry·gain)·mix — no gain compensation
+        // (project rule: never gain-compensate the loop).
+        let sat = move |x: f32| -> f32 {
+            x * (1.0 - sat_amount) + soft_clip(x * sat_gain) * sat_amount
+        };
+
+        // FB CURVE — decay shape of the repeats. One-pole envelope follower
+        // coefficients (5 ms attack / 150 ms release).
+        let fb_curve = p.fb_curve.value();
+        let env_att = 1.0 - (-1.0 / (0.005 * sr)).exp();
+        let env_rel = 1.0 - (-1.0 / (0.150 * sr)).exp();
+
         let ch_mode = p.channel_mode.value();
 
         // Feedback delay time.
@@ -364,35 +423,40 @@ impl Plugin for Mooltitwap {
         // Spiral protection: clamp minimum to 10 ms regardless of mode so a very
         //   short FB TIME can't cause exponential runaway by cycling faster than
         //   the cluster itself decays (sounds like a detuned squeal).
-        let min_fb_samples = 0.010 * sr; // 10 ms hard floor
+        let min_fb_samples = topology::MIN_FB_SECS * sr; // 10 ms hard floor
         // Cluster span = max delay across all active in-range taps (includes time_offset).
         // Used both as the LOCKED target AND as a floor for the UNLOCKED target — so
         // feedback NEVER lands before any of the direct taps (which would create the
         // ugly "feedback racing the taps" wash the user described).
-        let cluster_span_samples = (0..n_active)
-            .filter(|&i| tap_in_range[i])
-            .map(|i| nom_l[i].max(nom_r[i]))
-            .fold(min_fb_samples, f32::max);
+        // Shared with gui.rs::compute_viz_data so echo bars land where the audio does.
+        let cluster_span_samples =
+            topology::cluster_span_secs(&t_secs_l, &t_secs_r, &tap_in_range, n_active) * sr;
         let fb_time_target = if p.feedback_time_locked.value() {
             cluster_span_samples
         } else {
-            let param_target = (p.feedback_time_seconds(tempo_bpm) * sr)
-                .clamp(min_fb_samples, max_delay_samples);
-            // Floor at cluster_span: UNLOCKED can only push the echo LATER than
-            // the last tap, never earlier.
-            param_target.max(cluster_span_samples)
+            // UNLOCKED is fully free above the 10 ms squeal floor (v2.18.2).
+            // The old cluster-span floor ("echo can only land LATER than the
+            // last tap") existed because short cycles blew up violently — but
+            // that was really the unbounded loop's fault (no saturation, and
+            // feedback goes to 1.05 → exponential runaway that doubles faster
+            // the shorter the cycle). The loop is now soft-saturated inside
+            // (see fb_sat below), so short FB times are a bounded, usable
+            // dub-wash / comb zone instead of a detonation.
+            (p.feedback_time_seconds(tempo_bpm) * sr).clamp(min_fb_samples, max_delay_samples)
         };
         let fb_time_target = fb_time_target.max(min_fb_samples);
-        // Snap the feedback read-position on topology jumps (tap count or
-        // base-time change) so the feedback doesn't sweep across the buffer
-        // — that sweep is what produced the residual "pitch impact from
-        // changing feedback knob" tail the user was hearing (when LOCKED,
-        // every knob touch that affected n_active or tempo re-targeted the
-        // fb read by hundreds of samples).
-        if topology_jump || self.needs_initial_snap {
+        // The feedback read head follows the same transition rules as the
+        // taps: snap on discrete re-anchoring (tap-count change, reset) and
+        // in Jump mode; otherwise a BOUNDED glide. The old fixed 0.02
+        // samples/sample rate made large FB-TIME moves take minutes to
+        // arrive (1/16 → 1/1 at 120 BPM ≈ 90k samples ≈ 94 s of glide) —
+        // the knob appeared to do nothing.
+        if topology_jump || initial_snap || delay_mode == DelayMode::Jump {
             self.fb_time_slew.snap_to(fb_time_target);
         } else {
-            self.fb_time_slew.set_rate(1.0 / 50.0);
+            let rate = bend_slew_rate
+                .max((fb_time_target - self.fb_time_slew.current()).abs() / glide_samples);
+            self.fb_time_slew.set_rate(rate);
             self.fb_time_slew.set_target(fb_time_target);
         }
         let crossfeed = p.crossfeed.value();
@@ -440,10 +504,6 @@ impl Plugin for Mooltitwap {
 
             let mut x_l = in_l * input_gain;
             let mut x_r = in_r * input_gain;
-            if soft {
-                x_l = soft_clip(x_l);
-                x_r = soft_clip(x_r);
-            }
 
             // DIFFUSE routing = Input: smear the dry input BEFORE it hits the delay.
             // Every tap then reads pre-smeared material, giving a layered feel.
@@ -452,11 +512,17 @@ impl Plugin for Mooltitwap {
                 x_r = self.diff_wet_r.process(x_r, diffuse_amount);
             }
 
-            // Wobble — gentler: ±5% at max amount, scaled by amount squared for taper.
-            let lfo = (self.lfo_phase * core::f32::consts::TAU).sin();
-            self.lfo_phase += lfo_inc;
-            if self.lfo_phase >= 1.0 { self.lfo_phase -= 1.0; }
-            let mod_scale = 1.0 + lfo * wobble_amt * wobble_amt * 0.05;
+            // DEGRADE routing = Input: crush the dry input before the buffer —
+            // every tap reads pre-degraded material (single lo-fi generation).
+            if degrade_on && degrade_routing == DiffuseRouting::Input {
+                self.tape.process(&mut x_l, &mut x_r);
+            }
+
+            // SATURATE routing = Input: drive the dry input into the buffer.
+            if sat_on && sat_routing == DiffuseRouting::Input {
+                x_l = sat(x_l);
+                x_r = sat(x_r);
+            }
 
             // ─── Cluster-Delay–style feedback (v2.11.0 architecture) ─────
             // Read the main buffer at cluster_span samples back and feed THAT
@@ -483,8 +549,41 @@ impl Plugin for Mooltitwap {
             let raw_fb_l = self.main_l.delay.read(fb_samps.max(2.0));
             let raw_fb_r = self.main_r.delay.read(fb_samps.max(2.0));
 
-            let mut fb_in_l = raw_fb_l * feedback;
-            let mut fb_in_r = raw_fb_r * feedback;
+            // FB CURVE — bend the effective loop gain by level so the decay
+            // envelope isn't limited to the natural exponential. The envelope
+            // tracks the RAW buffer signal (pre-gain), linked across channels.
+            let fb_gain = match fb_curve {
+                FbCurve::Natural => feedback,
+                _ => {
+                    let mag = raw_fb_l.abs().max(raw_fb_r.abs());
+                    let coeff = if mag > self.fb_env { env_att } else { env_rel };
+                    self.fb_env += (mag - self.fb_env) * coeff;
+                    match fb_curve {
+                        // Compressor-in-the-loop: gain bends toward a plateau
+                        // at P — loud repeats tamed, quiet ones lifted (capped
+                        // at 1.15× so the tail still dies with feedback < 1).
+                        FbCurve::Bloom => {
+                            const P: f32 = 0.35;
+                            let bend = (P / self.fb_env.max(1e-4)).powf(0.4);
+                            feedback * bend.clamp(0.5, 1.15)
+                        }
+                        // Expander-in-the-loop: full feedback while the tail
+                        // is above the gate threshold, accelerating cut below
+                        // it. FEEDBACK sets how long the hold lasts.
+                        FbCurve::Gate => {
+                            const T: f32 = 0.1;
+                            if self.fb_env >= T { feedback }
+                            else {
+                                let k = self.fb_env / T;
+                                feedback * k * k
+                            }
+                        }
+                        FbCurve::Natural => unreachable!(),
+                    }
+                }
+            };
+            let mut fb_in_l = raw_fb_l * fb_gain;
+            let mut fb_in_r = raw_fb_r * fb_gain;
 
             // Crossfeed Ping-Pong & Diffuse act on the FEEDBACK path.
             // Mix acts on the output and is handled after the tap loop.
@@ -513,23 +612,41 @@ impl Plugin for Mooltitwap {
                 fb_in_r = self.diff_wet_r.process(fb_in_r, diffuse_amount);
             }
 
+            // DEGRADE routing = Feedback: generation loss — every repeat gets
+            // re-crushed, like tape/BBD copies of copies. Before the loop
+            // saturator so the quantization grit stays bounded.
+            if degrade_on && degrade_routing == DiffuseRouting::Feedback {
+                self.tape.process(&mut fb_in_l, &mut fb_in_r);
+            }
+
+            // SATURATE routing = Feedback: drive the recirculating signal —
+            // each repeat picks up another pass of harmonics (tape-loop
+            // buildup). Sits before the fixed safety tanh.
+            if sat_on && sat_routing == DiffuseRouting::Feedback {
+                fb_in_l = sat(fb_in_l);
+                fb_in_r = sat(fb_in_r);
+            }
+
+            // In-loop soft saturation (v2.18.2) — the ONLY thing bounding the
+            // loop; there is deliberately NO gain compensation (project rule:
+            // feedback paths must be allowed to self-oscillate). Headroomed
+            // tanh: ~transparent at normal levels (−0.2 dB at 0.5 amplitude),
+            // ceiling ≈ 2.0. With feedback ≥ 1.0 the loop settles into
+            // bounded, tape-style self-oscillation instead of exponential
+            // runaway — which is what used to detonate at short FB times.
+            let fb_sat_l = 2.0 * soft_clip(fb_in_l * 0.5);
+            let fb_sat_r = 2.0 * soft_clip(fb_in_r * 0.5);
+
             // Write the dry input + processed feedback into the main delay.
             // The taps below read from this buffer; each cluster_span the same
             // cluster pattern appears in the buffer, attenuated by feedback^k.
-            self.main_l.delay.write(x_l + fb_in_l);
-            self.main_r.delay.write(x_r + fb_in_r);
-
-            // In Fade mode, wobble is bypassed: its constant per-sample
-            // mod_scale change would re-trigger fades every sample, mangling
-            // the audio. Repitch & Jump can use it normally.
-            let wobble_mod = if matches!(delay_mode, DelayMode::Fade) { 1.0 } else { mod_scale };
+            self.main_l.delay.write(x_l + fb_sat_l);
+            self.main_r.delay.write(x_r + fb_sat_r);
 
             let mut tap_out_l = 0.0;
             let mut tap_out_r = 0.0;
             for i in 0..n_active {
                 if !tap_in_range[i] { continue; }
-                self.main_l.readers[i].set_nominal((nom_l[i] * wobble_mod).max(2.0));
-                self.main_r.readers[i].set_nominal((nom_r[i] * wobble_mod).max(2.0));
                 let mut sl = self.main_l.readers[i].read(&self.main_l.delay);
                 let mut sr_s = self.main_r.readers[i].read(&self.main_r.delay);
 
@@ -558,12 +675,24 @@ impl Plugin for Mooltitwap {
             // DIFFUSE routing = Output: smear the tap-mix on its way to dry/wet.
             // This is the cleanest option — diffusion doesn't interact with
             // feedback / cluster dynamics, just produces a reverb-tail bloom.
-            let wet_l = if diffuse_amount > 1e-4 && diffuse_routing == DiffuseRouting::Output {
+            let mut wet_l = if diffuse_amount > 1e-4 && diffuse_routing == DiffuseRouting::Output {
                 self.diff_wet_l.process(tap_out_l, diffuse_amount)
             } else { tap_out_l };
-            let wet_r = if diffuse_amount > 1e-4 && diffuse_routing == DiffuseRouting::Output {
+            let mut wet_r = if diffuse_amount > 1e-4 && diffuse_routing == DiffuseRouting::Output {
                 self.diff_wet_r.process(tap_out_r, diffuse_amount)
             } else { tap_out_r };
+
+            // DEGRADE routing = Output: crush the whole wet mix once (after
+            // diffusion so the bloom degrades too), before dry/wet.
+            if degrade_on && degrade_routing == DiffuseRouting::Output {
+                self.tape.process(&mut wet_l, &mut wet_r);
+            }
+
+            // SATURATE routing = Output: drive the wet mix once, before dry/wet.
+            if sat_on && sat_routing == DiffuseRouting::Output {
+                wet_l = sat(wet_l);
+                wet_r = sat(wet_r);
+            }
 
             let mut out_l = in_l * (1.0 - dry_wet) + wet_l * dry_wet;
             let mut out_r = in_r * (1.0 - dry_wet) + wet_r * dry_wet;
@@ -596,7 +725,7 @@ impl Plugin for Mooltitwap {
 
 impl ClapPlugin for Mooltitwap {
     const CLAP_ID: &'static str = "com.bussien.mooltitwap";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("Multitap delay garden");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("Afterecho — delay garden");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
     const CLAP_FEATURES: &'static [ClapFeature] =
@@ -609,5 +738,19 @@ impl Vst3Plugin for Mooltitwap {
         &[Vst3SubCategory::Fx, Vst3SubCategory::Delay, Vst3SubCategory::Stereo];
 }
 
+// AUv3 export is iOS-only (only the iOS target enables nice-plug's `auv3`
+// feature — see Cargo.toml's target-cfg deps). Gating on target_os keeps the
+// desktop clap/vst3/standalone build, which has no `auv3`, compiling.
+#[cfg(target_os = "ios")]
+impl AuPlugin for Mooltitwap {
+    // Hosts key saved sessions on (type, subtype, manufacturer). Pick once,
+    // never change. AU_TYPE auto-derives to `aufx` (audio effect).
+    // MUST match bundler.toml's au_subtype / au_manufacturer.
+    const AU_SUBTYPE: [u8; 4] = *b"Aftr"; // Afterecho
+    const AU_MANUFACTURER: [u8; 4] = *b"Busn"; // Bussien (not all-lowercase — Apple reserves those)
+}
+
 nice_export_clap!(Mooltitwap);
 nice_export_vst3!(Mooltitwap);
+#[cfg(target_os = "ios")]
+nice_export_auv3!(Mooltitwap);

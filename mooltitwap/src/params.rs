@@ -132,6 +132,41 @@ pub enum DiffuseRouting {
     Output,
 }
 
+/// IEC cassette tape types for the DEGRADE block (v2.21.0, re-deemer port).
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum TapeType {
+    /// Ferric: saturates earliest, dullest top — the classic worn-cassette lo-fi.
+    #[id = "type_i"]
+    I,
+    /// Chrome: more headroom, brighter.
+    #[id = "type_ii"]
+    II,
+    /// Metal: most headroom, stays composed when slammed.
+    #[id = "type_iv"]
+    IV,
+}
+
+/// Decay shape of successive feedback repeats (v2.20.0). A recirculating
+/// loop is inherently exponential (constant per-cycle gain), so non-natural
+/// curves are made by letting an envelope follower inside the loop bend the
+/// effective gain by level.
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum FbCurve {
+    /// Constant per-cycle gain — the classic exponential decay.
+    #[id = "natural"]
+    Natural,
+    /// Compressor-in-the-loop: loud repeats are tamed, quiet ones get a
+    /// (capped) lift — the tail plateaus near a target level, sustains, then
+    /// dies. Dub-machine "held" decay.
+    #[id = "bloom"]
+    Bloom,
+    /// Expander-in-the-loop: repeats hold close to full level until they dip
+    /// under the gate threshold, then the tail is cut fast. Gated-reverb
+    /// style decay; FEEDBACK sets how long the hold lasts.
+    #[id = "gate"]
+    Gate,
+}
+
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum CrossfeedMode {
     #[id = "mix"]
@@ -177,6 +212,10 @@ pub struct PetalParams {
 
     #[id = "sync_mode"]
     pub sync_mode: EnumParam<SyncMode>,
+    /// Per-channel sync for TIME R (v3 design). When `time_linked` is on,
+    /// R follows L's mode — use `sync_mode_r_eff()`, not this field, in DSP.
+    #[id = "sync_r"]
+    pub sync_mode_r: EnumParam<SyncMode>,
     /// Repitch / Fade / Jump — how the delay handles tap-time changes.
     #[id = "delay_mode"]
     pub delay_mode: EnumParam<DelayMode>,
@@ -204,7 +243,9 @@ pub struct PetalParams {
     /// anywhere regardless of where the taps sit.
     #[id = "feedback_time"]
     pub feedback_time: FloatParam,
-    /// Whether feedback_time uses the global tempo grid (Sync) or free ms (Free).
+    /// DEPRECATED (v2.19.0): FB time now follows the main delay `sync_mode`
+    /// (synced delay → synced feedback divisions). Kept so old DAW sessions
+    /// restore without complaint; nothing reads it anymore.
     #[id = "feedback_time_mode"]
     pub feedback_time_mode: EnumParam<SyncMode>,
     /// When true, FB TIME is locked to the cluster span (= last active tap's delay).
@@ -234,6 +275,44 @@ pub struct PetalParams {
     #[id = "diffuse_size"]
     pub diffuse_size: FloatParam,
 
+    // ---- Degrade (physically-modeled tape, ported from RE-DEEMER; the
+    //      v2.19 bitcrush was the wrong algorithm — owner wanted tape) ----
+    /// Dry/wet of the degrade block. 0 = bypass.
+    #[id = "degrade_amount"]
+    pub degrade_amount: FloatParam,
+    /// Drive into the tape in dB (0 = calibrated operating point). Full
+    /// makeup gain: sets how hard the tape saturates, not the level.
+    #[id = "degrade_drive"]
+    pub degrade_drive: FloatParam,
+    /// Tape aging 0..1: sagged bias (hysteresis grit), earlier/harder HF
+    /// self-erasure, fallen gap-loss corner, hotter operating point.
+    #[id = "degrade_wear"]
+    pub degrade_wear: FloatParam,
+    /// IEC tape type: I ferric / II chrome / IV metal.
+    #[id = "degrade_type"]
+    pub degrade_type: EnumParam<TapeType>,
+    /// Where the degrade block is inserted (same grammar as DIFFUSE).
+    /// Feedback routing = generation loss: every repeat degrades further.
+    #[id = "degrade_routing"]
+    pub degrade_routing: EnumParam<DiffuseRouting>,
+
+    // ---- Saturate (playable drive block; the loop always has its own
+    //      fixed safety tanh — this one is the *characterful* stage) ----
+    /// Dry/wet of the saturate block. 0 = bypass.
+    #[id = "sat_amount"]
+    pub sat_amount: FloatParam,
+    /// Drive into the tanh stage, in dB (0..24).
+    #[id = "sat_drive"]
+    pub sat_drive: FloatParam,
+    /// Where the saturate block is inserted (same grammar as DIFFUSE).
+    #[id = "sat_routing"]
+    pub sat_routing: EnumParam<DiffuseRouting>,
+
+    // ---- Feedback decay curve ----
+    /// Decay shape of the feedback repeats: Natural / Bloom / Gate.
+    #[id = "fb_curve"]
+    pub fb_curve: EnumParam<FbCurve>,
+
     // ---- Filter ----
     #[id = "filter_type"]
     pub filter_type: EnumParam<FilterType>,
@@ -243,14 +322,13 @@ pub struct PetalParams {
     pub filter_q: FloatParam,
 
     // ---- Wobble (LFO) ----
-    #[id = "wobble_rate"]
-    pub wobble_rate: FloatParam,
-    #[id = "wobble_amount"]
-    pub wobble_amount: FloatParam,
 
     // ---- I/O ----
     #[id = "input_gain"]
     pub input_gain: FloatParam,
+    /// DEPRECATED (v2.21.0): the input soft-clip toggle is superseded by the
+    /// SATURATE block routed to IN. Kept so old sessions restore; the DSP no
+    /// longer reads it (only the legacy v2 editor still shows it).
     #[id = "soft_clip"]
     pub soft_clip: BoolParam,
     #[id = "dry_wet"]
@@ -301,8 +379,14 @@ impl Default for TapParams {
                 FloatRange::Linear { min: -60.0, max: 6.0 },
             )
             .with_unit(" dB")
+            .with_step_size(0.1)
+            .with_value_to_string(Arc::new(|v| format!("{:.1}", v)))
             .with_smoother(SmoothingStyle::Linear(10.0)),
+            // Displayed/edited as -100..+100 in steps of 1 (stored -1..1).
             pan: FloatParam::new("Pan", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
+                .with_step_size(0.01)
+                .with_value_to_string(Arc::new(|v| format!("{:.0}", v * 100.0)))
+                .with_string_to_value(Arc::new(|s| s.trim().parse::<f32>().ok().map(|v| v / 100.0)))
                 .with_smoother(SmoothingStyle::Linear(10.0)),
             time_offset: FloatParam::new(
                 "Time Offset",
@@ -321,16 +405,20 @@ impl Default for TapParams {
                 },
             )
             .with_unit(" Hz")
+            .with_step_size(1.0)
+            .with_value_to_string(Arc::new(|v| format!("{:.0}", v)))
             .with_smoother(SmoothingStyle::Logarithmic(30.0)),
             filter_q: FloatParam::new(
                 "Tap Q",
                 0.707,
                 FloatRange::Skewed {
                     min: 0.1,
-                    max: 16.0,
+                    max: 12.0,
                     factor: FloatRange::skew_factor(-1.0),
                 },
             )
+            .with_step_size(0.1)
+            .with_value_to_string(Arc::new(|v| format!("{:.1}", v)))
             .with_smoother(SmoothingStyle::Logarithmic(30.0)),
             filter_slope: EnumParam::new("Tap Slope", FilterSlope::Db12),
         }
@@ -368,6 +456,7 @@ impl Default for PetalParams {
             shape_linked: BoolParam::new("Shape Link", true),
 
             sync_mode: EnumParam::new("Sync Mode", SyncMode::Free),
+            sync_mode_r: EnumParam::new("Sync Mode R", SyncMode::Free),
             delay_mode: EnumParam::new("Delay Mode", DelayMode::Repitch),
             tap_snap: BoolParam::new("Snap", true),
 
@@ -415,6 +504,43 @@ impl Default for PetalParams {
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0)),
 
+            degrade_amount: FloatParam::new(
+                "Degrade Amount",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(20.0)),
+            degrade_drive: FloatParam::new(
+                "Degrade Drive",
+                0.0,
+                FloatRange::Linear { min: -12.0, max: 24.0 },
+            )
+            .with_unit(" dB"),
+            degrade_wear: FloatParam::new(
+                "Degrade Wear",
+                0.25,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            ),
+            degrade_type: EnumParam::new("Degrade Tape Type", TapeType::I),
+            degrade_routing: EnumParam::new("Degrade Routing", DiffuseRouting::Output),
+
+            sat_amount: FloatParam::new(
+                "Saturate Amount",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(20.0)),
+            sat_drive: FloatParam::new(
+                "Saturate Drive",
+                6.0,
+                FloatRange::Linear { min: 0.0, max: 24.0 },
+            )
+            .with_unit(" dB")
+            .with_smoother(SmoothingStyle::Linear(20.0)),
+            sat_routing: EnumParam::new("Saturate Routing", DiffuseRouting::Output),
+
+            fb_curve: EnumParam::new("Feedback Curve", FbCurve::Natural),
+
             filter_type: EnumParam::new("Filter Type", FilterType::LowPass),
             filter_cutoff: FloatParam::new(
                 "Cutoff",
@@ -437,24 +563,6 @@ impl Default for PetalParams {
                 },
             )
             .with_smoother(SmoothingStyle::Logarithmic(50.0)),
-
-            wobble_rate: FloatParam::new(
-                "Wobble Rate",
-                0.5,
-                FloatRange::Skewed {
-                    min: 0.01,
-                    max: 20.0,
-                    factor: FloatRange::skew_factor(-1.5),
-                },
-            )
-            .with_unit(" Hz")
-            .with_smoother(SmoothingStyle::Logarithmic(20.0)),
-            wobble_amount: FloatParam::new(
-                "Wobble Amount",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_smoother(SmoothingStyle::Linear(20.0)),
 
             input_gain: FloatParam::new(
                 "Input Gain",
@@ -484,8 +592,14 @@ impl Default for PetalParams {
 // ─── Time conversion helpers ──────────────────────────────────────────────
 impl PetalParams {
     /// Convert a base-time param value (0..1) to seconds, depending on sync mode and tempo.
-    pub fn base_time_seconds(&self, normalized: f32, tempo_bpm: f32) -> f32 {
-        match self.sync_mode.value() {
+    /// Effective sync mode for the R channel: follows L while time is linked.
+    pub fn sync_mode_r_eff(&self) -> SyncMode {
+        if self.time_linked.value() { self.sync_mode.value() } else { self.sync_mode_r.value() }
+    }
+
+    /// Base time in seconds under an EXPLICIT sync mode (per-channel since v3).
+    pub fn base_time_seconds_mode(mode: SyncMode, normalized: f32, tempo_bpm: f32) -> f32 {
+        match mode {
             SyncMode::Free => {
                 // Exponential 1..2000 ms — small values get more resolution.
                 let ms = 1.0_f32 * 2000.0_f32.powf(normalized.clamp(0.0, 1.0));
@@ -498,11 +612,16 @@ impl PetalParams {
         }
     }
 
-    /// Display string for a base-time param value, depending on sync mode.
-    pub fn format_base_time(&self, normalized: f32, tempo_bpm: f32) -> String {
-        match self.sync_mode.value() {
+    /// L-channel (and pre-v3 global) base time in seconds.
+    pub fn base_time_seconds(&self, normalized: f32, tempo_bpm: f32) -> f32 {
+        Self::base_time_seconds_mode(self.sync_mode.value(), normalized, tempo_bpm)
+    }
+
+    /// Display string for a base-time value under an explicit sync mode.
+    pub fn format_base_time_mode(mode: SyncMode, normalized: f32, tempo_bpm: f32) -> String {
+        match mode {
             SyncMode::Free => {
-                let secs = self.base_time_seconds(normalized, tempo_bpm);
+                let secs = Self::base_time_seconds_mode(mode, normalized, tempo_bpm);
                 let ms = secs * 1000.0;
                 if ms < 10.0 { format!("{:.2} ms", ms) }
                 else if ms < 100.0 { format!("{:.1} ms", ms) }
@@ -515,10 +634,17 @@ impl PetalParams {
         }
     }
 
+    /// Display string for a base-time param value (L / global mode).
+    pub fn format_base_time(&self, normalized: f32, tempo_bpm: f32) -> String {
+        Self::format_base_time_mode(self.sync_mode.value(), normalized, tempo_bpm)
+    }
+
     /// Feedback delay time in seconds. Derives from `feedback_time` param
-    /// (0..1 normalised) interpreted via `feedback_time_mode`.
+    /// (0..1 normalised), interpreted via the MAIN delay's `sync_mode`
+    /// (v2.19.0: synced delay → synced feedback divisions, free delay →
+    /// free ms; the separate `feedback_time_mode` param is deprecated).
     pub fn feedback_time_seconds(&self, tempo_bpm: f32) -> f32 {
-        match self.feedback_time_mode.value() {
+        match self.sync_mode.value() {
             SyncMode::Free => {
                 // Exponential 10 ms..8000 ms — same feel as the base-time knob.
                 let ms = 10.0_f32 * 800.0_f32.powf(self.feedback_time.value().clamp(0.0, 1.0));
@@ -533,7 +659,7 @@ impl PetalParams {
 
     /// Human-readable feedback time string shown in the GUI footer.
     pub fn format_feedback_time(&self, tempo_bpm: f32) -> String {
-        match self.feedback_time_mode.value() {
+        match self.sync_mode.value() {
             SyncMode::Free => {
                 let ms = self.feedback_time_seconds(tempo_bpm) * 1000.0;
                 if ms < 100.0 { format!("{:.0}ms", ms) }

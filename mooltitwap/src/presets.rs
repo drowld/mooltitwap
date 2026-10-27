@@ -56,9 +56,35 @@ pub fn apply(params: &PetalParams, setter: &ParamSetter, snap: &BTreeMap<String,
     }
 }
 
+/// True if the live params still match `snap` (within float tolerance) — drives
+/// the preset-pill "dirty" asterisk. Compares in the stored domain (plain for
+/// discrete, normalized for floats), same as `capture`.
+pub fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>) -> bool {
+    let cur = capture(params);
+    for (id, live) in &cur {
+        match snap.get(id) {
+            Some(stored) => {
+                if (live - stored).abs() > 1e-4 {
+                    return false;
+                }
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Preset {
     pub name: String,
+    #[serde(default)]
+    pub favorite: bool,
+    /// Build/version stamp of the plugin that saved this preset (shown per row).
+    #[serde(default)]
+    pub build: String,
+    /// Free-form descriptor tags, shown + searchable in the palette.
+    #[serde(default)]
+    pub tags: Vec<String>,
     #[serde(default)]
     pub values_format: u32,
     pub values: BTreeMap<String, f32>,
@@ -111,17 +137,30 @@ impl Library {
         self.presets.iter().find(|p| p.name == name)
     }
 
+    /// Write a single preset to its JSON file. Returns success.
+    fn write(&self, p: &Preset) -> bool {
+        let path = self.dir.join(format!("{}.json", sanitize(&p.name)));
+        let Ok(txt) = serde_json::to_string_pretty(p) else { return false };
+        std::fs::write(&path, txt).is_ok()
+    }
+
     /// Capture the live params under `name`, writing a JSON file. Overwrites an
-    /// existing preset of the same name. Only mutates memory on a successful write.
-    pub fn save_as(&mut self, name: &str, params: &PetalParams) -> bool {
+    /// existing preset of the same name (preserving its favorite + tags). Only
+    /// mutates memory on a successful write. `build` stamps the plugin version.
+    pub fn save_as(&mut self, name: &str, params: &PetalParams, build: &str) -> bool {
+        let (favorite, tags) = self
+            .get(name)
+            .map(|p| (p.favorite, p.tags.clone()))
+            .unwrap_or((false, Vec::new()));
         let preset = Preset {
             name: name.to_string(),
+            favorite,
+            build: build.to_string(),
+            tags,
             values_format: VALUES_FORMAT_PLAIN,
             values: capture(params),
         };
-        let path = self.dir.join(format!("{}.json", sanitize(name)));
-        let Ok(txt) = serde_json::to_string_pretty(&preset) else { return false };
-        if std::fs::write(&path, txt).is_err() {
+        if !self.write(&preset) {
             return false;
         }
         if let Some(slot) = self.presets.iter_mut().find(|p| p.name == name) {
@@ -131,5 +170,83 @@ impl Library {
             self.presets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         }
         true
+    }
+
+    /// Delete a preset's JSON file and drop it from memory. No-op if absent.
+    pub fn delete(&mut self, name: &str) -> bool {
+        let path = self.dir.join(format!("{}.json", sanitize(name)));
+        let _ = std::fs::remove_file(&path);
+        let before = self.presets.len();
+        self.presets.retain(|p| p.name != name);
+        self.presets.len() != before
+    }
+
+    /// Rename a preset (file + memory), preserving favorite/tags/values. Fails on
+    /// empty new name, collision with a DIFFERENT preset, missing `old`, or write
+    /// failure. A case-only change keeps the same underlying file.
+    pub fn rename(&mut self, old: &str, new: &str) -> bool {
+        let new = new.trim();
+        if new.is_empty() || self.get(old).is_none() {
+            return false;
+        }
+        if !old.eq_ignore_ascii_case(new) && self.get(new).is_some() {
+            return false;
+        }
+        let idx = match self.index_of(old) {
+            Some(i) => i,
+            None => return false,
+        };
+        let mut preset = self.presets[idx].clone();
+        preset.name = new.to_string();
+        if !self.write(&preset) {
+            return false;
+        }
+        // remove the old file if the sanitized path actually differs
+        let old_path = self.dir.join(format!("{}.json", sanitize(old)));
+        let new_path = self.dir.join(format!("{}.json", sanitize(new)));
+        if old_path != new_path {
+            let _ = std::fs::remove_file(&old_path);
+        }
+        self.presets[idx] = preset;
+        self.presets.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        true
+    }
+
+    pub fn toggle_favorite(&mut self, name: &str) {
+        if let Some(p) = self.presets.iter_mut().find(|p| p.name == name) {
+            p.favorite = !p.favorite;
+            let p = p.clone();
+            self.write(&p);
+        }
+    }
+
+    pub fn add_tag(&mut self, name: &str, tag: &str) {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            return;
+        }
+        if let Some(p) = self.presets.iter_mut().find(|p| p.name == name) {
+            if !p.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                p.tags.push(tag.to_string());
+                let p = p.clone();
+                self.write(&p);
+            }
+        }
+    }
+
+    pub fn remove_tag(&mut self, name: &str, tag: &str) {
+        if let Some(p) = self.presets.iter_mut().find(|p| p.name == name) {
+            let before = p.tags.len();
+            p.tags.retain(|t| t != tag);
+            if p.tags.len() != before {
+                let p = p.clone();
+                self.write(&p);
+            }
+        }
+    }
+
+    /// Index of `name` in the sorted list, if present (for palette selection).
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.presets.iter().position(|p| p.name == name)
     }
 }

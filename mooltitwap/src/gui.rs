@@ -13,15 +13,34 @@ use std::sync::Arc;
 
 use crate::params::{
     ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FilterSlope, FilterType, PetalParams,
-    SpacingMode, SyncMode, NUM_TAPS,
+    SyncMode, NUM_TAPS,
 };
+// Tap position/time math is shared with the DSP (topology.rs) — no drift.
+use crate::topology::{self, compute_positions};
+use crate::MAX_DELAY_SECONDS;
+
+/// απόηχος (Afterecho) v3 preview: draw the owner's Figma "Multitap view pan"
+/// page instead of the v2 editor. Canvas 1194×834 logical = the 2388×1668 @2x
+/// Figma frame. Flip to `false` to get the v2.17 editor back.
+pub const V3_PREVIEW: bool = true;
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
-pub const WINDOW_W: u32 = 1080;
-pub const WINDOW_H: u32 = 656;
-const BASE_W: f32 = 1080.0;
-/// Shared card body height (logical px, pre-scale) so the three cards align.
-const CARD_BODY_H: f32 = 486.0;
+pub const WINDOW_W: u32 = if V3_PREVIEW { 1194 } else { 1080 };
+pub const WINDOW_H: u32 = if V3_PREVIEW { 834 } else { 660 };
+const BASE_W: f32 = WINDOW_W as f32;
+/// Shared card body height (logical px, pre-scale) so the three cards align and
+/// fill down to the bottom page margin. The right card carries the
+/// FEEDBACK/FB-TIME/TAPS footer inside its bottom `RIGHT_FOOTER_H` band (v2.15).
+const CARD_BODY_H: f32 = 564.0;
+/// v2.15 body-layout metrics (logical px, pre-scale), reproduced on the epo cards.
+const LEFT_W: f32 = 224.0;
+const RIGHT_W: f32 = 284.0;
+const PAGE_M: f32 = 14.0;
+const CARD_GAP: f32 = 10.0;
+/// Center card: fixed-height shaping strip pinned to the bottom; viz gets the rest.
+const SHAPING_H: f32 = 118.0;
+/// Right card: footer band height reserved at the bottom for FEEDBACK/FB-TIME/TAPS.
+const RIGHT_FOOTER_H: f32 = 70.0;
 
 #[inline]
 fn read_tempo(tempo_atomic: &Arc<AtomicU32>) -> f32 {
@@ -49,9 +68,35 @@ pub struct EditorState {
     /// theme is only re-applied (and persisted) when it actually changes.
     pub theme_dark: bool,
     pub theme_dark_applied: bool,
+    /// Dark palette variant: 0 cool · 1 warm graphite · 2 ink (v3). `_applied` is
+    /// the edge-detect twin so it's only pushed to the theme when it changes.
+    pub dark_variant: u8,
+    pub dark_variant_applied: u8,
     /// Font pairing: 0 = Space Grotesk / Spline Mono, 1 = Karla / Inconsolata.
     pub font_face: u8,
     pub font_face_applied: u8,
+    /// v3 card/tab title size nudge (px = 10 + steps, clamp 7..48) —
+    /// tweakable in the v3 hamburger menu ▸ TAB TEXT. v2.21: desktop too.
+    pub title_steps: i32,
+    /// v3 PAN/GAIN slider thickness steps (multiplier = 1 + 0.25·steps,
+    /// clamp 1..4×) — hamburger menu ▸ SLIDERS.
+    pub slider_steps: i32,
+    /// Sizing-token sheet: false = the original v3/Figma numbers, true = the
+    /// owner's τόπος proposal (tokens.rs) — hamburger menu ▸ SIZING, for
+    /// live side-by-side comparison.
+    pub sizing_beta: bool,
+    /// FIELD view: the tap whose GAIN/FILTER panel is open (None = closed).
+    pub field_sel: Option<usize>,
+    /// v3 center-card view tab: 0 = GRID (time×pan), 1 = STEMS (time×volume),
+    /// 2 = ECHO (classic read-only bars, full feedback tail). `viz_mode`
+    /// stays for the legacy v2 editor.
+    pub view3: u8,
+    /// GRID/STEMS: snap dragged tap times to multiples of the base time
+    /// (quantize, owner idea 2026-07-13) — the SNAP chip in the view toggles it.
+    pub snap3: bool,
+    /// High-contrast accessibility mode (hamburger ▸ CONTRAST). Session-state,
+    /// pushed to the theme each frame — same idiom as `sizing_beta`.
+    pub high_contrast: bool,
     /// Window resize-drag accumulator: (start_w, start_h, acc_dx) + throttle cooldown.
     pub drag_resize: Option<(f32, f32, f32)>,
     pub drag_cool: u8,
@@ -67,17 +112,58 @@ pub struct EditorState {
     /// Drag-on-number state: (value at drag start, accumulated px).
     pub taps_drag: Option<(i32, f32)>,
     pub fb_drag: Option<(f32, f32)>,
+    /// A/B compare: two full param snapshots + which is live (0=A, 1=B). Lets
+    /// the owner toggle between two variants. Lazily seeded from live params.
+    pub ab_slots: [Option<std::collections::BTreeMap<String, f32>>; 2],
+    pub ab_active: u8,
+    // ── v3 spotlight preset palette (ported from y-flanger) ──
+    /// Values last loaded/saved — the dirty `*` = current_preset & !matches(snap).
+    pub loaded_snapshot: Option<std::collections::BTreeMap<String, f32>>,
+    pub preset_open: bool,      // palette popup visible
+    pub preset_search: String,  // filter query
+    pub preset_guard: u8,       // ignore backdrop clicks for N frames after open
+    pub palette_top: f32,       // y the palette drops from
+    pub palette_sel: usize,     // highlighted row
+    pub palette_scope: u8,      // 0 all · 1 favorites · 2 recent
+    pub palette_focus: bool,    // one-shot: focus the search field
+    pub recent: Vec<String>,    // session MRU (most-recent first, capped)
+    pub palette_name_open: bool, // save-as / rename inline editor active
+    pub palette_name_buf: String,
+    pub palette_name_focus: bool,
+    pub palette_rename_from: Option<String>, // Some ⇒ rename, None ⇒ save-as
+    pub palette_del_confirm: Option<String>, // two-click delete arm
+    pub palette_tag_for: Option<String>,     // row whose add-tag field is open
+    pub palette_tag_buf: String,
+    pub palette_tag_focus: bool,
 }
 impl Default for EditorState {
     fn default() -> Self {
         Self {
-            viz_mode: VizMode::Stems, right_tab: RightTab::Gain, drag_tap: None,
+            // v2.23: FIELD (the editable time×pan plane, VizMode::Grid) is the
+            // default center view in v3; STEMS is one chip away.
+            viz_mode: VizMode::Grid, right_tab: RightTab::Gain, drag_tap: None,
+            field_sel: None,
+            view3: 0,
+            snap3: false,
+            high_contrast: false,
             menu_open: false, inited: false,
             theme_dark: true, theme_dark_applied: true,
+            dark_variant: 1, dark_variant_applied: 255, // 1 = warm graphite; 255 forces first apply
             font_face: 0, font_face_applied: 0,
+            title_steps: 2, // 12px tab titles (cumulus default)
+            slider_steps: 2, // thicker PAN/GAIN tracks by default (1.5×) — owner 2026-07-14
+
+            sizing_beta: false,
             drag_resize: None, drag_cool: 0,
             library: None, current_preset: None, browser_open: false, browser_guard: 0,
             save_name: String::new(), taps_drag: None, fb_drag: None,
+            ab_slots: [None, None], ab_active: 0,
+            loaded_snapshot: None, preset_open: false, preset_search: String::new(),
+            preset_guard: 0, palette_top: 0.0, palette_sel: 0, palette_scope: 0,
+            palette_focus: false, recent: Vec::new(), palette_name_open: false,
+            palette_name_buf: String::new(), palette_name_focus: false,
+            palette_rename_from: None, palette_del_confirm: None,
+            palette_tag_for: None, palette_tag_buf: String::new(), palette_tag_focus: false,
         }
     }
 }
@@ -85,11 +171,11 @@ impl Default for EditorState {
 // ─── Audio-taper gain mapping (cube-root: 75% pos = 0 dB) ────────────────
 const GAIN_SKEW: f32 = 0.333;
 #[inline]
-fn gain_db_to_pos(db: f32) -> f32 {
+pub(crate) fn gain_db_to_pos(db: f32) -> f32 {
     ((db + 60.0) / 66.0).clamp(0.0, 1.0).powf(1.0 / GAIN_SKEW)
 }
 #[inline]
-fn pos_to_gain_db(pos: f32) -> f32 {
+pub(crate) fn pos_to_gain_db(pos: f32) -> f32 {
     -60.0 + pos.clamp(0.0, 1.0).powf(GAIN_SKEW) * 66.0
 }
 
@@ -117,7 +203,7 @@ fn tab_grad(tab: RightTab, i: usize, n_active: usize) -> Color32 {
 }
 
 /// Visualizer per-tap gradient — mooltitwap's violet signature, bright → light.
-fn tap_color(i: usize, n_active: usize) -> Color32 {
+pub(crate) fn tap_color(i: usize, n_active: usize) -> Color32 {
     let t = if n_active <= 1 { 0.0 } else { i as f32 / (n_active - 1) as f32 };
     lighten(theme::accent(2), t * 0.55)
 }
@@ -134,13 +220,17 @@ pub fn create_editor(
         EditorState::default(),
         Default::default(),
         |ctx, _queue, _st| {
-            theme::set_touch(false);
+            // On the iPad AUv3 (v3 editor) run in touch mode: enables raw-touch
+            // knobs, 44pt hit floors, and the title_size control (title_fs only
+            // honors set_title_size on touch). Desktop stays pointer-mode.
+            theme::set_touch(cfg!(target_os = "ios"));
             theme::install_fonts(ctx);
         },
         move |ui, setter, _queue, st| {
             // Seed theme from the persisted param once, forcing a single apply.
             if !st.inited {
                 st.inited = true;
+                // v3 seeds from the persisted theme; dark = warm graphite variant.
                 st.theme_dark = params.theme_dark.load(Ordering::Relaxed);
                 st.theme_dark_applied = !st.theme_dark;
             }
@@ -150,6 +240,10 @@ pub fn create_editor(
                 theme::set_theme(st.theme_dark);
                 params.theme_dark.store(st.theme_dark, Ordering::Relaxed);
                 st.theme_dark_applied = st.theme_dark;
+            }
+            if st.dark_variant != st.dark_variant_applied {
+                theme::set_dark_variant(st.dark_variant);
+                st.dark_variant_applied = st.dark_variant;
             }
             if st.font_face != st.font_face_applied {
                 let choice = if st.font_face == 1 { theme::FontChoice::KarlaInconsolata }
@@ -169,7 +263,11 @@ pub fn create_editor(
             }
             theme::apply_zoom(ui.ctx(), (cur_w as f32 / BASE_W).clamp(0.5, 2.5));
             let tempo = read_tempo(&tempo_bpm_shared);
-            draw_plugin(ui, &params, setter, st, &egui_state_size, tempo);
+            if V3_PREVIEW {
+                crate::gui_v3::draw(ui, &params, setter, st, tempo);
+            } else {
+                draw_plugin(ui, &params, setter, st, &egui_state_size, tempo);
+            }
         },
     )
 }
@@ -186,29 +284,31 @@ fn draw_plugin(
     let s = theme::ui_scale(ui);
     ui.painter().rect_filled(ui.max_rect(), 0.0, theme::PAPER());
 
-    let margin = theme::SP_XL * s;
+    let margin = PAGE_M * s;
     draw_header(ui, params, setter, st, s);
     ui.add_space(theme::SP_MD * s);
 
     let avail = ui.available_width() - 2.0 * margin;
-    let gap = theme::CARD_GAP * s;
-    let left_w = 240.0 * s;
-    let right_w = 300.0 * s;
+    let gap = CARD_GAP * s;
+    let left_w = LEFT_W * s;
+    let right_w = RIGHT_W * s;
     let center_w = (avail - left_w - right_w - 2.0 * gap).max(200.0 * s);
     let body_h = CARD_BODY_H * s;
 
     // Read mutable state out of `st` into locals so each card body closure
-    // captures only what it needs (avoids nested &mut st borrows).
+    // captures only what it needs (avoids nested &mut st borrows). The footer
+    // now lives inside the right card, so its drag accumulators travel too.
     let mut viz_mode = st.viz_mode;
     let mut right_tab = st.right_tab;
     let mut drag_tap = st.drag_tap;
+    let mut taps_drag = st.taps_drag;
+    let mut fb_drag = st.fb_drag;
 
     ui.horizontal_top(|ui| {
         ui.add_space(margin);
         ui.spacing_mut().item_spacing.x = gap;
 
         epo::card(ui, "DELAY", theme::INK2(), left_w, &mut |ui| {
-            ui.set_min_height(body_h);
             draw_left_body(ui, params, setter, tempo);
         });
 
@@ -228,7 +328,7 @@ fn draw_plugin(
         };
         let (rc, _) = epo::card_tabs(
             ui, "TAPS", &tabs, active_tab, right_w, body_h,
-            &mut |ui| draw_right_body(ui, params, setter, right_tab),
+            &mut |ui| draw_right_body(ui, params, setter, right_tab, tempo, &mut taps_drag, &mut fb_drag),
             None,
         );
         if let Some(i) = rc {
@@ -240,9 +340,8 @@ fn draw_plugin(
     st.drag_tap = drag_tap;
     st.viz_mode = viz_mode;
     st.right_tab = right_tab;
-
-    ui.add_space(theme::SP_MD * s);
-    draw_footer(ui, params, setter, st, tempo, margin, s);
+    st.taps_drag = taps_drag;
+    st.fb_drag = fb_drag;
 
     draw_menu(ui, st, margin, s);
     draw_browser(ui, params, setter, st, s);
@@ -279,7 +378,7 @@ fn preset_step(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSe
 fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) {
     ensure_library(st);
     if let Some(lib) = st.library.as_mut() {
-        if lib.save_as(name, params) {
+        if lib.save_as(name, params, env!("CARGO_PKG_VERSION")) {
             st.current_preset = Some(name.to_string());
         }
     }
@@ -476,9 +575,12 @@ fn draw_header(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSette
             RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                 .family(FontFamily::Monospace).size(11.0 * s).color(theme::SOFT()),
         );
-        // centered preset pill: ◀ prev / name → browser / ▶ next
+        // centered preset pill: ◀ prev / name → browser / ▶ next.
+        // Center on the true header midpoint (max_rect center), not on the
+        // leftover space right of the wordmark cluster; subtract the trailing
+        // item_spacing that precedes the pill.
         let pill_w = theme::PILL_MIN_W * s;
-        let pad = ((ui.available_width() - pill_w) * 0.5 - theme::SP_LG * s).max(0.0);
+        let pad = (ui.max_rect().center().x - pill_w * 0.5 - ui.cursor().left() - theme::SP_SM * s).max(0.0);
         ui.add_space(pad);
         let label = st.current_preset.clone().unwrap_or_else(|| "INIT".to_string());
         match epo::preset_slot(ui, &label, theme::PILL_MIN_W, theme::TBBTN_H, "preset") {
@@ -504,82 +606,106 @@ fn draw_header(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSette
     );
 }
 
-// ─── LEFT card body ────────────────────────────────────────────────────────
+// ─── LEFT card body (v2.15 geometry): 88px hero band + fixed-rhythm sections ──
 fn draw_left_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, tempo: f32) {
     let s = theme::ui_scale(ui);
     let kd = theme::KNOB_DIAM_FX;
+    let hero_kd = theme::KNOB_DIAM_INSPECT; // hero knobs larger than section knobs
+    let (body, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), CARD_BODY_H * s), Sense::hover());
 
-    // Hero: TIME L / link / TIME R (tempo-aware value strings via knob_ex `disp`)
+    // ── Hero band (88px): TIME L / LINK / TIME R as three centered columns ──
+    let hero = Rect::from_min_size(body.min, Vec2::new(body.width(), 88.0 * s));
     let l_str = params.format_base_time(params.base_time_l.value(), tempo);
     let r_val = if params.time_linked.value() { params.base_time_l.value() } else { params.base_time_r.value() };
     let r_str = params.format_base_time(r_val, tempo);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SP_MD * s;
-        epo::knob_ex(ui, setter, &params.base_time_l, "TIME L", kd, Accent::Ink, false, None, Some(&l_str));
-        epo::toggle(ui, "LINK", &params.time_linked, setter);
+    let hthird = hero.width() / 3.0;
+    let hcol = |i: f32| Rect::from_min_size(Pos2::new(hero.min.x + i * hthird, hero.min.y + 8.0 * s),
+                                            Vec2::new(hthird, hero.height() - 8.0 * s));
+    {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(hcol(0.0)).layout(Layout::top_down(Align::Center)));
+        epo::knob_ex(&mut c, setter, &params.base_time_l, "TIME L", hero_kd, Accent::Ink, false, None, Some(&l_str));
+    }
+    {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(hcol(1.0)).layout(Layout::top_down(Align::Center)));
+        c.add_space(30.0 * s);
+        epo::toggle(&mut c, "LINK", &params.time_linked, setter);
+    }
+    {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(hcol(2.0)).layout(Layout::top_down(Align::Center)));
         if params.time_linked.value() {
-            epo::knob_ex(ui, setter, &params.base_time_l, "TIME R", kd, Accent::Ink, false, None, Some(&r_str));
+            epo::knob_ex(&mut c, setter, &params.base_time_l, "TIME R", hero_kd, Accent::Ink, false, None, Some(&r_str));
         } else {
-            epo::knob_ex(ui, setter, &params.base_time_r, "TIME R", kd, Accent::Ink, false, None, Some(&r_str));
+            epo::knob_ex(&mut c, setter, &params.base_time_r, "TIME R", hero_kd, Accent::Ink, false, None, Some(&r_str));
         }
-    });
-    ui.add_space(theme::SP_MD * s);
+    }
+    ui.painter().line_segment([Pos2::new(body.min.x, hero.max.y), Pos2::new(body.max.x, hero.max.y)],
+                              Stroke::new(1.0 * s, theme::line()));
 
-    // SYNC
-    section_label(ui, "SYNC", s);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SP_TIGHT * s;
+    // ── Sections (fixed rhythm + hairline dividers, like v2.15 `section`) ──
+    let mut y = hero.max.y;
+    let mut chip_row = |ui: &mut egui::Ui, br: Rect, s: f32, f: &mut dyn FnMut(&mut egui::Ui)| {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(br).layout(Layout::left_to_right(Align::Center)));
+        c.spacing_mut().item_spacing.x = theme::SP_TIGHT * s;
+        f(&mut c);
+    };
+
+    let (br, ny) = left_section(ui, body, y, "SYNC", 30.0 * s, s); y = ny;
+    chip_row(ui, br, s, &mut |c| {
         let cur = params.sync_mode.value();
-        if epo::chip(ui, "FREE", cur == SyncMode::Free) { set_enum(setter, &params.sync_mode, SyncMode::Free); }
-        if epo::chip(ui, "SYNC", cur == SyncMode::Sync) { set_enum(setter, &params.sync_mode, SyncMode::Sync); }
+        if epo::chip(c, "FREE", cur == SyncMode::Free) { set_enum(setter, &params.sync_mode, SyncMode::Free); }
+        if epo::chip(c, "SYNC", cur == SyncMode::Sync) { set_enum(setter, &params.sync_mode, SyncMode::Sync); }
     });
-    ui.add_space(theme::SP_SM * s);
 
-    // DELAY MODE
-    section_label(ui, "DELAY MODE", s);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SP_TIGHT * s;
+    let (br, ny) = left_section(ui, body, y, "DELAY MODE", 30.0 * s, s); y = ny;
+    chip_row(ui, br, s, &mut |c| {
         let cur = params.delay_mode.value();
         for (lab, m) in [("REPITCH", DelayMode::Repitch), ("FADE", DelayMode::Fade), ("JUMP", DelayMode::Jump)] {
-            if epo::chip(ui, lab, cur == m) { set_enum(setter, &params.delay_mode, m); }
+            if epo::chip(c, lab, cur == m) { set_enum(setter, &params.delay_mode, m); }
         }
     });
-    ui.add_space(theme::SP_SM * s);
 
-    // CHANNEL MODE
-    section_label(ui, "CHANNEL", s);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SP_TIGHT * s;
+    let (br, ny) = left_section(ui, body, y, "CHANNEL", 30.0 * s, s); y = ny;
+    chip_row(ui, br, s, &mut |c| {
         let cur = params.channel_mode.value();
         for (lab, m) in [("STEREO", ChannelMode::Stereo), ("M/S", ChannelMode::MidSide), ("MONO", ChannelMode::Mono)] {
-            if epo::chip(ui, lab, cur == m) { set_enum(setter, &params.channel_mode, m); }
+            if epo::chip(c, lab, cur == m) { set_enum(setter, &params.channel_mode, m); }
         }
     });
-    ui.add_space(theme::SP_MD * s);
 
-    // LEVELS
-    section_label(ui, "LEVELS", s);
+    // LEVELS — IN / MIX / OUT knobs, one per column
     let mix_str = format!("{:.0}%", params.dry_wet.value() * 100.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
-        epo::knob(ui, setter, &params.input_gain, "IN", kd, Accent::Ink, false);
-        epo::knob_ex(ui, setter, &params.dry_wet, "MIX", kd, Accent::Ink, false, None, Some(&mix_str));
-        epo::knob(ui, setter, &params.output_gain, "OUT", kd, Accent::Ink, false);
-    });
-    ui.add_space(theme::SP_MD * s);
+    let (br, ny) = left_section(ui, body, y, "LEVELS", 76.0 * s, s); y = ny;
+    knob_col(ui, br, 0, 3, |c| { epo::knob(c, setter, &params.input_gain, "IN", kd, Accent::Ink, false); });
+    knob_col(ui, br, 1, 3, |c| { epo::knob_ex(c, setter, &params.dry_wet, "MIX", kd, Accent::Ink, false, None, Some(&mix_str)); });
+    knob_col(ui, br, 2, 3, |c| { epo::knob(c, setter, &params.output_gain, "OUT", kd, Accent::Ink, false); });
 
-    // WOBBLE
-    section_label(ui, "WOBBLE", s);
-    let amt_str = format!("{:.0}%", params.wobble_amount.value() * 100.0);
-    let rate_str = format!("{:.2} Hz", params.wobble_rate.value());
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
-        epo::knob_ex(ui, setter, &params.wobble_amount, "AMOUNT", kd, Accent::Ink, false, None, Some(&amt_str));
-        epo::knob_ex(ui, setter, &params.wobble_rate, "RATE", kd, Accent::Ink, false, None, Some(&rate_str));
-    });
-    ui.add_space(theme::SP_MD * s);
+    // SATURATION — SOFT CLIP toggle
+    let (br, _ny) = left_section(ui, body, y, "SATURATION", 30.0 * s, s);
+    chip_row(ui, br, s, &mut |c| epo::toggle(c, "SOFT CLIP", &params.soft_clip, setter));
+}
 
-    epo::toggle(ui, "SOFT CLIP", &params.soft_clip, setter);
+/// v2.15 `section` rhythm: title at (x+pad, y+10), a body rect of `body_h`, then
+/// a hairline divider. Returns the body rect and the new running y.
+fn left_section(ui: &mut egui::Ui, body: Rect, y: f32, title: &str, body_h: f32, s: f32) -> (Rect, f32) {
+    let pad_top = 10.0 * s;
+    let title_h = 16.0 * s;
+    let pad_x = 4.0 * s;
+    ui.painter().text(Pos2::new(body.min.x + pad_x, y + pad_top), Align2::LEFT_TOP, title,
+                      FontId::new(theme::FS_LABEL * s, FontFamily::Proportional), theme::FAINT());
+    let br = Rect::from_min_max(Pos2::new(body.min.x + pad_x, y + pad_top + title_h),
+                               Pos2::new(body.max.x - pad_x, y + pad_top + title_h + body_h));
+    let line_y = y + pad_top + title_h + body_h + 8.0 * s;
+    ui.painter().line_segment([Pos2::new(body.min.x, line_y), Pos2::new(body.max.x, line_y)],
+                              Stroke::new(1.0 * s, theme::line()));
+    (br, line_y)
+}
+
+/// Place one knob centered in column `i` of `n` within `br`.
+fn knob_col(ui: &mut egui::Ui, br: Rect, i: usize, n: usize, f: impl FnOnce(&mut egui::Ui)) {
+    let cw = br.width() / n as f32;
+    let r = Rect::from_min_size(Pos2::new(br.min.x + i as f32 * cw, br.min.y), Vec2::new(cw, br.height()));
+    let mut c = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(Layout::top_down(Align::Center)));
+    f(&mut c);
 }
 
 fn section_label(ui: &mut egui::Ui, text: &str, s: f32) {
@@ -602,8 +728,13 @@ fn draw_center_body(
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
 
     let w = ui.available_width();
-    let h = 300.0 * s;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    // Allocate the full shared body height so this card bottom-aligns with the
+    // others; the shaping strip is a fixed SHAPING_H band pinned to the bottom,
+    // and the viz well takes the rest (v2.15 split — was inverted in the port).
+    let (body, _) = ui.allocate_exact_size(Vec2::new(w, CARD_BODY_H * s), Sense::hover());
+    let rect = Rect::from_min_max(
+        Pos2::new(body.min.x + 8.0 * s, body.min.y + 2.0 * s),
+        Pos2::new(body.max.x - 8.0 * s, body.max.y - SHAPING_H * s - 8.0 * s));
     let p = ui.painter().clone();
     // kit `.viz` well: INSET fill + strong hairline border.
     p.rect_filled(rect, 13.0 * s, theme::INSET());
@@ -613,14 +744,27 @@ fn draw_center_body(
     let ch_label = match params.channel_mode.value() {
         ChannelMode::Stereo => "STEREO", ChannelMode::MidSide => "MID/SIDE", ChannelMode::Mono => "MONO",
     };
+    // Caption shows the range of the axis actually drawn in this view.
+    let shown_range = match viz_mode {
+        VizMode::Stems => viz.grid_range_secs,
+        VizMode::Grid => viz.grid_range_secs_taps_only,
+    };
     let len_str = match params.sync_mode.value() {
         SyncMode::Sync => {
-            let beats = viz.grid_range_secs * tempo / 60.0;
-            if beats == beats.floor() { format!("{:.0}/1", beats) } else { format!("{:.1} beat", beats) }
+            // Musical length, not raw beats-as-"N/1" (which read like bars).
+            // Round away fp error so integer beat counts format as integers.
+            let beats = (shown_range * tempo / 60.0 * 1000.0).round() / 1000.0;
+            if beats >= 4.0 && (beats / 4.0).fract() == 0.0 {
+                format!("{:.0} BARS", beats / 4.0)
+            } else if beats.fract() == 0.0 {
+                format!("{:.0} BEATS", beats)
+            } else {
+                format!("{:.1} BEATS", beats)
+            }
         }
         SyncMode::Free => {
-            if viz.grid_range_secs < 1.0 { format!("{:.0} ms", viz.grid_range_secs * 1000.0) }
-            else { format!("{:.2} s", viz.grid_range_secs) }
+            if shown_range < 1.0 { format!("{:.0} ms", shown_range * 1000.0) }
+            else { format!("{:.2} s", shown_range) }
         }
     };
     p.text(Pos2::new(rect.max.x - 13.0 * s, rect.min.y + 9.0 * s), Align2::RIGHT_TOP,
@@ -632,24 +776,66 @@ fn draw_center_body(
         VizMode::Grid => draw_grid_viz(ui, rect, params, setter, &viz, tempo, is_sync, drag_tap, s),
     }
 
-    // ── Shaping strip: two XY pads (per-channel topology shaping) ──────────
-    ui.add_space(theme::SP_SM * s);
-    let strip_h = (ui.available_height() - theme::SP_SM * s).max(96.0 * s);
-    let (strip, _) = ui.allocate_exact_size(Vec2::new(w, strip_h), Sense::hover());
-    let pad_gap = theme::SP_SM * s;
-    let pad_w = (strip.width() - pad_gap) * 0.5;
-    let l_rect = Rect::from_min_size(strip.min, Vec2::new(pad_w, strip_h));
-    let r_rect = Rect::from_min_size(Pos2::new(strip.min.x + pad_w + pad_gap, strip.min.y), Vec2::new(pad_w, strip_h));
+    // ── Shaping strip (fixed SHAPING_H band pinned to the bottom): SHAPE L pad ·
+    //    SHAPE R pad · 56px link column, matching v2.15 draw_shaping_strip. ──────
+    let strip = Rect::from_min_max(Pos2::new(body.min.x, body.max.y - SHAPING_H * s), body.max);
+    ui.painter().line_segment([Pos2::new(strip.min.x, strip.min.y), Pos2::new(strip.max.x, strip.min.y)],
+                              Stroke::new(1.0 * s, theme::line()));
+    let link_w = 56.0 * s;
+    let pad_in = 8.0 * s;
+    let pad_avail = (strip.width() - link_w) * 0.5;
+    let l_rect = Rect::from_min_size(Pos2::new(strip.min.x + pad_in, strip.min.y + pad_in),
+                                     Vec2::new(pad_avail - pad_in * 2.0, strip.height() - pad_in * 2.0));
+    let r_rect = Rect::from_min_size(Pos2::new(strip.min.x + pad_avail + pad_in, strip.min.y + pad_in),
+                                     Vec2::new(pad_avail - pad_in * 2.0, strip.height() - pad_in * 2.0));
+    let link_rect = Rect::from_min_max(Pos2::new(strip.max.x - link_w, strip.min.y), strip.max);
     let linked = params.shape_linked.value();
     draw_xy_pad(ui, l_rect, "shape_l", "SHAPE L", &params.shape_x_l, &params.shape_y_l, setter, false, n_active, s);
     let (xr, yr) = if linked { (&params.shape_x_l, &params.shape_y_l) } else { (&params.shape_x_r, &params.shape_y_r) };
     draw_xy_pad(ui, r_rect, "shape_r", "SHAPE R", xr, yr, setter, linked, n_active, s);
+    draw_shape_link(ui, link_rect, &params.shape_linked, setter, linked, s);
+}
+
+/// SHAPE-link toggle column at the right of the shaping strip: a "SHAPE"
+/// caption, a chip-styled LINK button, and a LINKED/UNLINK state sublabel.
+/// Toggles `shape_linked` so SHAPE R mirrors SHAPE L (parity with the pre-port
+/// editor). Hand-painted because it shares the manual-rect strip with the pads;
+/// the chip styling mirrors the kit's neutral button (as `epo::toggle` "LINK").
+fn draw_shape_link(ui: &mut egui::Ui, rect: Rect, param: &BoolParam, setter: &ParamSetter, linked: bool, s: f32) {
+    let btn_w = (rect.width() - 6.0 * s).min(40.0 * s);
+    let btn = Rect::from_center_size(rect.center(), Vec2::new(btn_w, theme::BTN_H * s));
+    let resp = ui.interact(btn, ui.id().with("shape_link"), Sense::click());
+    if resp.clicked() {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, !linked);
+        setter.end_set_parameter(param);
+    }
+    let (bg, stroke, fg) = if linked {
+        (theme::with_alpha(theme::INK(), 28), theme::INK(), theme::INK())
+    } else if resp.hovered() {
+        (theme::INSET(), theme::with_alpha(theme::INK(), 90), theme::INK())
+    } else {
+        (theme::INSET(), theme::line2(), theme::INK2())
+    };
+    let p = ui.painter();
+    // column separator, mirroring the pre-port divider
+    p.line_segment([Pos2::new(rect.min.x, rect.min.y + 4.0 * s), Pos2::new(rect.min.x, rect.max.y - 4.0 * s)],
+                   Stroke::new(1.0 * s, theme::line()));
+    p.text(Pos2::new(rect.center().x, rect.min.y + 12.0 * s), Align2::CENTER_CENTER, "SHAPE",
+           FontId::new(theme::FS_LABEL * s, FontFamily::Proportional), theme::FAINT());
+    p.rect_filled(btn, theme::BTN_RADIUS * s, bg);
+    p.rect_stroke(btn, theme::BTN_RADIUS * s, Stroke::new(1.0 * s, stroke), StrokeKind::Inside);
+    p.text(btn.center(), Align2::CENTER_CENTER, "LINK",
+           FontId::new((theme::BTN_FS - 2.0) * s, FontFamily::Proportional), fg);
+    p.text(Pos2::new(rect.center().x, rect.max.y - 10.0 * s), Align2::CENTER_CENTER,
+           if linked { "LINKED" } else { "UNLINK" },
+           FontId::new(theme::FS_KNOB * s, FontFamily::Proportional), theme::FAINT());
 }
 
 // ─── XY shaping pad (rect-driven; interacts via ui.interact so it composes
 // inside an already-allocated strip). ──────────────────────────────────────
 #[allow(clippy::too_many_arguments)]
-fn draw_xy_pad(ui: &mut egui::Ui, rect: Rect, salt: &str, label: &str,
+pub(crate) fn draw_xy_pad(ui: &mut egui::Ui, rect: Rect, salt: &str, label: &str,
                x_param: &FloatParam, y_param: &FloatParam, setter: &ParamSetter,
                dim: bool, n_active: usize, s: f32) {
     let alpha = if dim { 0.4 } else { 1.0 };
@@ -703,38 +889,6 @@ fn draw_xy_pad(ui: &mut egui::Ui, rect: Rect, salt: &str, label: &str,
 }
 
 // ─── Topology mirror (matches topology.rs / lib.rs exactly) ────────────────
-fn compute_positions(spacing: SpacingMode, shape_x: f32, shape_y: f32, n_active: usize) -> [f32; NUM_TAPS] {
-    let n_active = n_active.clamp(1, NUM_TAPS);
-    let first = 1.0 / NUM_TAPS as f32;
-    let last = n_active as f32 / NUM_TAPS as f32;
-    let mut out = [0.0; NUM_TAPS];
-    for i in 0..NUM_TAPS {
-        if i < n_active {
-            let t = if n_active == 1 { 0.0 } else { i as f32 / (n_active - 1) as f32 };
-            let base = match spacing {
-                SpacingMode::Linear => t,
-                SpacingMode::Exponential => t.powf(2.0).min(1.0),
-                SpacingMode::Logarithmic => t.sqrt(),
-                SpacingMode::Euclidean => t,
-            };
-            out[i] = first + bias_curve(sigmoid_blend(base, shape_y), shape_x) * (last - first);
-        } else {
-            out[i] = (i + 1) as f32 / NUM_TAPS as f32;
-        }
-    }
-    out
-}
-fn sigmoid_blend(x: f32, y: f32) -> f32 {
-    if y <= 0.0 { return x; }
-    let sm = x * x * (3.0 - 2.0 * x);
-    x * (1.0 - y) + sm * y
-}
-fn bias_curve(v: f32, x: f32) -> f32 {
-    if x.abs() < 1e-6 { return v; }
-    let power = if x >= 0.0 { 1.0 / (1.0 + 2.0 * x) } else { 1.0 + 2.0 * (-x) };
-    v.powf(power)
-}
-
 const MAX_ECHO_CYCLES: usize = 64;
 const ECHO_THRESHOLD: f32 = 0.001;
 
@@ -744,11 +898,24 @@ pub struct VizData {
     pub grid_range_secs: f32,
     pub times_l_grid: [f32; NUM_TAPS],
     pub grid_range_secs_taps_only: f32,
-    pub fb_cycle_norm_l: f32,
-    pub fb_cycle_norm_r: f32,
+    /// Cluster span (NUM_TAPS × base time, L channel) in seconds — the unit
+    /// `time_offset` is expressed in. Grid-view drags convert px → offset with it.
+    pub span_l_secs: f32,
+    /// Feedback cycle as a fraction of grid_range_secs (single value: the DSP
+    /// has one fb read head shared by both channels).
+    pub fb_cycle_norm: f32,
     pub n_echo_cycles: usize,
     pub feedback: f32,
+    /// Cumulative echo level after k cycles ([0] = 1.0), following the FB
+    /// CURVE law (Natural = feedbackᵏ; Bloom/Gate mirror lib.rs's
+    /// level-dependent loop gain with the bar level as the env proxy) — so
+    /// the drawn tail visibly changes shape with the curve chips.
+    pub cycle_gains: [f32; MAX_ECHO_CYCLES + 1],
+    /// PingPong mode with a non-zero crossfeed amount.
     pub ping_pong: bool,
+    /// d = 1 − 2·crossfeed. The fb crossfeed is a BLEND, not a hard swap: after
+    /// k cycles the own-channel weight is (1+dᵏ)/2, swapped weight (1−dᵏ)/2.
+    pub pp_own_d: f32,
 }
 
 // Pick the smallest "nice" x-axis range covering `needed_secs`. The old
@@ -776,7 +943,15 @@ fn pick_nice_range(needed_secs: f32, sync_mode: SyncMode, tempo_bpm: f32) -> f32
     }
 }
 
-fn compute_viz_data(params: &PetalParams, tempo_bpm: f32) -> VizData {
+/// Default: reserve x-range for up to 4 echo cycles (the classic ECHO view).
+pub(crate) fn compute_viz_data(params: &PetalParams, tempo_bpm: f32) -> VizData {
+    compute_viz_data_ex(params, tempo_bpm, 4)
+}
+
+/// `shown_cap` = how many echo cycles the x-range reserves room for. The v3
+/// GRID/STEMS editing views pass 1 (only the first repeat is ghosted there —
+/// reserving 4 squeezed the editable taps into the left edge).
+pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_cap: usize) -> VizData {
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
     let pos_l = compute_positions(params.spacing_mode.value(), params.shape_x_l.value(), params.shape_y_l.value(), n_active);
     let pos_r = if params.shape_linked.value() { pos_l }
@@ -785,49 +960,102 @@ fn compute_viz_data(params: &PetalParams, tempo_bpm: f32) -> VizData {
     let time_l_norm = params.base_time_l.value();
     let time_r_norm = if params.time_linked.value() { time_l_norm } else { params.base_time_r.value() };
     let base_secs_l = params.base_time_seconds(time_l_norm, tempo_bpm);
-    let base_secs_r = params.base_time_seconds(time_r_norm, tempo_bpm);
+    let base_secs_r = PetalParams::base_time_seconds_mode(params.sync_mode_r_eff(), time_r_norm, tempo_bpm);
     let span_l = NUM_TAPS as f32 * base_secs_l;
     let span_r = NUM_TAPS as f32 * base_secs_r;
-    let max_tap_secs = (pos_l[n_active - 1] * span_l).max(pos_r[n_active - 1] * span_r).max(0.001);
+
+    // Seconds-domain tap times via the SAME topology helpers the DSP uses —
+    // time_offset is a fraction of the cluster span, not the display range.
+    let mut t_l = [0.0f32; NUM_TAPS];
+    let mut t_r = [0.0f32; NUM_TAPS];
+    let mut in_range = [false; NUM_TAPS];
+    for i in 0..NUM_TAPS {
+        let off = params.taps[i].time_offset.value();
+        t_l[i] = topology::tap_delay_secs(pos_l[i], off, span_l);
+        t_r[i] = topology::tap_delay_secs(pos_r[i], off, span_r);
+        in_range[i] = params.taps[i].active.value() && i < n_active
+            && topology::tap_fits(t_l[i], t_r[i], MAX_DELAY_SECONDS);
+    }
 
     let feedback = params.feedback.value();
-    let cluster_span_secs = max_tap_secs;
+    // Feedback cycle — mirrors lib.rs exactly: LOCKED = cluster span over
+    // active, in-range taps (offsets included); UNLOCKED = free, 10 ms floor
+    // only (v2.18.2: the cluster-span floor is gone — in-loop saturation now
+    // bounds short-cycle feedback instead).
+    let cluster_span_secs = topology::cluster_span_secs(&t_l, &t_r, &in_range, n_active);
     let fb_cycle_secs = if params.feedback_time_locked.value() { cluster_span_secs }
-        else { params.feedback_time_seconds(tempo_bpm).max(cluster_span_secs) }.max(1e-6);
+        else {
+            params.feedback_time_seconds(tempo_bpm)
+                .clamp(topology::MIN_FB_SECS, MAX_DELAY_SECONDS * 0.95)
+        };
 
-    let n_echo_cycles = if feedback < 1e-3 || fb_cycle_secs < 1e-6 { 0 }
-        else if feedback >= 0.999 { MAX_ECHO_CYCLES }
-        else { ((ECHO_THRESHOLD.ln() / feedback.ln()).ceil() as usize).min(MAX_ECHO_CYCLES) };
+    // Per-cycle cumulative levels following the FB CURVE (mirrors lib.rs's
+    // constants: Bloom P=0.35 / clamp 0.5..1.15 / exp 0.4, Gate T=0.1). The
+    // DSP's envelope follower tracks the real signal; here the previous
+    // cycle's level stands in for it, which is exact for an isolated cluster.
+    let fb_curve = params.fb_curve.value();
+    let mut cycle_gains = [0.0f32; MAX_ECHO_CYCLES + 1];
+    cycle_gains[0] = 1.0;
+    let mut n_echo_cycles = 0usize;
+    if feedback >= 1e-3 && fb_cycle_secs >= 1e-6 {
+        let mut level = 1.0f32;
+        for k in 1..=MAX_ECHO_CYCLES {
+            let g = match fb_curve {
+                crate::params::FbCurve::Natural => feedback,
+                crate::params::FbCurve::Bloom => {
+                    let bend = (0.35 / level.max(1e-4)).powf(0.4);
+                    feedback * bend.clamp(0.5, 1.15)
+                }
+                crate::params::FbCurve::Gate => {
+                    if level >= 0.1 { feedback }
+                    else {
+                        let t = level / 0.1;
+                        feedback * t * t
+                    }
+                }
+            };
+            level = (level * g).min(1.0);
+            cycle_gains[k] = level;
+            if level < ECHO_THRESHOLD { break; }
+            n_echo_cycles = k;
+        }
+    }
 
     let sync_mode = params.sync_mode.value();
+    // Drawn extent: ALL taps up to n_active (muted taps still draw, dimmed),
+    // offsets included — so offset taps don't pile up past the right edge.
+    let max_drawn_secs = (0..n_active).map(|i| t_l[i].max(t_r[i])).fold(0.001f32, f32::max);
     // Show the cluster + a readable handful of repeats (not the full -60 dB tail).
-    const SHOWN_ECHO_CYCLES: usize = 4;
-    let shown = n_echo_cycles.min(SHOWN_ECHO_CYCLES);
-    let grid_range_secs = pick_nice_range(max_tap_secs * 2.0 + shown as f32 * fb_cycle_secs, sync_mode, tempo_bpm);
-    let grid_range_secs_taps_only = pick_nice_range(max_tap_secs * 1.10, sync_mode, tempo_bpm);
+    let shown = n_echo_cycles.min(shown_cap);
+    // 1.10× headroom (was 2× — a v2.8 relic from before echoes explicitly
+    // extended the range; it made 8 taps at 1/1 show a 16-bar axis).
+    let grid_range_secs = pick_nice_range(max_drawn_secs * 1.10 + shown as f32 * fb_cycle_secs, sync_mode, tempo_bpm);
+    let grid_range_secs_taps_only = pick_nice_range(max_drawn_secs * 1.10, sync_mode, tempo_bpm);
 
     let mut times_l = [0.0f32; NUM_TAPS];
     let mut times_r = [0.0f32; NUM_TAPS];
     let mut times_l_grid = [0.0f32; NUM_TAPS];
     for i in 0..NUM_TAPS {
-        let offset = params.taps[i].time_offset.value();
-        times_l[i] = ((pos_l[i] * span_l / grid_range_secs) + offset).clamp(0.0, 1.0);
-        times_r[i] = ((pos_r[i] * span_r / grid_range_secs) + offset).clamp(0.0, 1.0);
-        times_l_grid[i] = ((pos_l[i] * span_l / grid_range_secs_taps_only) + offset).clamp(0.0, 1.0);
+        times_l[i] = (t_l[i] / grid_range_secs).clamp(0.0, 1.0);
+        times_r[i] = (t_r[i] / grid_range_secs).clamp(0.0, 1.0);
+        times_l_grid[i] = (t_l[i] / grid_range_secs_taps_only).clamp(0.0, 1.0);
     }
 
-    let ping_pong = matches!(params.crossfeed_mode.value(), crate::params::CrossfeedMode::PingPong);
+    let crossfeed = params.crossfeed.value().min(1.0);
+    let ping_pong = matches!(params.crossfeed_mode.value(), crate::params::CrossfeedMode::PingPong)
+        && crossfeed > 1e-4;
     VizData {
         times_l, times_r, grid_range_secs, times_l_grid, grid_range_secs_taps_only,
-        fb_cycle_norm_l: fb_cycle_secs / grid_range_secs,
-        fb_cycle_norm_r: fb_cycle_secs / grid_range_secs,
-        n_echo_cycles, feedback, ping_pong,
+        span_l_secs: span_l,
+        fb_cycle_norm: fb_cycle_secs / grid_range_secs,
+        n_echo_cycles, feedback, cycle_gains, ping_pong,
+        pp_own_d: 1.0 - 2.0 * crossfeed,
     }
 }
 
 // ─── Timeline grid (beats in Sync, ms in Free) ─────────────────────────────
 #[allow(clippy::too_many_arguments)]
-fn paint_timeline_grid(
+pub(crate) fn paint_timeline_grid(
     p: &egui::Painter, draw_l: f32, draw_r: f32, draw_t: f32, draw_b: f32,
     grid_range_secs: f32, tempo_bpm: f32, is_sync: bool, label_y: f32, s: f32,
 ) {
@@ -883,7 +1111,7 @@ fn paint_timeline_grid(
     }
 }
 
-fn dashed_h(p: &egui::Painter, start: Pos2, width: f32, color: Color32, s: f32) {
+pub(crate) fn dashed_h(p: &egui::Painter, start: Pos2, width: f32, color: Color32, s: f32) {
     let (dash, gap) = (4.0 * s, 4.0 * s);
     let mut x = start.x;
     while x < start.x + width {
@@ -903,7 +1131,7 @@ fn dashed_v(p: &egui::Painter, start: Pos2, height: f32, color: Color32, s: f32)
 }
 
 // ─── STEMS visualizer ──────────────────────────────────────────────────────
-fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &VizData, tempo_bpm: f32, is_sync: bool, s: f32) {
+pub(crate) fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &VizData, tempo_bpm: f32, is_sync: bool, s: f32) {
     let (pad_l, pad_r, pad_t, pad_b) = (36.0 * s, 24.0 * s, 18.0 * s, 24.0 * s);
     let draw_l = rect.min.x + pad_l;
     let draw_r = rect.max.x - pad_r;
@@ -951,50 +1179,59 @@ fn draw_stems(p: &egui::Painter, rect: Rect, params: &Arc<PetalParams>, viz: &Vi
     };
 
     for k in 0..=viz.n_echo_cycles {
-        let cycle_gain = if k == 0 { 1.0 } else { viz.feedback.powi(k as i32) };
+        // Curve-shaped cumulative level (Natural = feedbackᵏ as before).
+        let cycle_gain = viz.cycle_gains[k.min(MAX_ECHO_CYCLES)];
         if cycle_gain < ECHO_THRESHOLD { break; }
-        let swap_lr = viz.ping_pong && (k % 2 == 1);
+        // Ping-pong crossfeeds the fb CONTENT between channels as a blend
+        // (fb_l' = fb_l·(1-cf) + fb_r·cf), not a hard swap: after k cycles the
+        // own-channel weight is (1+dᵏ)/2 with d = 1-2cf. Draw each echo as two
+        // weighted copies — straight and L/R-time-swapped. At cf=1 this
+        // degenerates to the classic alternating full swap. Pan weights are
+        // per-output-channel in the DSP and do NOT swap with the content.
+        let own_w = if viz.ping_pong && k > 0 { (1.0 + viz.pp_own_d.powi(k as i32)) * 0.5 } else { 1.0 };
         for i in 0..n_active {
             let tap = &params.taps[i];
             let active = tap.active.value();
-            let height_scale = if k == 0 { 1.0 } else { cycle_gain.cbrt() };
-            let opacity_scale = if k == 0 { 1.0 } else { (cycle_gain.sqrt() * 0.7).max(0.12) };
-            let op = if active { opacity_scale } else { 0.22 };
-            let gain_n = (gain_db_to_pos(tap.gain_db.value()) * height_scale).clamp(0.0, 1.0);
-            let raw_pan = tap.pan.value();
-            let pan = if swap_lr { -raw_pan } else { raw_pan };
-            let t_l = viz.times_l[i] + k as f32 * viz.fb_cycle_norm_l;
-            let t_r = viz.times_r[i] + k as f32 * viz.fb_cycle_norm_r;
+            let pan = tap.pan.value();
+            let t_l = viz.times_l[i] + k as f32 * viz.fb_cycle_norm;
+            let t_r = viz.times_r[i] + k as f32 * viz.fb_cycle_norm;
             if t_l > 1.0 && t_r > 1.0 { continue; }
-            let (t_a, t_b) = if swap_lr { (t_r, t_l) } else { (t_l, t_r) };
-            let x_l = draw_l + t_a.min(1.0) * draw_w;
-            let x_r = draw_l + t_b.min(1.0) * draw_w;
-            let (in_l, in_r) = (t_a <= 1.0, t_b <= 1.0);
-            let col = tap_color(i, n_active).linear_multiply(op);
             let bw = if k == 0 { bar_w } else { (bar_w * 0.6).max(1.0) };
-            match ch_mode {
-                ChannelMode::Stereo => {
-                    let l_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).cos();
-                    let r_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).sin();
-                    let (h_l, h_r) = (gain_n * l_w * max_bar, gain_n * r_w * max_bar);
-                    if in_l { bar(x_l, mid_y - h_l, mid_y, bw, col); }
-                    if in_r { bar(x_r, mid_y, mid_y + h_r, bw, col); }
-                }
-                ChannelMode::MidSide => {
-                    let mid_amt = ((1.0 - pan) * 0.5).clamp(0.0, 1.0);
-                    let side_amt = ((1.0 + pan) * 0.5).clamp(0.0, 1.0);
-                    let mid_h = gain_n * max_bar * 0.5 * mid_amt;
-                    let side_h = gain_n * max_bar * 0.35 * side_amt;
-                    if in_l { bar(x_l, mid_y - mid_h, mid_y + mid_h, bw, col); }
-                    if in_r {
-                        let (st_y, sb_y) = (mid_y - max_bar * 0.65, mid_y + max_bar * 0.65);
-                        bar(x_r, st_y - side_h, st_y + side_h, bw, col);
-                        bar(x_r, sb_y - side_h, sb_y + side_h, bw, col);
+            for (t_a, t_b, w) in [(t_l, t_r, own_w), (t_r, t_l, 1.0 - own_w)] {
+                if w < 0.02 { continue; }
+                let g = cycle_gain * w;
+                let height_scale = if k == 0 { 1.0 } else { g.cbrt() };
+                let opacity_scale = if k == 0 { 1.0 } else { (g.sqrt() * 0.7).max(0.12) };
+                let op = if active { opacity_scale } else { 0.22 * w };
+                let gain_n = (gain_db_to_pos(tap.gain_db.value()) * height_scale).clamp(0.0, 1.0);
+                let x_l = draw_l + t_a.min(1.0) * draw_w;
+                let x_r = draw_l + t_b.min(1.0) * draw_w;
+                let (in_l, in_r) = (t_a <= 1.0, t_b <= 1.0);
+                let col = tap_color(i, n_active).linear_multiply(op);
+                match ch_mode {
+                    ChannelMode::Stereo => {
+                        let l_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).cos();
+                        let r_w = ((pan + 1.0) * std::f32::consts::PI * 0.25).sin();
+                        let (h_l, h_r) = (gain_n * l_w * max_bar, gain_n * r_w * max_bar);
+                        if in_l { bar(x_l, mid_y - h_l, mid_y, bw, col); }
+                        if in_r { bar(x_r, mid_y, mid_y + h_r, bw, col); }
                     }
-                }
-                ChannelMode::Mono => {
-                    let h = gain_n * max_bar;
-                    if in_l { bar(x_l, mid_y - h * 0.5, mid_y + h * 0.5, bw, col); }
+                    ChannelMode::MidSide => {
+                        let mid_amt = ((1.0 - pan) * 0.5).clamp(0.0, 1.0);
+                        let side_amt = ((1.0 + pan) * 0.5).clamp(0.0, 1.0);
+                        let mid_h = gain_n * max_bar * 0.5 * mid_amt;
+                        let side_h = gain_n * max_bar * 0.35 * side_amt;
+                        if in_l { bar(x_l, mid_y - mid_h, mid_y + mid_h, bw, col); }
+                        if in_r {
+                            let (st_y, sb_y) = (mid_y - max_bar * 0.65, mid_y + max_bar * 0.65);
+                            bar(x_r, st_y - side_h, st_y + side_h, bw, col);
+                            bar(x_r, sb_y - side_h, sb_y + side_h, bw, col);
+                        }
+                    }
+                    ChannelMode::Mono => {
+                        let h = gain_n * max_bar;
+                        if in_l { bar(x_l, mid_y - h * 0.5, mid_y + h * 0.5, bw, col); }
+                    }
                 }
             }
         }
@@ -1022,6 +1259,9 @@ fn draw_grid_viz(ui: &mut egui::Ui, rect: Rect, params: &Arc<PetalParams>, sette
         p.text(Pos2::new(rect.min.x + pad_l - 6.0 * s, y), Align2::RIGHT_CENTER, &label,
                FontId::new(9.0 * s, FontFamily::Monospace), theme::FAINT());
     }
+    // "dB" header above the amplitude scale (parity with the pre-port grid viz).
+    p.text(Pos2::new(rect.min.x + pad_l - 6.0 * s, draw_t - 6.0 * s), Align2::RIGHT_BOTTOM, "dB",
+           FontId::new(8.0 * s, FontFamily::Monospace), theme::FAINT());
     paint_timeline_grid(&p, draw_l, draw_r, draw_t, draw_b, viz.grid_range_secs_taps_only, tempo_bpm, is_sync, rect.max.y - 6.0 * s, s);
     p.text(Pos2::new(draw_l + 8.0 * s, draw_t + 6.0 * s), Align2::LEFT_TOP,
            "DRAG · X = TIME · Y = GAIN", FontId::new(9.0 * s, FontFamily::Proportional), theme::FAINT());
@@ -1047,7 +1287,11 @@ fn draw_grid_viz(ui: &mut egui::Ui, rect: Rect, params: &Arc<PetalParams>, sette
         if resp.dragged() && *drag_tap == Some(i) {
             let dy = -resp.drag_delta().y / draw_h;
             setter.set_parameter(&tap.gain_db, pos_to_gain_db((gain_n + dy).clamp(0.0, 1.0)));
-            let dx = resp.drag_delta().x / draw_w;
+            // px → offset units: time_offset is a fraction of the cluster SPAN
+            // (16 × base time) while the axis is grid_range wide — convert so
+            // the ball tracks the pointer and the audio tracks the ball.
+            let dx = resp.drag_delta().x / draw_w
+                * (viz.grid_range_secs_taps_only / viz.span_l_secs.max(1e-6));
             if dx.abs() > 1e-5 {
                 let mut new_off = tap.time_offset.value() + dx;
                 if snap && !ui.input(|inp| inp.modifiers.shift) {
@@ -1075,50 +1319,115 @@ fn draw_grid_viz(ui: &mut egui::Ui, rect: Rect, params: &Arc<PetalParams>, sette
     }
 }
 
-// ─── RIGHT card body — per-tap controls ────────────────────────────────────
-fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, tab: RightTab) {
+// ─── RIGHT card body — per-tap controls + in-card footer (v2.15 geometry) ────
+fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter,
+                   tab: RightTab, tempo: f32,
+                   taps_drag: &mut Option<(i32, f32)>, fb_drag: &mut Option<(f32, f32)>) {
     let s = theme::ui_scale(ui);
+    // Allocate the full shared card-body rect (so this card bottom-aligns with
+    // DELAY/VIEW), then carve a RIGHT_FOOTER_H band off the bottom for the
+    // FEEDBACK/FB-TIME/TAPS footer — the footer lives INSIDE the card, as v2.15.
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), CARD_BODY_H * s), Sense::hover());
+    let foot_h = RIGHT_FOOTER_H * s;
+    let content = Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.max.y - foot_h));
+    let foot = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - foot_h), rect.max);
+
+    // divider above the footer band
+    ui.painter().line_segment(
+        [Pos2::new(rect.min.x, foot.min.y), Pos2::new(rect.max.x, foot.min.y)],
+        Stroke::new(1.0 * s, theme::line()));
+
+    // tab content (tap rows / knob panels) in the upper area, clipped so long
+    // tap lists never bleed into the footer band. The tap list scrolls: rows
+    // got taller (roomier rhythm) so 16 taps overflow the card by design.
+    let mut cui = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(Layout::top_down(Align::Min)));
+    cui.set_clip_rect(content);
+    cui.add_space(theme::SP_XS * s);
+    egui::ScrollArea::vertical()
+        .id_salt("tap_rows")
+        .max_height(content.height() - theme::SP_XS * s)
+        .auto_shrink([false, false])
+        .show(&mut cui, |ui| {
+            draw_tap_content(ui, params, setter, tab, s);
+        });
+
+    draw_incard_footer(ui, foot, params, setter, tempo, taps_drag, fb_drag, s);
+}
+
+// One row per tap for PAN/GAIN/FILTER, or the XFEED/DIFFUSE knob panels.
+fn draw_tap_content(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, tab: RightTab, s: f32) {
     let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
     let tw = ui.available_width();
-    let cap = theme::SLIDER_CAP_2COL * s;
     let grad = |i| Accent::Raw(tab_grad(tab, i, n_active));
+    // Roomier ~36px row rhythm (taller slider rows + wider gaps); 16 taps
+    // intentionally overflow the card and scroll (owner request, 2026-07-11).
+    let tap_rows = matches!(tab, RightTab::Pan | RightTab::Gain | RightTab::Filter);
+    if tap_rows {
+        ui.spacing_mut().item_spacing.y = theme::SP_MD * s;
+        theme::set_slider_size(1.4);
+        theme::set_slider_gap(6.0);
+    }
     match tab {
         RightTab::Gain => for i in 0..n_active {
-            epo::slider(ui, setter, &params.taps[i].gain_db, &format!("{:02}", i + 1), tw, cap, grad(i), false);
-        },
-        RightTab::Pan => for i in 0..n_active {
-            epo::slider(ui, setter, &params.taps[i].pan, &format!("{:02}", i + 1), tw, cap, grad(i), true);
-        },
-        RightTab::Filter => for i in 0..n_active {
             let tap = &params.taps[i];
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::SP_XS * s;
-                // type-cycle chip (LP → BP → HP)
-                let (tl, tn) = match tap.filter_type.value() {
-                    FilterType::LowPass => ("LP", FilterType::BandPass),
-                    FilterType::BandPass => ("BP", FilterType::HighPass),
-                    FilterType::HighPass => ("HP", FilterType::LowPass),
-                };
-                if epo::chip_sm(ui, tl, false) { set_enum(setter, &tap.filter_type, tn); }
-                // slope-cycle chip (12 → 24 → 48 dB/oct)
-                let (sl, sn) = match tap.filter_slope.value() {
-                    FilterSlope::Db12 => ("12", FilterSlope::Db24),
-                    FilterSlope::Db24 => ("24", FilterSlope::Db48),
-                    FilterSlope::Db48 => ("48", FilterSlope::Db12),
-                };
-                if epo::chip_sm(ui, sl, false) { set_enum(setter, &tap.filter_slope, sn); }
-                // cutoff (wide) + Q (narrow) share the remaining row width; shrunk
-                // value columns via slider_ex so all four controls fit the card.
-                let rem = ui.available_width();
-                let q_w = (rem * 0.4).clamp(56.0 * s, 96.0 * s);
-                let cut_w = rem - q_w - theme::SP_XS * s;
-                let mut co = epo::SliderOpts::default();
-                co.value_w = 40.0 * s;
-                epo::slider_ex(ui, setter, &tap.filter_cutoff, &format!("{:02}", i + 1), cut_w, 20.0 * s, grad(i), &co);
-                let mut qo = epo::SliderOpts::default();
-                qo.value_w = 26.0 * s;
-                epo::slider_ex(ui, setter, &tap.filter_q, "Q", q_w, 12.0 * s, grad(i), &qo);
+                ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
+                // per-tap mute — the tap number doubles as the active toggle
+                epo::toggle_sm(ui, &format!("{:02}", i + 1), &tap.active, setter);
+                let w = ui.available_width();
+                epo::slider(ui, setter, &tap.gain_db, "", w, 0.0, grad(i), false);
             });
+        },
+        RightTab::Pan => for i in 0..n_active {
+            let tap = &params.taps[i];
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
+                epo::toggle_sm(ui, &format!("{:02}", i + 1), &tap.active, setter);
+                let w = ui.available_width();
+                epo::slider(ui, setter, &tap.pan, "", w, 0.0, grad(i), true);
+            });
+        },
+        RightTab::Filter => {
+            // Two-line rows (v2.17.6): identity + type/slope chips on top,
+            // full-width CUTOFF + Q sliders below. The old 5-control single
+            // row was the cramped one at RIGHT_W=284; taller rows + scroll
+            // (v2.17.5) pay for the extra height.
+            ui.spacing_mut().item_spacing.y = theme::SP_TIGHT * s;
+            for i in 0..n_active {
+                if i > 0 { ui.add_space(theme::SP_LG * s); }
+                let tap = &params.taps[i];
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::SP_XS * s;
+                    // per-tap mute — the tap number doubles as the active toggle
+                    epo::toggle_sm(ui, &format!("{:02}", i + 1), &tap.active, setter);
+                    // type-cycle chip (LP → BP → HP)
+                    let (tl, tn) = match tap.filter_type.value() {
+                        FilterType::LowPass => ("LP", FilterType::BandPass),
+                        FilterType::BandPass => ("BP", FilterType::HighPass),
+                        FilterType::HighPass => ("HP", FilterType::LowPass),
+                    };
+                    if epo::chip_sm(ui, tl, false) { set_enum(setter, &tap.filter_type, tn); }
+                    // slope-cycle chip (12 → 24 → 48 dB/oct)
+                    let (sl, sn) = match tap.filter_slope.value() {
+                        FilterSlope::Db12 => ("12", FilterSlope::Db24),
+                        FilterSlope::Db24 => ("24", FilterSlope::Db48),
+                        FilterSlope::Db48 => ("48", FilterSlope::Db12),
+                    };
+                    if epo::chip_sm(ui, sl, false) { set_enum(setter, &tap.filter_slope, sn); }
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::SP_XS * s;
+                    let rem = ui.available_width();
+                    let q_w = (rem * 0.34).clamp(72.0 * s, 120.0 * s);
+                    let cut_w = rem - q_w - theme::SP_XS * s;
+                    let mut co = epo::SliderOpts::default();
+                    co.value_w = 52.0 * s; // "20000 Hz" fits on the full-width line
+                    epo::slider_ex(ui, setter, &tap.filter_cutoff, "", cut_w, 0.0, grad(i), &co);
+                    let mut qo = epo::SliderOpts::default();
+                    qo.value_w = 26.0 * s;
+                    epo::slider_ex(ui, setter, &tap.filter_q, "Q", q_w, 12.0 * s, grad(i), &qo);
+                });
+            }
         },
         RightTab::XFeed => {
             let acc = Accent::Raw(tab_hue(RightTab::XFeed));
@@ -1133,9 +1442,15 @@ fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamS
             ui.add_space(theme::SP_XL * s);
             let v = params.crossfeed.value();
             let amt_str = if v < 0.01 { "OFF".to_string() } else { format!("{:.0}%", v * 100.0) };
+            // caption reflects the crossfeed mode (parity with the pre-port panel)
+            let xf_lab = match params.crossfeed_mode.value() {
+                CrossfeedMode::Mix => "BLEND",
+                CrossfeedMode::PingPong => "BOUNCE",
+                CrossfeedMode::Diffuse => "DEPTH",
+            };
             ui.horizontal(|ui| {
                 ui.add_space((tw - theme::KNOB_DIAM_INSPECT - theme::KNOB_PAD_W * s) * 0.5);
-                epo::knob_ex(ui, setter, &params.crossfeed, "AMOUNT", theme::KNOB_DIAM_INSPECT, acc, false, None, Some(&amt_str));
+                epo::knob_ex(ui, setter, &params.crossfeed, xf_lab, theme::KNOB_DIAM_INSPECT, acc, false, None, Some(&amt_str));
             });
         }
         RightTab::Diffuse => {
@@ -1163,27 +1478,20 @@ fn draw_right_body(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamS
             epo::hint(ui, "8× Schroeder allpass · smaller SIZE = tighter & brighter");
         }
     }
+    // Slider ergonomics are GLOBAL — restore so the footer/XFEED sliders keep
+    // their normal height.
+    if tap_rows {
+        theme::set_slider_size(1.0);
+        theme::set_slider_gap(0.0);
+    }
 }
 
-// ─── Footer ────────────────────────────────────────────────────────────────
-fn draw_footer(
-    ui: &mut egui::Ui,
-    params: &Arc<PetalParams>,
-    setter: &ParamSetter,
-    st: &mut EditorState,
-    tempo: f32,
-    margin: f32,
-    s: f32,
-) {
-    // full-width divider to anchor the footer as a strip
-    let top = ui.cursor().top();
-    let full = ui.max_rect();
-    ui.painter().line_segment(
-        [Pos2::new(full.left(), top), Pos2::new(full.right(), top)],
-        Stroke::new(1.0 * s, theme::line()),
-    );
-    ui.add_space(theme::SP_SM * s);
-
+// ─── In-card footer (v2.15): FEEDBACK · FB TIME · TAPS as three columns in the
+//     bottom band of the right card. Each column stacks single widgets, so
+//     top_down(Center) centers them horizontally without a sizing pass. ─────────
+#[allow(clippy::too_many_arguments)]
+fn draw_incard_footer(ui: &mut egui::Ui, foot: Rect, params: &Arc<PetalParams>, setter: &ParamSetter,
+                      tempo: f32, taps_drag: &mut Option<(i32, f32)>, fb_drag: &mut Option<(f32, f32)>, s: f32) {
     let locked = params.feedback_time_locked.value();
     // Locked: FB TIME follows the cluster span (last active tap) — display it live.
     let fb_time_str = if locked {
@@ -1197,92 +1505,115 @@ fn draw_footer(
         params.format_feedback_time(tempo)
     };
 
-    ui.horizontal(|ui| {
-        ui.add_space(margin);
-        ui.spacing_mut().item_spacing.x = theme::SP_LG * s;
+    let third = foot.width() / 3.0;
+    let col = |i: f32| Rect::from_min_size(Pos2::new(foot.min.x + i * third, foot.min.y), Vec2::new(third, foot.height()));
+    {
+        let p = ui.painter();
+        for i in [1.0_f32, 2.0] {
+            let x = foot.min.x + i * third;
+            p.line_segment([Pos2::new(x, foot.min.y + 8.0 * s), Pos2::new(x, foot.max.y - 8.0 * s)],
+                           Stroke::new(1.0 * s, theme::line()));
+        }
+    }
+
+    // col 0 — FEEDBACK knob (coral, its domain)
+    {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(col(0.0)).layout(Layout::top_down(Align::Center)));
+        c.add_space(2.0 * s);
         let fb_str = format!("{:.0}%", params.feedback.value() * 100.0);
-        // feedback is color-coded coral (its domain)
-        epo::knob_ex(ui, setter, &params.feedback, "FEEDBACK", theme::KNOB_DIAM_FX, Accent::Head(1), false, None, Some(&fb_str));
+        epo::knob_ex(&mut c, setter, &params.feedback, "FEEDBACK", theme::KNOB_DIAM_FX, Accent::Head(1), false, None, Some(&fb_str));
+    }
+    // col 1 — FB TIME readout + mode (unlocked) + lock, stacked
+    {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(col(1.0)).layout(Layout::top_down(Align::Center)));
+        c.add_space(if locked { 12.0 } else { 6.0 } * s);
+        fb_time_group(&mut c, params, setter, fb_drag, s, locked, &fb_time_str);
+    }
+    // col 2 — TAPS count
+    {
+        let mut c = ui.new_child(egui::UiBuilder::new().max_rect(col(2.0)).layout(Layout::top_down(Align::Center)));
+        c.add_space(22.0 * s);
+        taps_group(&mut c, params, setter, taps_drag, s);
+    }
+}
 
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.add_space(margin);
-            ui.spacing_mut().item_spacing.x = theme::SP_SM * s;
+/// FB-TIME footer column (stacked): readout (drag-to-edit when unlocked), the
+/// mode chip (unlocked only), then the lock chip. Parent is `top_down(Center)`
+/// so each stacked widget centers horizontally.
+fn fb_time_group(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter,
+                 fb_drag: &mut Option<(f32, f32)>, s: f32, locked: bool, fb_time_str: &str) {
+    ui.spacing_mut().item_spacing.y = theme::SP_TIGHT * s;
+    let fb_resp = epo::readout_chip(ui, "FB TIME", fb_time_str);
+    if !locked {
+        let fb_resp = fb_resp.interact(Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        if fb_resp.drag_started() {
+            setter.begin_set_parameter(&params.feedback_time);
+            *fb_drag = Some((params.feedback_time.value(), 0.0));
+        }
+        if let Some((v0, acc0)) = *fb_drag {
+            let acc = acc0 - fb_resp.drag_delta().y;
+            *fb_drag = Some((v0, acc));
+            let new_norm = if params.feedback_time_mode.value() == SyncMode::Sync {
+                let n_divs = crate::params::SYNC_DIVS.len() as f32 - 1.0;
+                let start_idx = (v0 * n_divs).round();
+                ((start_idx + (acc / (14.0 * s)).round()) / n_divs).clamp(0.0, 1.0)
+            } else {
+                (v0 + acc * 0.003).clamp(0.0, 1.0)
+            };
+            setter.set_parameter(&params.feedback_time, new_norm);
+            if fb_resp.drag_stopped() {
+                setter.end_set_parameter(&params.feedback_time);
+                *fb_drag = None;
+            }
+        }
+        let mode = params.feedback_time_mode.value();
+        let lab = if mode == SyncMode::Sync { "SYNC" } else { "FREE" };
+        if epo::chip_sm(ui, lab, false) {
+            let next = if mode == SyncMode::Sync { SyncMode::Free } else { SyncMode::Sync };
+            set_enum(setter, &params.feedback_time_mode, next);
+        }
+    }
+    if epo::chip_sm(ui, if locked { "LOCK" } else { "free" }, locked) {
+        setter.begin_set_parameter(&params.feedback_time_locked);
+        setter.set_parameter(&params.feedback_time_locked, !locked);
+        setter.end_set_parameter(&params.feedback_time_locked);
+    }
+}
 
-            // TAPS — drag-on-number (vertical drag or scroll steps the count)
-            let taps_resp = epo::readout_chip(ui, "TAPS", &format!("{}", params.num_taps_active.value()))
-                .interact(Sense::click_and_drag())
-                .on_hover_cursor(egui::CursorIcon::ResizeVertical);
-            let n = params.num_taps_active.value();
-            if taps_resp.drag_started() {
-                setter.begin_set_parameter(&params.num_taps_active);
-                st.taps_drag = Some((n, 0.0));
-            }
-            if let Some((n0, acc0)) = st.taps_drag {
-                let acc = acc0 - taps_resp.drag_delta().y;
-                st.taps_drag = Some((n0, acc));
-                let target = (n0 + (acc / (18.0 * s)).round() as i32).clamp(1, NUM_TAPS as i32);
-                if target != n { setter.set_parameter(&params.num_taps_active, target); }
-                if taps_resp.drag_stopped() {
-                    setter.end_set_parameter(&params.num_taps_active);
-                    st.taps_drag = None;
-                }
-            }
-            if taps_resp.hovered() {
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll.abs() > 4.0 {
-                    setter.begin_set_parameter(&params.num_taps_active);
-                    setter.set_parameter(&params.num_taps_active, (n + scroll.signum() as i32).clamp(1, NUM_TAPS as i32));
-                    setter.end_set_parameter(&params.num_taps_active);
-                }
-            }
-
-            // FB TIME mode + lock chips (mode only matters when unlocked)
-            if !locked {
-                let mode = params.feedback_time_mode.value();
-                let lab = if mode == SyncMode::Sync { "SYNC" } else { "FREE" };
-                if epo::chip_sm(ui, lab, false) {
-                    let next = if mode == SyncMode::Sync { SyncMode::Free } else { SyncMode::Sync };
-                    set_enum(setter, &params.feedback_time_mode, next);
-                }
-            }
-            if epo::chip_sm(ui, if locked { "LOCK" } else { "free" }, locked) {
-                setter.begin_set_parameter(&params.feedback_time_locked);
-                setter.set_parameter(&params.feedback_time_locked, !locked);
-                setter.end_set_parameter(&params.feedback_time_locked);
-            }
-
-            // FB TIME — drag to edit when unlocked
-            let fb_resp = epo::readout_chip(ui, "FB TIME", &fb_time_str);
-            if !locked {
-                let fb_resp = fb_resp.interact(Sense::click_and_drag())
-                    .on_hover_cursor(egui::CursorIcon::ResizeVertical);
-                if fb_resp.drag_started() {
-                    setter.begin_set_parameter(&params.feedback_time);
-                    st.fb_drag = Some((params.feedback_time.value(), 0.0));
-                }
-                if let Some((v0, acc0)) = st.fb_drag {
-                    let acc = acc0 - fb_resp.drag_delta().y;
-                    st.fb_drag = Some((v0, acc));
-                    let new_norm = if params.feedback_time_mode.value() == SyncMode::Sync {
-                        let n_divs = crate::params::SYNC_DIVS.len() as f32 - 1.0;
-                        let start_idx = (v0 * n_divs).round();
-                        ((start_idx + (acc / (14.0 * s)).round()) / n_divs).clamp(0.0, 1.0)
-                    } else {
-                        (v0 + acc * 0.003).clamp(0.0, 1.0)
-                    };
-                    setter.set_parameter(&params.feedback_time, new_norm);
-                    if fb_resp.drag_stopped() {
-                        setter.end_set_parameter(&params.feedback_time);
-                        st.fb_drag = None;
-                    }
-                }
-            }
-        });
-    });
+/// TAPS footer column: the tap-count readout with drag-on-number + scroll.
+fn taps_group(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter,
+              taps_drag: &mut Option<(i32, f32)>, s: f32) {
+    let taps_resp = epo::readout_chip(ui, "TAPS", &format!("{}", params.num_taps_active.value()))
+        .interact(Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::ResizeVertical);
+    let n = params.num_taps_active.value();
+    if taps_resp.drag_started() {
+        setter.begin_set_parameter(&params.num_taps_active);
+        *taps_drag = Some((n, 0.0));
+    }
+    if let Some((n0, acc0)) = *taps_drag {
+        let acc = acc0 - taps_resp.drag_delta().y;
+        *taps_drag = Some((n0, acc));
+        let target = (n0 + (acc / (18.0 * s)).round() as i32).clamp(1, NUM_TAPS as i32);
+        if target != n { setter.set_parameter(&params.num_taps_active, target); }
+        if taps_resp.drag_stopped() {
+            setter.end_set_parameter(&params.num_taps_active);
+            *taps_drag = None;
+        }
+    }
+    if taps_resp.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 4.0 {
+            setter.begin_set_parameter(&params.num_taps_active);
+            setter.set_parameter(&params.num_taps_active, (n + scroll.signum() as i32).clamp(1, NUM_TAPS as i32));
+            setter.end_set_parameter(&params.num_taps_active);
+        }
+    }
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
-fn set_enum<T: PartialEq + Copy>(setter: &ParamSetter, param: &EnumParam<T>, v: T)
+pub(crate) fn set_enum<T: PartialEq + Copy>(setter: &ParamSetter, param: &EnumParam<T>, v: T)
 where
     T: nice_plug::params::enums::Enum,
 {
