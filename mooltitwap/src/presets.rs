@@ -5,7 +5,8 @@
 //!
 //! Key rule: discrete params (`step_count().is_some()`) are stored by PLAIN
 //! value, floats by NORMALIZED value — a normalized enum index silently remaps
-//! when a variant is appended. `values_format` tags the format.
+//! when a variant is appended. `values_format` tags the format. The floats in
+//! `PLAIN_FLOATS` are stored by plain value too, because their range grew.
 
 use crate::params::PetalParams;
 use nice_plug::prelude::*;
@@ -15,13 +16,24 @@ use std::path::PathBuf;
 
 pub const VALUES_FORMAT_PLAIN: u32 = 1;
 
+/// Floats whose range grew past 0..1 after presets were already saved
+/// (`feedback_time`, v2.30): stored by PLAIN value. Before the change their
+/// normalized value equalled the plain one, so every preset, old or new, reads
+/// back exactly.
+const PLAIN_FLOATS: &[&str] = &["feedback_time"];
+
+/// Whether `id` is stored by plain value (discrete, or in PLAIN_FLOATS).
+unsafe fn stored_plain(id: &str, ptr: ParamPtr) -> bool {
+    unsafe { ptr.step_count() }.is_some() || PLAIN_FLOATS.contains(&id)
+}
+
 /// Snapshot every param: discrete by plain value, floats normalized.
 pub fn capture(params: &PetalParams) -> BTreeMap<String, f32> {
     let mut map = BTreeMap::new();
     for (id, ptr, _group) in params.param_map() {
         // SAFETY: ptr comes from this same params and outlives the call.
         let v = unsafe {
-            if ptr.step_count().is_some() {
+            if stored_plain(&id, ptr) {
                 ptr.unmodulated_plain_value()
             } else {
                 ptr.unmodulated_normalized_value()
@@ -32,8 +44,10 @@ pub fn capture(params: &PetalParams) -> BTreeMap<String, f32> {
     map
 }
 
-unsafe fn to_normalized(ptr: ParamPtr, stored: f32, fmt: u32) -> f32 {
-    if fmt >= VALUES_FORMAT_PLAIN && unsafe { ptr.step_count() }.is_some() {
+unsafe fn to_normalized(id: &str, ptr: ParamPtr, stored: f32, fmt: u32) -> f32 {
+    // Format 0 stored discrete params normalized; PLAIN_FLOATS are plain in every format.
+    let discrete = unsafe { ptr.step_count() }.is_some();
+    if (fmt >= VALUES_FORMAT_PLAIN && discrete) || PLAIN_FLOATS.contains(&id) {
         unsafe { ptr.preview_normalized(stored) }
     } else {
         stored
@@ -41,37 +55,40 @@ unsafe fn to_normalized(ptr: ParamPtr, stored: f32, fmt: u32) -> f32 {
 }
 
 /// Restore params by driving each like a knob gesture so the host records
-/// automation/undo. Unknown ids skipped; missing ids keep their current value.
+/// automation/undo. A preset defines the whole sound: a param it doesn't
+/// mention (added after it was saved, like Tape or Saturate) loads at its
+/// default instead of keeping whatever was set. Unknown ids are skipped.
 pub fn apply(params: &PetalParams, setter: &ParamSetter, snap: &BTreeMap<String, f32>, fmt: u32) {
     for (id, ptr, _group) in params.param_map() {
-        if let Some(&stored) = snap.get(&id) {
-            // SAFETY: ptr belongs to params; begin/set/end like a knob drag.
-            unsafe {
-                let v = to_normalized(ptr, stored, fmt);
-                setter.raw_context.raw_begin_set_parameter(ptr);
-                setter.raw_context.raw_set_parameter_normalized(ptr, v);
-                setter.raw_context.raw_end_set_parameter(ptr);
-            }
+        // SAFETY: ptr belongs to params; begin/set/end like a knob drag.
+        unsafe {
+            let v = match snap.get(&id) {
+                Some(&stored) => to_normalized(&id, ptr, stored, fmt),
+                None => ptr.default_normalized_value(),
+            };
+            setter.raw_context.raw_begin_set_parameter(ptr);
+            setter.raw_context.raw_set_parameter_normalized(ptr, v);
+            setter.raw_context.raw_end_set_parameter(ptr);
         }
     }
 }
 
 /// True if the live params still match `snap` (within float tolerance) — drives
 /// the preset-pill "dirty" asterisk. Compares in the stored domain (plain for
-/// discrete, normalized for floats), same as `capture`.
+/// discrete, normalized for floats), same as `capture`; a param the snapshot
+/// doesn't mention is compared with its default, as `apply` loads it.
 pub fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>) -> bool {
-    let cur = capture(params);
-    for (id, live) in &cur {
-        match snap.get(id) {
-            Some(stored) => {
-                if (live - stored).abs() > 1e-4 {
-                    return false;
-                }
+    params.param_map().into_iter().all(|(id, ptr, _group)| {
+        // SAFETY: ptr comes from these params and outlives the call.
+        let (live, default) = unsafe {
+            if stored_plain(&id, ptr) {
+                (ptr.unmodulated_plain_value(), ptr.preview_plain(ptr.default_normalized_value()))
+            } else {
+                (ptr.unmodulated_normalized_value(), ptr.default_normalized_value())
             }
-            None => return false,
-        }
-    }
-    true
+        };
+        (live - snap.get(&id).copied().unwrap_or(default)).abs() <= 1e-4
+    })
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -248,5 +265,40 @@ impl Library {
     /// Index of `name` in the sorted list, if present (for palette selection).
     pub fn index_of(&self, name: &str) -> Option<usize> {
         self.presets.iter().position(|p| p.name == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_cycles_read_back_after_the_range_grew() {
+        let params = PetalParams::default();
+        let (id, ptr, _) = params.param_map().into_iter().find(|(id, _, _)| id == "feedback_time").unwrap();
+        // Captured by plain value, whatever the range.
+        assert_eq!(capture(&params)[&id], params.feedback_time.value());
+        // A preset saved before v2.30 holds 0.4706 (1/4 on a 0..1 range): it
+        // must come back as that plain value, in either values format.
+        let old = 8.0 / 17.0;
+        for fmt in [0, VALUES_FORMAT_PLAIN] {
+            // SAFETY: ptr belongs to `params`, alive for the whole test.
+            let plain = unsafe { ptr.preview_plain(to_normalized(&id, ptr, old, fmt)) };
+            assert!((plain - old).abs() < 1e-5, "format {fmt}: {plain}");
+        }
+    }
+
+    #[test]
+    fn a_preset_missing_a_param_matches_it_at_its_default() {
+        let params = PetalParams::default();
+        let mut snap = capture(&params);
+        assert!(matches(&params, &snap));
+        // An older preset that predates these params: their defaults stand in.
+        snap.remove("feedback_time");
+        snap.remove("dry_wet");
+        assert!(matches(&params, &snap));
+        // A real difference still reads as edited.
+        *snap.get_mut("feedback").unwrap() += 0.1;
+        assert!(!matches(&params, &snap));
     }
 }

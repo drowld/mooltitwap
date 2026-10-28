@@ -31,7 +31,7 @@ pub const SCOPE_PAGE: bool = true;
 
 /// Native design width; the zoom factor is window_width / BASE_W (kit contract).
 pub const WINDOW_W: u32 = if SCOPE_PAGE { 1366 } else if V3_PREVIEW { 1194 } else { 1080 };
-pub const WINDOW_H: u32 = if SCOPE_PAGE { 720 } else if V3_PREVIEW { 834 } else { 660 };
+pub const WINDOW_H: u32 = if SCOPE_PAGE { 660 } else if V3_PREVIEW { 834 } else { 660 };
 const BASE_W: f32 = WINDOW_W as f32;
 /// Shared card body height (logical px, pre-scale) so the three cards align and
 /// fill down to the bottom page margin. The right card carries the
@@ -951,11 +951,14 @@ fn pick_nice_range(needed_secs: f32, sync_mode: SyncMode, tempo_bpm: f32) -> f32
             nice.iter().copied().find(|&r| needed_beats <= r * 1.05).unwrap_or(256.0) * beat_secs
         }
         SyncMode::Free => {
+            // Down to 20 ms, so a short pattern spreads across the view instead
+            // of sitting in its first fifth (the floor was 250 ms).
             let nice_ms: &[f32] = &[
+                20.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0, 125.0, 150.0, 200.0,
                 250.0, 375.0, 500.0, 750.0, 1000.0, 1500.0, 2000.0, 3000.0, 4000.0,
                 6000.0, 8000.0, 12000.0, 16000.0, 24000.0, 32000.0, 48000.0, 64000.0,
             ];
-            let needed_ms = (needed_secs * 1000.0).max(250.0);
+            let needed_ms = (needed_secs * 1000.0).max(20.0);
             nice_ms.iter().copied().find(|&r| needed_ms <= r * 1.05).unwrap_or(64000.0) * 0.001
         }
     }

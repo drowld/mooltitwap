@@ -17,7 +17,7 @@ use crate::presets::{self, Library};
 
 const BUILD: &str = env!("CARGO_PKG_VERSION");
 
-fn ensure(st: &mut EditorState) {
+pub(crate) fn ensure(st: &mut EditorState) {
     if st.library.is_none() {
         st.library = Some(Library::load());
     }
@@ -53,7 +53,7 @@ pub fn preset_step(st: &mut EditorState, params: &Arc<PetalParams>, setter: &Par
     preset_load(st, params, setter, &name);
 }
 
-fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) -> bool {
+pub(crate) fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
@@ -71,7 +71,7 @@ fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) -> b
 
 /// INIT — reset every param to default, driven like knob gestures so the host
 /// records it, and drop the loaded-preset link for a clean dirty baseline.
-fn preset_init(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter) {
+pub(crate) fn preset_init(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter) {
     for (_id, ptr, _g) in params.param_map() {
         // SAFETY: ptr belongs to params; begin/set/end like a knob drag.
         unsafe {

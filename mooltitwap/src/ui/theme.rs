@@ -152,22 +152,52 @@ pub const DARK_OLED: Palette = Palette {
     ],
 };
 
-/// Inertia light palette.
+/// Afterecho's dark page (2026-10-28, "Mono"): neutral greys with no hue bias,
+/// surfaces stepping clearly from page to card to well; ink does the work and
+/// colour is kept for the sound (the taps and their repeats).
+pub const MONO: Palette = Palette {
+    paper: rgb(0x12, 0x12, 0x12),
+    frame: rgb(0x16, 0x16, 0x16),
+    panel: rgb(0x1C, 0x1C, 0x1C),
+    panel2: rgb(0x2A, 0x2A, 0x2A),
+    inset: rgb(0x0B, 0x0B, 0x0B),
+    ink: rgb(0xEE, 0xEE, 0xEC),
+    ink2: rgb(0xB5, 0xB5, 0xB2),
+    soft: rgb(0x85, 0x85, 0x83),
+    faint: rgb(0x52, 0x52, 0x50),
+    wave: rgb(0x4A, 0x4A, 0x4A),
+    metalhi: rgb(0x2A, 0x2A, 0x2A),
+    m: rgb(0x58, 0xC5, 0xC2),
+    line_base: rgb(0xEE, 0xEE, 0xEC),
+    line_a: 26,
+    line2_a: 54,
+    accents: [
+        rgb(0x58, 0xC5, 0xC2), // 0 teal
+        rgb(0xE8, 0x87, 0x62), // 1 coral
+        rgb(0xA0, 0x86, 0xE8), // 2 violet
+        rgb(0xE4, 0xB2, 0x5C), // 3 amber
+        rgb(0x78, 0xC8, 0x86), // 4 green
+        rgb(0xE0, 0x80, 0xC4), // 5 magenta
+    ],
+};
+
+/// Afterecho's light page (2026-10-28, "Paper"): warm paper surfaces that step
+/// clearly from page to card, near-black ink. Replaces the Inertia light values.
 pub const LIGHT: Palette = Palette {
-    paper: rgb(0xE9, 0xE6, 0xDD),
-    frame: rgb(0xF1, 0xEE, 0xE7),
-    panel: rgb(0xF8, 0xF6, 0xF0),
-    panel2: rgb(0xFC, 0xFB, 0xF7),
-    inset: rgb(0xFC, 0xFB, 0xF7),
-    ink: rgb(0x20, 0x1E, 0x1A),
-    ink2: rgb(0x46, 0x43, 0x40),
-    soft: rgb(0x9B, 0x97, 0x8C),
-    faint: rgb(0xBC, 0xB8, 0xAD),
+    paper: rgb(0xE7, 0xE4, 0xDD),
+    frame: rgb(0xEE, 0xEB, 0xE5),
+    panel: rgb(0xF6, 0xF4, 0xEF),
+    panel2: rgb(0xFF, 0xFF, 0xFF),
+    inset: rgb(0xDE, 0xDA, 0xD1),
+    ink: rgb(0x1E, 0x1D, 0x1B),
+    ink2: rgb(0x4B, 0x48, 0x44),
+    soft: rgb(0x8B, 0x86, 0x7D),
+    faint: rgb(0xB9, 0xB4, 0xAA),
     wave: rgb(0xC9, 0xC3, 0xB6),
     metalhi: rgb(0xFC, 0xFB, 0xF8),
     m: rgb(0x28, 0x7C, 0x7C), // accent teal  (= accents[0]) — darkened for light-bg legibility
-    line_base: rgb(0x21, 0x1F, 0x1B),
-    line_a: 20,
+    line_base: rgb(0x1E, 0x1D, 0x1B),
+    line_a: 26,
     line2_a: 56,
     // light accents darkened from Inertia's vivid values to clear ~4.5:1 on the
     // near-white panels (used as 7.5-10px text: tile numbers, matrix/tab labels).
@@ -182,8 +212,8 @@ pub const LIGHT: Palette = Palette {
 };
 
 static ACTIVE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=dark 1=light
-/// Which dark palette variant to use (0 cool · 1 warm · 2 ink · 3 OLED) — only consulted
-/// when ACTIVE==0. Process-global; survives engine rebuilds.
+/// Which dark palette variant to use (0 cool · 1 warm · 2 ink · 3 OLED · 4 mono) —
+/// only consulted when ACTIVE==0. Process-global; survives engine rebuilds.
 static DARK_VARIANT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 #[inline]
 fn active() -> Palette {
@@ -192,6 +222,7 @@ fn active() -> Palette {
             1 => DARK_WARM,
             2 => DARK_INK,
             3 => DARK_OLED,
+            4 => MONO,
             _ => DARK,
         }
     } else {
@@ -205,9 +236,11 @@ pub fn set_theme(dark: bool) {
 pub fn is_dark() -> bool {
     ACTIVE.load(std::sync::atomic::Ordering::Relaxed) == 0
 }
-/// Select the dark palette variant (0 cool · 1 warm · 2 ink · 3 OLED; clamped).
+/// The last dark palette variant (mono).
+pub const DARK_VARIANTS: u8 = 5;
+/// Select the dark palette variant (0 cool · 1 warm · 2 ink · 3 OLED · 4 mono; clamped).
 pub fn set_dark_variant(i: u8) {
-    DARK_VARIANT.store(i.min(3), std::sync::atomic::Ordering::Relaxed);
+    DARK_VARIANT.store(i.min(DARK_VARIANTS - 1), std::sync::atomic::Ordering::Relaxed);
 }
 pub fn dark_variant() -> u8 {
     DARK_VARIANT.load(std::sync::atomic::Ordering::Relaxed)
@@ -215,7 +248,7 @@ pub fn dark_variant() -> u8 {
 
 /// User-selectable default accent (the old fixed green is index 0, still available).
 /// (dark, light) pairs — the light variant is darkened for legibility on the light bg.
-const ACCENT_HUES: [(Color32, Color32); 8] = [
+const ACCENT_HUES: [(Color32, Color32); 9] = [
     (rgb(0x78, 0xC8, 0x86), rgb(0x3A, 0x7E, 0x4E)), // 0 GREEN (original)
     (rgb(0x3F, 0xC1, 0xC9), rgb(0x1E, 0x82, 0x8A)), // 1 CYAN
     (rgb(0x3D, 0xBE, 0x9E), rgb(0x22, 0x84, 0x6C)), // 2 MINT
@@ -224,21 +257,24 @@ const ACCENT_HUES: [(Color32, Color32); 8] = [
     (rgb(0xA0, 0x86, 0xE8), rgb(0x60, 0x49, 0xBE)), // 5 VIOLET
     (rgb(0x7E, 0x9C, 0xC9), rgb(0x3E, 0x5C, 0x8C)), // 6 SLATE (app-signature family)
     (rgb(0xD6, 0xD2, 0xC9), rgb(0x3A, 0x38, 0x34)), // 7 MONO — colorless (see `accent`)
+    (rgb(0xFF, 0x5A, 0x36), rgb(0x2F, 0x5B, 0xEA)), // 8 AFTERECHO — signal red-orange on dark, cobalt on light
 ];
-pub const ACCENT_NAMES: [&str; 8] = ["GREEN", "CYAN", "MINT", "BLUE", "AMBER", "VIOLET", "SLATE", "MONO"];
+pub const ACCENT_NAMES: [&str; 9] = ["GREEN", "CYAN", "MINT", "BLUE", "AMBER", "VIOLET", "SLATE", "MONO", "AFTERECHO"];
 /// Index of the colorless accent: every hue, the L/R pair included, turns grey.
 pub const ACCENT_MONO: u8 = 7;
+/// How many accents there are to pick from.
+pub const ACCENTS: u8 = 9;
 static ACCENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// Select the default accent (process-global; survives engine rebuilds).
 pub fn set_accent(i: u8) {
-    ACCENT.store(i.min(ACCENT_MONO), std::sync::atomic::Ordering::Relaxed);
+    ACCENT.store(i.min(ACCENTS - 1), std::sync::atomic::Ordering::Relaxed);
 }
 pub fn accent_choice() -> u8 {
     ACCENT.load(std::sync::atomic::Ordering::Relaxed)
 }
 /// The chosen default accent, theme-aware — what `G()` resolves to.
 pub fn accent_default() -> Color32 {
-    let (d, l) = ACCENT_HUES[accent_choice().min(ACCENT_MONO) as usize];
+    let (d, l) = ACCENT_HUES[accent_choice().min(ACCENTS - 1) as usize];
     if is_dark() { d } else { l }
 }
 /// Theme-aware swatch color for accent choice `i` — for the menu picker.

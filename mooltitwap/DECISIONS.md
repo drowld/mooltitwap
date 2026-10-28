@@ -2,6 +2,260 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-28 · Time & taps holds still when L/R splits (v2.33.2)
+
+Splitting L/R used to re-space the Time group from two rows to three, and the
+Pattern group (lined up with Time's first row) jumped up with it. The owner:
+the Pattern side "should already be well placed". Time is now always laid out
+in three rows; Time R and Sync R fill the third when L/R is split and leave it
+empty when linked. Nothing on the card moves. Rejected: spreading two rows
+while linked (it looked airier, but every split moved the whole card).
+
+## 2026-10-28 · Room around dividers · Bars: tap selects, double-tap mutes · the preset browser in the new look (v2.33.1)
+
+From the owner's first look at v2.33.0 ("some of the things need to breathe a
+tiny bit more"):
+- **Selectors sit 4 px inside their cells**, so neighbouring underlines and the
+  dividers between groups (Colour's Type | Route, Time | Pattern) get air.
+- **The lane's Cross and Loop controls start 14 px past their divider** (they
+  sat 6 px from it). The field's toolbar has 16 px around each divider; its
+  selectors are a little narrower so the tall page still fits.
+- **Bars view: one tap on a tap's number selects it (and opens its Tap tab), a
+  second tap within 0.4 s mutes or unmutes it.** A single tap used to mute, which
+  made selecting from the numbers impossible. The double tap is timed by the page
+  so it works on touch, where egui reports no double click.
+- **The preset browser follows the page:** All / Favorites / Recent is the
+  page's underlined selector, the selected row is an ink wash, icons and the
+  favourite star are ink, and radii match the page (10 panel, 6 controls).
+
+## 2026-10-28 · A new look: Mono and Paper, soft corners, underlined choices, ink controls, grouped cards · 36 px knobs · a spacing pass (v2.33.0)
+
+**The owner picked the look in a lab** (an interactive mock of the page with
+switchable palette, corners, choice style, highlight and grouping): Soft corners,
+Mono for dark and Paper for light, Underline choices, Ink, Sub-headers.
+- **Mono (dark) and Paper (light)** replace the cool charcoal and the Inertia
+  light values in Afterecho's copy of the theme (`ui/theme.rs`). Their surfaces
+  step clearly from page to card to well; the old three were nearly one value.
+  The other dark variants stay in Settings → Theme.
+- **The accent is the owner's to pick** (Settings → Accent). The default is a
+  new signature pair: signal red-orange on Mono, cobalt on Paper.
+- **Ink, not colour, for the controls.** Knob arcs, picks, toggles and the
+  focus slider are ink. The accent is kept for the sound: the taps and their
+  repeats, and the Shape pad's tap ticks. Before, green was on everything, so
+  nothing stood out.
+- **Underlined choices.** Every option is laid out as text on a hairline and
+  the pick is ink, underlined. The old filled pick in a dark well read as one
+  box that cycles; the owner asked whether Curve should be laid out, and it was.
+  Buttons are outlined, and filled with ink when on.
+- **Soft corners:** cards 16 → 10, controls 9 → 6.
+- **Grouped cards.** Time & taps is now Time (Time, Sync, L/R, Mode, and Time R
+  and Sync R when split) and Pattern (Taps, Spacing as a vertical list, the
+  Shape pad), each under its own heading, with a hairline between. The lane's
+  Cross and Loop get headings and a hairline; Colour, a hairline before Route;
+  the field's toolbar, hairlines between its groups. L/R reads Linked / Split
+  (it said Free, like Sync).
+- **A saved look from before takes the new palette and accent once** (a look
+  version in `appearance.json`); its font and light/dark choice stay.
+
+**36 px knobs** (Tide's are 28): between Tide's size and the τόπος sheet's 48,
+after a 44 px try felt heavy. Rows of cells grow from 58 to 72 px tall. On touch
+a knob answers within 44 px of its centre whatever its drawn size. Tide's knobs
+measure about 23 px on screen (its window opens at 1120 wide), but its cards are
+dense; ours had 38–46 px of empty height around single rows.
+
+**The spacing pass:**
+- The wide page is 1366 × 660 (was 720) and its cards are sized to their rows.
+  The tall page stays 1050 × 780: the owner's iPad is the 10.5" (4:3), where the
+  width sets the zoom, so a shorter page would only add blank bands.
+- The taps field fits the pattern: Free mode's time axis goes down to 20 ms
+  (it never showed less than 250 ms, so the default 53 ms pattern sat in its
+  first fifth), with finer grid steps. While a dot is dragged the view holds
+  still.
+- Output's knobs sit on columns 0, 2 and 4 of the right column's grid.
+- The Echo lane's feedback readout moved to its header and the cycle's to the
+  time axis, so neither covers the repeats.
+- On the tall page the lane's controls share one row (the field grew from 336
+  to 416 px) and the Tap tab takes the whole lane.
+
+**Not settled:** spacing still isn't right everywhere (the owner's words). On
+the tall page the Time group's rows sit far apart. Plates instead of headings
+were on the table and are not built.
+
+**Rejected:** a cycling Curve button (it hides two of three options and costs
+taps); colour by area ("Two hues"), held back for now; accent-filled picks
+(loud, one-colour page); 44 px knobs (heavy, and they pushed the tall Tap tab out
+of its strip).
+
+## 2026-10-28 · Ping bounces a mono source: its own loop, X-feed as width, each tap places the repeats (v2.32.0)
+
+**Ping now bounces, like a classic ping-pong.** The owner asked for it and said
+Afterecho may differ from Petal. Petal has no ping-pong at all: its two
+feedback combs never cross channels.
+- The loop runs in two mono lines beside the main ones (`bounce.rs`): odd
+  repeats bound left, even repeats bound right. The main lines' mono sum (the
+  mid in M/S) starts each bounce; each repeat comes back as the next one on the
+  other side. In Ping the main lines hold the dry input only.
+- **Each tap places the repeats itself,** at its own pan squeezed toward the
+  repeat's side: position = ±width + (1 − width)·pan, constant power. A spread
+  pattern swings as a whole; at 100 % every repeat is hard left, then hard
+  right, at full level.
+- **X-feed is the width in Ping.** The knob reads Width; the focus card reads
+  Bounce width. At 0 % a mono source sounds exactly like plain feedback
+  (tested). A stereo source's repeats are mono in Ping at any width; the taps'
+  own pass keeps its stereo.
+- The loop's colour (Diffuse, Tape and Saturate when routed to FB, then the soft
+  clip) runs in the bounce loop too, with its own Diffuse and Tape. No gain
+  compensation: above 100 % it self-oscillates, bounded by the soft clip
+  (tested).
+- **Mono greys Ping out** (and the Width knob): one channel can't bounce. In
+  M/S the repeats still bounce left and right. They go in as mid and side, and
+  each tap's mid/side balance applies on top.
+- **The Echo lane draws Ping as two sides:** what a mono source puts on the left
+  goes up from the axis, the right goes down.
+- Cost: two more 32 s lines (+16 MB at 48 kHz, +32 MB at 96 kHz), two to four
+  more reads per active tap, and a second Diffuse and Tape when routed to FB.
+
+**Changing the mode doesn't click.** Tested: a held tone through spread taps,
+switched Mix → Ping → Diffuse → Ping → Mix, is no sharper than the same tone
+held in each mode. That holds plain, with Diffuse in the loop, and with Tape in
+the loop. With the fades disabled the test fails at 277×.
+- The two loops share what goes round by the bounce's share, which moves over
+  20 ms (smoothstep). While it moves, both run and their inputs crossfade, so no
+  loop's input, and no Diffuse or Tape inside it, ever jumps. A loop left
+  without input runs on for 3 s while its Diffuse and Tape ring out, then
+  stops; it starts again from a cleared state.
+- Taking over: the main loop's next pass crosses to the odd line. The old tail
+  then bounces as one block, its edges 20 ms pan sweeps.
+- Handing back: the taps first glide their repeats to centre (30 ms, two
+  one-poles so the glide has no corner). Then the main loop takes the bounce's
+  last pass on and the repeats' stereo spread fades back in.
+- Mix's output blend and Diffuse's loop allpass now fade with the mode as well
+  (20 ms). Diffuse never runs while the loop is the bounce: Ping waits for it to
+  fade out, and it waits for the hand-back. It starts from a cleared state, its
+  input faded in, so no old tail leaks back.
+- Taps now pan before their filter so the bounced repeats join each side ahead
+  of it. **Mix, Diffuse, the loop colour and M/S render the same as v2.31**
+  (A/B against the committed DSP: largest difference 7.5e-8, 130 dB below
+  peak).
+
+**What changes for old sessions: Ping only.** A stereo source's repeats used to
+swap sides; now its mono sum bounces. A source panned to one side gives repeats
+6 dB quieter (half of a one-sided signal). At X-feed 0 % a stereo source's
+repeats are mono instead of stereo.
+
+**Rejected:**
+- Writing the bounce into the main lines (the first proposal). Taps pan by
+  turning one line down, so a tap panned right went silent on every left repeat:
+  an L, R, L, R pattern lost half its notes (simulated).
+- A separate Bounce mode beside Ping: two near-identical modes.
+- Keeping the stereo spread in the repeats and bouncing only the mid: a source
+  panned to one side then puts anti-phase on the far side.
+- Switching loops in one step with only output fades: the old tail flipped
+  sides with a click every cycle, and Diffuse or Tape in the loop clicked at
+  each handover (44× and 104× in the test).
+- Petal's two loop lengths: they give width, not a bounce. Kept as a later idea
+  (a swung bounce).
+
+**Left as is:** the v2 editor's ping-pong drawing (`gui.rs`, `pp_own_d`) still
+models the old blend. v2 isn't shown and retires in Phase 3.
+
+## 2026-10-28 · The preset browser on the new page · a preset defines the whole sound (v2.31.0)
+
+**The header's preset name opens Tide's preset browser.** Search,
+All · Favorites · Recent, rows with favourite, tags, rename and delete, save-as,
+init, and the iPad enlargement.
+- Ported as-is from Tide (`y-flanger/src/editor.rs`, `draw_command_palette`) into
+  `palette_scope.rs`. The only changes are the type names and `state.library`. It
+  draws over the page the way Tide's does, after the page and the menu.
+- The load / save / init glue stays in `palette_v3.rs`, shared with the v3 editor.
+  palette_v3's own drawing goes when the v3 editor retires.
+- Rejected: restyling palette_v3 in place. It's drawn on epoche-ui, which the new
+  page left. Tide's version is the design target and already runs on the same UI
+  layer as this page.
+
+**A preset defines the whole sound.** This is the plan's Phase 1 item, using
+Tide's rule.
+- A param a preset doesn't mention loads at its default.
+- The edited marker compares missing params with their default, so an older
+  preset doesn't read as edited the moment it loads.
+- The effect: presets saved before Tape, Saturate or the FB curve existed now
+  load those at their defaults, instead of keeping whatever was set.
+- Not changed: `tap_snap` is still saved in presets. It's an editing preference;
+  leaving it out (like Tide's XY routing) is a separate call.
+
+**Verified:** tests cover the matching. Desktop screenshots, taken with a preview
+flag, show the browser on both shapes. A real click on the header name is
+untested here; the code is Tide's, line for line.
+
+**R taps are drawn when Time L/R is unlinked.**
+- In the field they're diamonds, so they can't be confused with muted taps
+  (hollow circles). A faint line joins each to its dot, and a key reads "R taps".
+- In the Echo lane they're thin stems with diamond heads, at their own times.
+- They don't drag: L and R share each tap's `time_offset`.
+
+**Ping-pong is not drawn: the DSP gives it nothing to show for a mono source.**
+- `CrossfeedMode::PingPong` blends the feedback, fb_l' = fb_l·(1−cf) + fb_r·cf.
+  A mono or centred input fills both lines identically, so the blend changes
+  nothing. Only a stereo input's sides trade places, repeat by repeat.
+- Each channel's repeats always land at that channel's own tap times. The v3
+  ECHO view drew the swapped share at the other channel's times, which doesn't
+  match the DSP.
+- **Open question for the owner:** should Ping alternate a mono source too, like
+  a classic ping-pong? That's a DSP change (the loop has to start lopsided), not
+  a drawing task.
+  *Answered in v2.32.0: yes; see the entry above.*
+
+## 2026-10-28 · Lock time, cycles to 8 bars / 20 s, the Tap tab (v2.30.0)
+
+From the owner's first hand test of v2.29 (iPad and desktop).
+
+**Lock time** (field header, next to Snap). While it's on, a field drag moves only
+the Y value (pan, gain or cutoff) and double-click resets only that.
+- Why: "if I found a right tap position and want to just edit the cutoff, it's
+  pretty hard to drag." A diagonal finger always nudged the time too.
+- It's editor state, not a param: it changes how the field drags, not the sound.
+- Rejected: a direction lock that guesses from the first few pixels of the drag.
+  It's invisible, and it gets in the way of deliberate diagonal moves.
+
+**The cycle reaches 8 bars in Sync and 20 s in Free** (was 4/1 and 8 s; the owner
+hit the 8.7 s cap at their tempo).
+- `feedback_time`'s range grew from 0..1 to 0..`FEEDBACK_TIME_MAX` (1.137); the
+  mapping below 1.0 is unchanged. Sync appends 4/1. and 8/1 (`FB_LONG_DIVS`) on
+  SYNC_DIVS' index scale, so `fb_div` reads every saved cycle as before. Free
+  keeps 10 ms × 800^n and simply runs on to 20 s.
+- Sessions store plain values, so they're unaffected. Presets stored floats
+  normalized, so `feedback_time` is now stored by plain value (`PLAIN_FLOATS`).
+  An old preset's normalized value equals today's plain one, so old and new
+  presets read back exactly. Tests cover both.
+- The cost: host automation of Feedback Time is normalized, so an old lane
+  now lands 1.137× as far up the range (longer cycles). Rare, and accepted.
+- The buffer already held 30.4 s, so nothing changes in the DSP. 8/1 below
+  ~63 BPM runs past that and is clamped, as before.
+- SYNC_DIVS itself is untouched: base time uses it too.
+- Rejected: remapping 0..1 (every saved cycle would move), or a ×2 range switch
+  (one more control for the same thing).
+
+**The Tap tab** (Echo · Motion · Tap N in the lane). Clicking a dot in the field
+opens it with all of that tap's parameters: Time, Pan, Gain, on/muted, filter
+type, Cutoff, Reso (Q) and Slope. ‹ › steps through the taps.
+- Why: the owner liked v3's tap panel, and the new page had no way to reach the
+  per-tap filter type, Q or slope at all.
+- Deselecting leaves the tab. Picking the tab with nothing selected selects the
+  tap it last showed.
+- It replaces the lane's picture only. The loop's controls stay, behind a new
+  divider, so no card moves.
+- Rejected: a floating popup near the dot (v3 dropped that because it covered
+  dots near the bottom edge), and a strip under the field (the plot would
+  change height under the finger).
+
+**Also:**
+- **Touch selection fix:** on touch a drag starts at touch-down, which selected
+  the dot, and the tap that followed then deselected it. A tap now reads the
+  state from before the press.
+- **The cycle readout** names the division in Sync ("↔ Cycle 8/1 · 16.00 s"), and
+  both handle labels flip to the left of the handle near the lane's edge.
+- **Focus card:** names the Tap tab's controls ("Tap 3 · Reso").
+
 ## 2026-10-27 · Tap field, Bars and the Echo lane on the new page (v2.29.0)
 
 **Tap field.** X is time on v3's tight taps-only range; the Y picker chooses

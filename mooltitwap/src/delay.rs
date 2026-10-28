@@ -29,6 +29,12 @@ impl DelayLine {
         self.write_idx = 0;
     }
 
+    /// The largest magnitude the line holds.
+    #[cfg(test)]
+    pub fn buffer_peak(&self) -> f32 {
+        self.buffer.iter().fold(0.0, |m, v| m.max(v.abs()))
+    }
+
     #[inline]
     pub fn write(&mut self, x: f32) {
         let mask = self.capacity - 1;
@@ -255,34 +261,65 @@ impl TapReader {
         }
     }
 
-    #[inline]
-    pub fn read(&mut self, delay: &DelayLine) -> f32 {
+    /// The longest delay this reader may read before it settles (samples).
+    pub fn reach(&self) -> f32 {
         match self.mode {
-            DelayMode::Jump => {
-                delay.read(self.target_delay.max(1.0))
-            }
-            DelayMode::Repitch => {
-                let n = self.nominal.tick();
-                delay.read(n.max(1.0))
-            }
+            DelayMode::Repitch => self.nominal.current().max(self.nominal.target),
+            _ => self.current_delay.max(self.target_delay),
+        }
+    }
+
+    /// Advance one sample and say where to read. Taken once per sample; the
+    /// heads then read any line (Ping's bounce lines are read where the main
+    /// line is).
+    #[inline]
+    pub fn heads(&mut self) -> Heads {
+        match self.mode {
+            DelayMode::Jump => Heads::one(self.target_delay.max(1.0)),
+            DelayMode::Repitch => Heads::one(self.nominal.tick().max(1.0)),
             DelayMode::Fade => {
                 if self.fade_counter < FADE_SAMPLES {
                     // Equal-power cos/sin crossfade. As `t` goes 0 → 1, the
                     // old head fades cos→0 and the new head fades 0→sin.
                     let t = self.fade_counter as f32 / FADE_SAMPLES as f32;
                     let arg = t * core::f32::consts::FRAC_PI_2;
-                    let val_old = delay.read(self.current_delay.max(1.0));
-                    let val_new = delay.read(self.target_delay.max(1.0));
+                    let heads = Heads {
+                        a: self.current_delay.max(1.0),
+                        wa: arg.cos(),
+                        b: self.target_delay.max(1.0),
+                        wb: arg.sin(),
+                    };
                     self.fade_counter += 1;
                     if self.fade_counter >= FADE_SAMPLES {
                         self.current_delay = self.target_delay;
                     }
-                    val_old * arg.cos() + val_new * arg.sin()
+                    heads
                 } else {
-                    delay.read(self.target_delay.max(1.0))
+                    Heads::one(self.target_delay.max(1.0))
                 }
             }
         }
+    }
+}
+
+/// Where a tap reads this sample: one head, or two while Fade crossfades.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Heads {
+    a: f32,
+    wa: f32,
+    b: f32,
+    wb: f32,
+}
+
+impl Heads {
+    fn one(delay: f32) -> Self {
+        Self { a: delay, wa: 1.0, b: delay, wb: 0.0 }
+    }
+
+    #[inline]
+    pub fn read(&self, line: &DelayLine) -> f32 {
+        let y = line.read(self.a) * self.wa;
+        if self.wb == 0.0 { y } else { y + line.read(self.b) * self.wb }
     }
 }
 

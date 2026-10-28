@@ -105,7 +105,7 @@ These don't change the sound; once smoothing has settled, the output should be b
   - clamp every filter cutoff below Nyquist.
 
   Today only the tape model checks.
-- [ ] **A preset defines the whole sound:** in `presets::apply`, parameters a preset doesn't mention load at their default.
+- [x] **A preset defines the whole sound:** in `presets::apply`, parameters a preset doesn't mention load at their default. *(v2.31.0)*
 - [ ] **Click-free switches:** check channel mode, delay mode, per-tap filter type and slope, tape type, and the IN/FB/OUT routing of DIFFUSE, Tape and SATURATE. Where a switch clicks, use Tide's sequence: fade out, swap, hold until the buffer refills, fade in.
 - [ ] **Smoothing:** most continuous parameters already have smoothers. Check the rest (dry/wet, in/out, XFEED, the Tape and Saturate amounts, per-tap cutoff and Q), and use log smoothing for frequencies.
 - [ ] **Buffer bounds test:** every tap and feedback read fits the buffer at maximum base time × 16 taps + offsets, at 192 kHz.
@@ -163,10 +163,11 @@ Canvas: https://claude.ai/artifact/6osu4gEG6f8RzfBqfsCr7Z.
   - Output;
   - the lane's Cross and Loop rows.
 - **v2.29.0:** the tap field (Field and Bars, the Y picker, dragging and drawing) and the Echo lane (bands, repeats, the decay line, feedback and cycle handles) are built. The cycle is Auto · Manual (see DECISIONS.md).
-- Next:
-  - restyling the preset browser (the name in the header doesn't open it yet);
-  - the R channel and ping-pong in the drawings;
-  - then the new functions (Phase 4).
+- **v2.30.0, from the first hand test (2026-10-28):** Lock time next to Snap; cycles up to 8/1 in Sync and 20 s in Free; the Tap tab (every per-tap parameter, filter type, Reso and Slope included), a proposed answer to **D5** (v3's way: no per-tap lists, a panel for the clicked tap), to confirm once the owner has tried it. Also fixes a touch bug where tapping a dot didn't keep it selected.
+- **v2.31.0:** the header's preset name opens Tide's preset browser, ported as `palette_scope.rs`; a preset now defines the whole sound; and the R taps are drawn (field and Echo lane) when Time L/R is unlinked. Ping-pong isn't drawn: for a mono source the DSP's Ping changes nothing (see DECISIONS.md), so whether Ping should alternate a mono source is now a sound question for the owner.
+- **v2.32.0:** Ping bounces a mono source. It runs as its own loop of odd and even repeats; X-feed is the width, and each tap places the repeats so a spread pattern swings as a whole. Mode changes crossfade the two loops, with no click. The Echo lane draws Ping as two sides, left up and right down. Ping is greyed out in Mono. See DECISIONS.md.
+- **v2.33.0:** a new look the owner picked in a look lab: Mono and Paper, soft corners, underlined choices, ink controls with colour kept for the sound, Time | Pattern grouping; 36 px knobs; a spacing pass (the field fits the pattern, cards sized to their rows). See DECISIONS.md.
+- Next: a second spacing pass (the owner: "some spacing still isn't perfect"), then the new functions (Phase 4).
 
 - [ ] **A new page module** in the style of Tide's `editor_scope.rs`:
   - absolute layout in logical px through `r(o, s, x, y, w, h)`;
@@ -175,7 +176,7 @@ Canvas: https://claude.ai/artifact/6osu4gEG6f8RzfBqfsCr7Z.
   - `Shape::pick`, with fit and no-overlap tests.
 - [ ] **iOS host resize:** `EguiState::from_size(..).with_host_resize()`.
 - [ ] **The touch layer (D1) on every control,** above all the drag surfaces that still follow one pointer: tap dots, XY pads and tracks. On touch, the whole cell is the hit area.
-- [ ] **Preset browser:** restyle `palette_v3.rs` to Tide's design (segmented All / Favorites / Recent, tinted selection).
+- [x] **Preset browser:** restyle `palette_v3.rs` to Tide's design (segmented All / Favorites / Recent, tinted selection). *(v2.31.0: Tide's browser ported as `palette_scope.rs`; palette_v3 keeps only the glue once v3 retires.)*
 - [ ] **Retire the old editors:** remove v2 (`gui.rs`) and v3 (`gui_v3.rs`) and the `V3_PREVIEW` switch once the new page matches them. There's no "old UI" option, as with Tide.
 
 ### Phase 4 · New functions · size depends on D3
@@ -256,5 +257,5 @@ Sizes are rough: S is a day or two, M about a week, L more than that.
 | **D2** | **Identity.** Change the IDs to Soft Systems now? This breaks Ableton sessions that use the dev builds. | **Yes, now.** Nothing has shipped, and the IDs are permanent once on the App Store. Keep the crate name. |
 | **D3** | **New functions.** Which ones? | **Decided 2026-10-27:** see Phase 4. 32 taps waits for an update after release; Swing and the larger items are still open. |
 | **D4** | **Audio scope.** Only the clean-up (Phase 1), or sound changes too (SATURATE, FB curve, modulation)? | Do the clean-up first. Make sound changes one at a time against the baseline renders. |
-| **D5** | **Per-tap lists.** Keep them as a page, or rely on the field plus last-touched? | Decide in the mock. Rows are the easier touch target for 16 taps. |
+| **D5** | **Per-tap lists.** Keep them as a page, or rely on the field plus last-touched? | Decide in the mock. Rows are the easier touch target for 16 taps. **Proposed in v2.30.0:** the lane's Tap tab (all of one tap's parameters, ‹ › to step), with no lists. Waiting on the owner's hand test. |
 | **D6** | **Branches.** Merge `nice-plug-port` into `main` before starting, or start the redesign on a new branch from it? | Commit, merge into `main`, then work on `ui/scope-first`, as Tide does. |

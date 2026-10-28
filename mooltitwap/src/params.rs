@@ -39,6 +39,30 @@ pub fn snap_to_div(norm: f32) -> (f32, &'static str) {
     SYNC_DIVS[i]
 }
 
+/// Feedback-cycle divisions past the end of SYNC_DIVS (v2.30). They continue
+/// its index scale (value × 17), so they sit above 1.0 and a saved cycle keeps
+/// its division.
+pub const FB_LONG_DIVS: &[(f32, &str)] = &[
+    (24.0,     "4/1."),    // dotted 4/1 = 6 bars
+    (32.0,     "8/1"),     // 8 bars
+];
+
+/// Top of `feedback_time`: 20 s in Free (10 ms × 800^n), 8/1 in Sync. It was
+/// 1.0 (8 s, 4/1) before v2.30; the range grew past 1 instead of remapping,
+/// so saved sessions (plain values) read back unchanged.
+pub const FEEDBACK_TIME_MAX: f32 = 1.137_074; // ln(2000) / ln(800)
+
+/// The feedback cycle's division for a `feedback_time` value: SYNC_DIVS, then FB_LONG_DIVS.
+pub fn fb_div(norm: f32) -> (f32, &'static str) {
+    let last = SYNC_DIVS.len() - 1;
+    let i = (norm.max(0.0) * last as f32).round() as usize;
+    if i <= last {
+        SYNC_DIVS[i]
+    } else {
+        FB_LONG_DIVS[(i - last - 1).min(FB_LONG_DIVS.len() - 1)]
+    }
+}
+
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum SpacingMode {
     #[id = "linear"]
@@ -237,8 +261,8 @@ pub struct PetalParams {
     // ---- Feedback ----
     #[id = "feedback"]
     pub feedback: FloatParam,
-    /// Normalised 0..1 feedback time. In Free mode maps to 10..8000 ms
-    /// (exponential). In Sync mode snaps to the nearest SYNC_DIVS entry.
+    /// Feedback time, 0..FEEDBACK_TIME_MAX. In Free mode maps to 10 ms..20 s
+    /// (exponential). In Sync mode snaps to the nearest division (`fb_div`).
     /// Independent of the tap layout — you can space the echo cluster
     /// anywhere regardless of where the taps sit.
     #[id = "feedback_time"]
@@ -488,7 +512,7 @@ impl Default for PetalParams {
             feedback_time: FloatParam::new(
                 "Feedback Time",
                 8.0 / (SYNC_DIVS.len() - 1) as f32,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
+                FloatRange::Linear { min: 0.0, max: FEEDBACK_TIME_MAX },
             )
             .with_smoother(SmoothingStyle::Linear(50.0)),
             feedback_time_mode: EnumParam::new("Feedback Time Mode", SyncMode::Sync),
@@ -683,12 +707,12 @@ impl PetalParams {
     pub fn feedback_time_seconds_mode(mode: SyncMode, normalized: f32, tempo_bpm: f32) -> f32 {
         match mode {
             SyncMode::Free => {
-                // Exponential 10 ms..8000 ms — same feel as the base-time knob.
-                let ms = 10.0_f32 * 800.0_f32.powf(normalized.clamp(0.0, 1.0));
+                // Exponential 10 ms..20 s — the base-time knob's curve, run on past 8 s.
+                let ms = 10.0_f32 * 800.0_f32.powf(normalized.clamp(0.0, FEEDBACK_TIME_MAX));
                 ms * 0.001
             }
             SyncMode::Sync => {
-                let (beats, _) = snap_to_div(normalized);
+                let (beats, _) = fb_div(normalized);
                 (60.0 / tempo_bpm) * beats
             }
         }
@@ -698,14 +722,16 @@ impl PetalParams {
     /// of `feedback_time_seconds_mode`, for dragging the Echo lane's cycle edge.
     pub fn feedback_time_norm_for_secs(mode: SyncMode, secs: f32, tempo_bpm: f32) -> f32 {
         match mode {
-            SyncMode::Free => ((secs * 100.0).max(1.0).ln() / 800.0_f32.ln()).clamp(0.0, 1.0),
+            SyncMode::Free => ((secs * 100.0).max(1.0).ln() / 800.0_f32.ln()).clamp(0.0, FEEDBACK_TIME_MAX),
             SyncMode::Sync => {
                 let beats = secs * tempo_bpm / 60.0;
-                let last = SYNC_DIVS.len() - 1;
-                let nearest = (0..=last)
-                    .min_by(|&a, &b| (SYNC_DIVS[a].0 - beats).abs().total_cmp(&(SYNC_DIVS[b].0 - beats).abs()))
-                    .unwrap_or(0);
-                nearest as f32 / last as f32
+                let nearest = SYNC_DIVS
+                    .iter()
+                    .chain(FB_LONG_DIVS)
+                    .enumerate()
+                    .min_by(|a, b| (a.1 .0 - beats).abs().total_cmp(&(b.1 .0 - beats).abs()))
+                    .map_or(0, |(i, _)| i);
+                nearest as f32 / (SYNC_DIVS.len() - 1) as f32
             }
         }
     }
@@ -720,7 +746,7 @@ impl PetalParams {
                 else { format!("{:.2}s", ms * 0.001) }
             }
             SyncMode::Sync => {
-                let (_, label) = snap_to_div(self.feedback_time.value());
+                let (_, label) = fb_div(self.feedback_time.value());
                 label.to_string()
             }
         }
@@ -734,16 +760,32 @@ mod tests {
     #[test]
     fn feedback_time_inverse_round_trips() {
         // Free: any time in range comes back within a hair.
-        for ms in [10.0f32, 37.0, 250.0, 1000.0, 3333.0, 8000.0] {
+        for ms in [10.0f32, 37.0, 250.0, 1000.0, 3333.0, 8000.0, 12500.0, 20000.0] {
             let n = PetalParams::feedback_time_norm_for_secs(SyncMode::Free, ms / 1000.0, 120.0);
             let back = PetalParams::feedback_time_seconds_mode(SyncMode::Free, n, 120.0) * 1000.0;
             assert!((back - ms).abs() < ms * 1e-3, "{ms} ms came back as {back}");
         }
-        // Sync: every division maps back onto itself.
-        for (i, &(beats, label)) in SYNC_DIVS.iter().enumerate() {
+        // Sync: every division, the long ones too, maps back onto itself.
+        for (i, &(beats, label)) in SYNC_DIVS.iter().chain(FB_LONG_DIVS).enumerate() {
             let secs = beats * 60.0 / 120.0;
             let n = PetalParams::feedback_time_norm_for_secs(SyncMode::Sync, secs, 120.0);
-            assert_eq!(snap_to_div(n).1, label, "division {i}");
+            assert!(n <= FEEDBACK_TIME_MAX, "division {i} lands past the range");
+            assert_eq!(fb_div(n).1, label, "division {i}");
         }
+    }
+
+    #[test]
+    fn longer_cycles_leave_saved_ones_alone() {
+        // A cycle saved before v2.30 (0..1) keeps its division and its time.
+        for i in 0..SYNC_DIVS.len() {
+            let n = i as f32 / (SYNC_DIVS.len() - 1) as f32;
+            assert_eq!(fb_div(n), snap_to_div(n), "division {i}");
+        }
+        let free = |n| PetalParams::feedback_time_seconds_mode(SyncMode::Free, n, 120.0);
+        assert!((free(1.0) - 8.0).abs() < 1e-3);
+        // The new top: 20 s free, 8 bars synced.
+        assert!((free(FEEDBACK_TIME_MAX) - 20.0).abs() < 0.01);
+        assert_eq!(fb_div(FEEDBACK_TIME_MAX).1, "8/1");
+        assert_eq!(PetalParams::default().feedback_time.value(), 8.0 / 17.0);
     }
 }
