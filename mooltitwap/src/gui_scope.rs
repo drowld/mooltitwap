@@ -16,8 +16,8 @@ use nice_plug_egui::EguiState;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::gui::EditorState;
-use crate::params::PetalParams;
+use crate::gui::{gain_db_to_pos, pos_to_gain_db, EditorState, VizData};
+use crate::params::{ChannelMode, FilterType, PetalParams, SyncMode, TapParams, NUM_TAPS};
 use crate::topology;
 use crate::ui::epo;
 use crate::ui::theme::{self, G, INK, INK2, INSET, PANEL, PAPER, SOFT};
@@ -220,6 +220,8 @@ pub struct ScopeState {
     hamb_rect: Option<Rect>,
     /// Param id of the control last touched; the focus card follows it.
     focus: Option<String>,
+    /// The tap selected in the picture.
+    sel: Option<usize>,
     /// Picture: Y axis 0 Pan · 1 Gain · 2 Cutoff; view 0 Field · 1 Bars.
     y_axis: usize,
     view: usize,
@@ -249,9 +251,23 @@ pub fn frame(
             sc.inited = true;
             sc.look = Appearance::load();
             sc.look_saved = Some(sc.look);
-            // Desktop preview of the iPad page: AFTERECHO_SHAPE=tall.
-            if !ios && std::env::var("AFTERECHO_SHAPE").is_ok_and(|v| v == "tall") {
-                sc.shape = Shape::Tall;
+            // Desktop previews, to check a state without clicking to it:
+            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff,sel3 (the iPad page, the
+            // Bars view, the Y axis, a selected tap).
+            if let (false, Ok(v)) = (ios, std::env::var("AFTERECHO_PREVIEW")) {
+                for t in v.split(',').map(str::trim) {
+                    match t {
+                        "tall" => sc.shape = Shape::Tall,
+                        "bars" => sc.view = 1,
+                        "gain" => sc.y_axis = 1,
+                        "cutoff" => sc.y_axis = 2,
+                        _ => {
+                            if let Some(n) = t.strip_prefix("sel").and_then(|n| n.parse::<usize>().ok()) {
+                                sc.sel = n.checked_sub(1);
+                            }
+                        }
+                    }
+                }
             }
         }
         if sc.look_saved != Some(sc.look) {
@@ -321,8 +337,8 @@ fn page(
     tempo: f32,
 ) {
     header(ui, o, s, l, params, setter, st);
-    picture(ui, o, s, l, &mut st.scope);
-    lane(ui, o, s, l, params, setter, &mut st.scope);
+    picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
+    lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
     focus_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
     time_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
     colour_card(ui, o, s, l, params, setter, &mut st.scope);
@@ -351,8 +367,16 @@ fn seg(
     ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32,
     bg: Color32, enabled: bool,
 ) -> Option<usize> {
+    seg_ex(ui, rect, labels, active, salt, s, px, bg, &[enabled; 8][..labels.len()])
+}
+
+/// [`seg`] with each option enabled on its own.
+#[allow(clippy::too_many_arguments)]
+fn seg_ex(
+    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32,
+    bg: Color32, enabled: &[bool],
+) -> Option<usize> {
     let p = ui.painter().clone();
-    let alpha = if enabled { 255 } else { 90 };
     p.rect_filled(rect, g::R_CTL * s, bg);
     let inset = 2.5 * s;
     let n = labels.len().max(1) as f32;
@@ -364,6 +388,8 @@ fn seg(
             Vec2::new(w, rect.height() - 2.0 * inset),
         );
         let resp = ui.interact(b, ui.id().with((salt, i)), Sense::click());
+        let enabled = enabled.get(i).copied().unwrap_or(true);
+        let alpha = if enabled { 255 } else { 90 };
         let on = i == active;
         if on {
             p.rect_filled(b, (g::R_CTL - 2.0) * s, theme::with_alpha(theme::on_fill(), alpha));
@@ -612,28 +638,572 @@ fn header(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Picture and lane (frames this pass; their drawings come next)
+// Picture: the tap field (X = time) or the bars (X = tap order); Y is picked
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn picture(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, sc: &mut ScopeState) {
+/// What the picture's vertical axis shows: one per-tap parameter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Axis {
+    Pan,
+    Gain,
+    Cutoff,
+}
+
+impl Axis {
+    const ALL: [Axis; 3] = [Axis::Pan, Axis::Gain, Axis::Cutoff];
+
+    fn name(self) -> &'static str {
+        match self {
+            Axis::Pan => "Pan",
+            Axis::Gain => "Gain",
+            Axis::Cutoff => "Cutoff",
+        }
+    }
+
+    fn param(self, tap: &TapParams) -> &FloatParam {
+        match self {
+            Axis::Pan => &tap.pan,
+            Axis::Gain => &tap.gain_db,
+            Axis::Cutoff => &tap.filter_cutoff,
+        }
+    }
+
+    /// Param id of tap `i` on this axis (nested ids carry the 1-based tap number).
+    fn id(self, i: usize) -> String {
+        let base = match self {
+            Axis::Pan => "pan",
+            Axis::Gain => "gain_db",
+            Axis::Cutoff => "tap_filter_cutoff",
+        };
+        format!("{base}_{}", i + 1)
+    }
+
+    /// A value → 0 (top) … 1 (bottom). Pan has L / Mid at the top and gain the
+    /// DAW-fader skew (0 dB at 75 % height), both as in v3; cutoff is log.
+    fn norm(self, v: f32) -> f32 {
+        let n = match self {
+            Axis::Pan => (v + 1.0) * 0.5,
+            Axis::Gain => 1.0 - gain_db_to_pos(v),
+            Axis::Cutoff => 1.0 - (v / 20.0).max(1.0).ln() / 1000f32.ln(),
+        };
+        n.clamp(0.0, 1.0)
+    }
+
+    fn value(self, n: f32) -> f32 {
+        let n = n.clamp(0.0, 1.0);
+        match self {
+            Axis::Pan => n * 2.0 - 1.0,
+            Axis::Gain => pos_to_gain_db(1.0 - n),
+            Axis::Cutoff => 20.0 * 1000f32.powf(1.0 - n),
+        }
+    }
+
+    fn text(self, v: f32, ch: ChannelMode) -> String {
+        match self {
+            Axis::Pan => pan_text(v, ch),
+            Axis::Gain => db_text(v),
+            Axis::Cutoff => hz_text(v),
+        }
+    }
+
+    /// The short form above a bar: no unit for gain, the filter type for cutoff.
+    fn short(self, tap: &TapParams, ch: ChannelMode) -> String {
+        let v = self.param(tap).value();
+        match self {
+            Axis::Pan => pan_text(v, ch),
+            Axis::Gain => db_text(v).trim_end_matches(" dB").to_string(),
+            Axis::Cutoff => {
+                let ty = match tap.filter_type.value() {
+                    FilterType::LowPass => "LP",
+                    FilterType::BandPass => "BP",
+                    FilterType::HighPass => "HP",
+                };
+                if v >= 1000.0 { format!("{ty} {:.1}k", v / 1000.0) } else { format!("{ty} {v:.0}") }
+            }
+        }
+    }
+
+    /// Gridlines as (norm, label).
+    fn grid(self, ch: ChannelMode) -> Vec<(f32, String)> {
+        let at = |pts: &[(f32, &str)]| -> Vec<(f32, String)> {
+            pts.iter().map(|&(v, t)| (self.norm(v), t.to_string())).collect()
+        };
+        match self {
+            Axis::Pan if ch == ChannelMode::MidSide => at(&[(-1.0, "Mid"), (0.0, "M·S"), (1.0, "Side")]),
+            Axis::Pan => at(&[(-1.0, "L"), (0.0, "C"), (1.0, "R")]),
+            Axis::Gain => at(&[(6.0, "+6"), (0.0, "0 dB"), (-12.0, "−12"), (-24.0, "−24"), (-48.0, "−48")]),
+            Axis::Cutoff => at(&[(20000.0, "20k"), (5000.0, "5k"), (1000.0, "1k"), (200.0, "200"), (50.0, "50")]),
+        }
+    }
+}
+
+fn pan_text(v: f32, ch: ChannelMode) -> String {
+    let n = (v.abs() * 100.0).round() as i32;
+    let ms = ch == ChannelMode::MidSide;
+    match (n < 2, ms, v < 0.0) {
+        (true, true, _) => "M·S".into(),
+        (true, false, _) => "C".into(),
+        (false, true, true) => format!("Mid {n}"),
+        (false, true, false) => format!("Side {n}"),
+        (false, false, true) => format!("L {n}"),
+        (false, false, false) => format!("R {n}"),
+    }
+}
+
+fn db_text(v: f32) -> String {
+    let sign = if v < -0.05 { "−" } else if v > 0.05 { "+" } else { "" };
+    format!("{sign}{:.1} dB", v.abs())
+}
+
+fn hz_text(v: f32) -> String {
+    if v >= 1000.0 { format!("{:.1} kHz", v / 1000.0) } else { format!("{v:.0} Hz") }
+}
+
+fn secs_text(t: f32) -> String {
+    if t < 1.0 { format!("{:.0} ms", t * 1000.0) } else { format!("{t:.2} s") }
+}
+
+/// Taps that are live; the rest are hidden, as in v3.
+fn n_active(params: &PetalParams) -> usize {
+    (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS)
+}
+
+/// Tap `i` of `n`: the accent, lighter towards the last tap (v3's ramp).
+fn tap_col(i: usize, n: usize) -> Color32 {
+    let t = if n <= 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
+    let c = G();
+    let f = |v: u8| (v as f32 + (255.0 - v as f32) * 0.5 * t).round() as u8;
+    Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
+}
+
+/// A rounded label: a dot's value, the time on an axis, a handle's readout.
+fn pill(p: &egui::Painter, at: Pos2, align: Align2, t: &str, s: f32, fill: Color32, col: Color32) {
+    pill_in(p, at, align, t, s, fill, col, Rect::EVERYTHING);
+}
+
+/// [`pill`], slid sideways to stay inside `bounds`.
+#[allow(clippy::too_many_arguments)]
+fn pill_in(p: &egui::Painter, at: Pos2, align: Align2, t: &str, s: f32, fill: Color32, col: Color32, bounds: Rect) {
+    let galley = p.layout_no_wrap(t.to_string(), FontId::proportional(fs(12.0, s)), col);
+    let mut rect = align.anchor_size(at, galley.size() + Vec2::new(20.0, 8.0) * s);
+    let dx = (bounds.left() - rect.left()).max(0.0) + (bounds.right() - rect.right()).min(0.0);
+    rect = rect.translate(Vec2::new(dx, 0.0));
+    p.rect_filled(rect, rect.height() * 0.5, fill);
+    p.galley(rect.min + Vec2::new(10.0, 4.0) * s, galley, col);
+}
+
+/// One frame of a drag surface, the same on desktop (the pointer) and on touch
+/// (this surface's own fingers, so several taps can move at once).
+#[derive(Default)]
+struct Drag {
+    started: bool,
+    delta: Vec2,
+    /// A press is down on the surface (desktop) or a finger owns it (touch).
+    pressing: bool,
+    /// The press or finger let go this frame (a click counts).
+    released: bool,
+    clicked: bool,
+    double: bool,
+    pos: Option<Pos2>,
+}
+
+fn drag_at(ui: &egui::Ui, id: Id, hit: Rect) -> Drag {
+    let resp = ui.interact(hit, id, Sense::click_and_drag());
+    if theme::touch() {
+        let t = epo::touch_interact(ui, id, hit);
+        let key = id.with("held");
+        let was: bool = ui.ctx().data(|d| d.get_temp(key)).unwrap_or(false);
+        ui.ctx().data_mut(|d| d.insert_temp(key, t.active));
+        Drag {
+            started: t.started,
+            delta: t.delta,
+            pressing: t.active,
+            released: was && !t.active,
+            clicked: t.tapped,
+            double: false,
+            pos: t.pos,
+        }
+    } else {
+        Drag {
+            started: resp.drag_started(),
+            delta: if resp.dragged() { resp.drag_delta() } else { Vec2::ZERO },
+            pressing: resp.is_pointer_button_down_on() || resp.dragged(),
+            released: resp.drag_stopped() || resp.clicked(),
+            clicked: resp.clicked(),
+            double: resp.double_clicked(),
+            pos: resp.interact_pointer_pos(),
+        }
+    }
+}
+
+/// Set `p` during a drag inside one host gesture: begin on the first change,
+/// end on release — a press that never moves leaves no open gesture.
+fn gesture_set<P: Param>(ui: &egui::Ui, key: Id, setter: &ParamSetter, p: &P, d: &Drag, v: Option<P::Plain>) {
+    let begun: bool = ui.ctx().data(|m| m.get_temp(key)).unwrap_or(false);
+    let set = v.is_some();
+    if let Some(v) = v {
+        if !begun {
+            setter.begin_set_parameter(p);
+        }
+        setter.set_parameter(p, v);
+    }
+    if d.released && (begun || set) {
+        setter.end_set_parameter(p);
+        ui.ctx().data_mut(|m| m.insert_temp(key, false));
+    } else if set && !begun {
+        ui.ctx().data_mut(|m| m.insert_temp(key, true));
+    }
+}
+
+/// Snapped `time_offset` for a dragged tap (Snap on): the tap's whole position
+/// (topology position + offset, in cluster-span units) goes to the nearest
+/// 1/NUM_TAPS, i.e. its time to a multiple of the base time. Same as v3.
+fn snap_offset(cur_time_secs: f32, cur_off: f32, raw_off: f32, span_secs: f32) -> f32 {
+    let pos = cur_time_secs / span_secs.max(1e-6) - cur_off;
+    let snapped = ((pos + raw_off) * NUM_TAPS as f32).round() / NUM_TAPS as f32;
+    snapped - pos
+}
+
+/// Time ticks across `plot` for `range` seconds — beats in Sync, ms in Free
+/// (v3's ladders) — labelled under the plot; `lines` draws the gridlines too.
+fn time_grid(p: &egui::Painter, plot: Rect, range: f32, tempo: f32, is_sync: bool, s: f32, lines: bool) {
+    let (total, major, minor) = if is_sync {
+        let total = (range / (60.0 / tempo.max(1.0))).max(1e-3);
+        let (ma, mi) = match total {
+            t if t <= 0.5 => (0.125, 0.0625),
+            t if t <= 1.0 => (0.25, 0.125),
+            t if t <= 2.0 => (0.5, 0.25),
+            t if t <= 4.0 => (1.0, 0.5),
+            t if t <= 8.0 => (2.0, 1.0),
+            t if t <= 16.0 => (4.0, 2.0),
+            t if t <= 32.0 => (8.0, 4.0),
+            t if t <= 64.0 => (16.0, 8.0),
+            _ => (32.0, 16.0),
+        };
+        (total, ma, mi)
+    } else {
+        let total = (range * 1000.0).max(1e-3);
+        let (ma, mi) = match total {
+            t if t <= 250.0 => (50.0, 25.0),
+            t if t <= 500.0 => (100.0, 50.0),
+            t if t <= 1000.0 => (200.0, 100.0),
+            t if t <= 2000.0 => (500.0, 250.0),
+            t if t <= 5000.0 => (1000.0, 500.0),
+            t if t <= 10000.0 => (2000.0, 1000.0),
+            _ => (4000.0, 2000.0),
+        };
+        (total, ma, mi)
+    };
+    let mut v = 0.0f32;
+    while v <= total + minor * 0.01 {
+        let x = plot.left() + v / total * plot.width();
+        let is_major = (v / major - (v / major).round()).abs() < 0.02;
+        if lines {
+            let (w, col) = if is_major { (1.0, theme::line2()) } else { (0.5, theme::line()) };
+            p.line_segment([Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())], Stroke::new(w * s, col));
+        }
+        if is_major {
+            let label = if v < 1e-4 {
+                "0".to_string()
+            } else if is_sync {
+                let b = (v * 100.0).round() / 100.0;
+                if b == b.floor() { format!("{b:.0}") } else { format!("{b}") }
+            } else if v < 1000.0 {
+                format!("{v:.0} ms")
+            } else {
+                format!("{:.1} s", v / 1000.0)
+            };
+            text(p, Pos2::new(x, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &label, 10.5, s, SOFT());
+        }
+        v += minor;
+    }
+    if is_sync {
+        text(p, Pos2::new(plot.right(), plot.bottom() + 24.0 * s), Align2::RIGHT_CENTER, "beats", 10.0, s, SOFT());
+    }
+}
+
+/// The picked axis's gridlines, labelled left of the plot.
+fn axis_grid(p: &egui::Painter, plot: Rect, axis: Axis, ch: ChannelMode, s: f32) {
+    for (n, t) in axis.grid(ch) {
+        let y = plot.top() + n * plot.height();
+        p.line_segment([Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)], Stroke::new(1.0 * s, theme::line()));
+        text(p, Pos2::new(plot.left() - 12.0 * s, y), Align2::RIGHT_CENTER, &t, 10.5, s, SOFT());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn picture(
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter,
+    sc: &mut ScopeState, tempo: f32,
+) {
     let (x, y, w, h) = l.picture;
     let rect = r(o, s, x, y, w, h);
     let p = ui.painter().clone();
     p.rect_filled(rect, g::R_CARD * s, theme::FRAME());
     text(&p, rect.min + Vec2::new(16.0, 24.0) * s, Align2::LEFT_CENTER, "Taps", 12.0, s, INK());
-    let vx = x + w - 12.0 - 120.0;
-    if let Some(i) = seg(ui, r(o, s, vx, y + 10.0, 120.0, 28.0), &["Field", "Bars"], sc.view, "sc_view", s, 12.0, PAPER(), true) {
+    if !l.lane_stacked {
+        let hint = if sc.view == 0 { "drag a dot" } else { "drag across the bars" };
+        text(&p, rect.min + Vec2::new(54.0, 24.0) * s, Align2::LEFT_CENTER, hint, 12.0, s, SOFT());
+    }
+
+    // header, right to left: Snap (field only) · Field / Bars · Y picker
+    let mut right = x + w - 12.0;
+    if sc.view == 0 {
+        let snap = params.tap_snap.value();
+        let resp = button(ui, r(o, s, right - 56.0, y + 10.0, 56.0, 28.0), "Snap", snap, "sc_snap", s, 12.0);
+        if epo::tap_or_click(ui, &resp) {
+            setter.begin_set_parameter(&params.tap_snap);
+            setter.set_parameter(&params.tap_snap, !snap);
+            setter.end_set_parameter(&params.tap_snap);
+        }
+        right -= 64.0;
+    }
+    if let Some(i) = seg(ui, r(o, s, right - 120.0, y + 10.0, 120.0, 28.0), &["Field", "Bars"], sc.view, "sc_view", s, 12.0, PAPER(), true) {
         sc.view = i;
     }
-    let yx = vx - 8.0 - 190.0;
-    text(&p, r(o, s, yx - 16.0, y + 10.0, 12.0, 28.0).center(), Align2::CENTER_CENTER, "Y", 12.0, s, SOFT());
-    if let Some(i) = seg(ui, r(o, s, yx, y + 10.0, 190.0, 28.0), &["Pan", "Gain", "Cutoff"], sc.y_axis, "sc_y", s, 12.0, PAPER(), true) {
+    right -= 128.0;
+    // Mono has no pan, so its picture starts on gain.
+    let mono = params.channel_mode.value() == ChannelMode::Mono;
+    let axis_i = if mono && sc.y_axis == 0 { 1 } else { sc.y_axis };
+    if let Some(i) = seg_ex(ui, r(o, s, right - 190.0, y + 10.0, 190.0, 28.0), &["Pan", "Gain", "Cutoff"], axis_i, "sc_y", s, 12.0, PAPER(), &[!mono, true, true]) {
         sc.y_axis = i;
     }
-    text(&p, rect.center(), Align2::CENTER_CENTER, "Tap field — next pass", 12.0, s, SOFT());
+    text(&p, r(o, s, right - 208.0, y + 10.0, 12.0, 28.0).center(), Align2::CENTER_CENTER, "Y", 12.0, s, SOFT());
+
+    let axis = Axis::ALL[axis_i];
+    let plot = Rect::from_min_max(rect.min + Vec2::new(56.0, 56.0) * s, rect.max - Vec2::new(24.0, 34.0) * s);
+    if sc.view == 0 {
+        let viz = crate::gui::compute_viz_data_ex(params, tempo, 1);
+        field(ui, plot, s, params, setter, sc, &viz, axis, tempo);
+    } else {
+        bars(ui, plot, s, params, setter, sc, axis);
+    }
 }
 
-fn lane(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState) {
+/// The tap field: X = time on v3's tight taps-only range, Y = the picked axis.
+/// Drag a dot: ↔ moves its time offset, ↕ its value. Double-click resets both.
+#[allow(clippy::too_many_arguments)]
+fn field(
+    ui: &mut egui::Ui, plot: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
+    sc: &mut ScopeState, viz: &VizData, axis: Axis, tempo: f32,
+) {
+    let p = ui.painter().clone();
+    let ch = params.channel_mode.value();
+    let is_sync = params.sync_mode.value() == SyncMode::Sync;
+    let range = viz.grid_range_secs_taps_only.max(1e-4);
+    let span = viz.span_l_secs.max(1e-4);
+    time_grid(&p, plot, range, tempo, is_sync, s, true);
+    axis_grid(&p, plot, axis, ch, s);
+
+    // A click on the background deselects; registered first so dots win overlaps.
+    if ui.interact(plot, ui.id().with("sc_field_bg"), Sense::click()).clicked() {
+        sc.sel = None;
+    }
+    let n = n_active(params);
+    let snap = params.tap_snap.value();
+    let mut selected = None;
+    for i in 0..n {
+        let tap = &params.taps[i];
+        let prm = axis.param(tap);
+        let c = Pos2::new(
+            plot.left() + viz.times_l_grid[i].min(1.0) * plot.width(),
+            plot.top() + axis.norm(prm.value()) * plot.height(),
+        );
+        let hit = if theme::touch() { theme::TOUCH_MIN_HIT } else { 28.0 } * s;
+        let id = ui.id().with(("sc_tap", i));
+        let d = drag_at(ui, id, Rect::from_center_size(c, Vec2::splat(hit)));
+        let virt_id = id.with("virt");
+        if d.started {
+            sc.sel = Some(i);
+            // raw (unsnapped) offset accumulator: quantizing the running value
+            // directly makes the dot sticky (v3)
+            ui.ctx().data_mut(|m| m.insert_temp(virt_id, tap.time_offset.value()));
+        }
+        let (mut off, mut val) = (None, None);
+        if d.delta != Vec2::ZERO {
+            let mut virt: f32 = ui.ctx().data(|m| m.get_temp(virt_id)).unwrap_or_else(|| tap.time_offset.value());
+            // px → seconds on this range → fraction of the cluster span
+            virt = (virt + d.delta.x / plot.width() * range / span).clamp(-0.5, 0.5);
+            ui.ctx().data_mut(|m| m.insert_temp(virt_id, virt));
+            let o = if snap { snap_offset(viz.times_l_grid[i] * range, tap.time_offset.value(), virt, span) } else { virt };
+            off = Some(o.clamp(-0.5, 0.5));
+            val = Some(axis.value(axis.norm(prm.value()) + d.delta.y / plot.height()));
+            sc.focus = Some(axis.id(i));
+        }
+        gesture_set(ui, id.with("off"), setter, &tap.time_offset, &d, off);
+        gesture_set(ui, id.with("val"), setter, prm, &d, val);
+        if d.clicked {
+            sc.sel = if sc.sel == Some(i) { None } else { Some(i) };
+            sc.focus = Some(axis.id(i));
+        }
+        if d.double {
+            for (q, v) in [(&tap.time_offset, 0.0), (prm, prm.default_plain_value())] {
+                setter.begin_set_parameter(q);
+                setter.set_parameter(q, v);
+                setter.end_set_parameter(q);
+            }
+        }
+
+        let col = tap_col(i, n);
+        let active = tap.active.value();
+        let rad = if axis == Axis::Pan {
+            (4.0 + 7.0 * gain_db_to_pos(tap.gain_db.value())) * s // size = level
+        } else {
+            5.0 * s
+        };
+        if axis == Axis::Gain {
+            let stem = theme::with_alpha(col, if active { 160 } else { 70 });
+            p.line_segment([Pos2::new(c.x, c.y + rad), Pos2::new(c.x, plot.bottom())], Stroke::new(1.5 * s, stem));
+        }
+        if active {
+            p.circle_filled(c, rad, col);
+        } else {
+            p.circle_stroke(c, rad, Stroke::new(1.5 * s, col));
+        }
+        if sc.sel == Some(i) {
+            selected = Some((i, c, rad));
+        }
+    }
+
+    // the selected tap on top: ring, crosshair, its value and its time
+    if let Some((i, c, rad)) = selected {
+        let prm = axis.param(&params.taps[i]);
+        p.circle_stroke(c, rad + 3.5 * s, Stroke::new(1.5 * s, INK()));
+        let hair = Stroke::new(1.0 * s, theme::with_alpha(G(), 90));
+        p.line_segment([Pos2::new(c.x, plot.top()), Pos2::new(c.x, plot.bottom())], hair);
+        p.line_segment([Pos2::new(plot.left(), c.y), Pos2::new(plot.right(), c.y)], hair);
+        // The value goes above the dot (below near the top edge), not beside it,
+        // so it never covers the neighbouring taps in a tight cluster.
+        let ytxt = format!("{} {}  ↕", axis.name(), axis.text(prm.value(), ch));
+        let (at, align) = if c.y - rad - 34.0 * s > plot.top() {
+            (Pos2::new(c.x, c.y - rad - 8.0 * s), Align2::CENTER_BOTTOM)
+        } else {
+            (Pos2::new(c.x, c.y + rad + 8.0 * s), Align2::CENTER_TOP)
+        };
+        pill_in(&p, at, align, &ytxt, s, PAPER(), INK(), plot);
+        let ttxt = format!("↔  Tap {} · {}", i + 1, secs_text(viz.times_l_grid[i] * range));
+        pill_in(&p, Pos2::new(c.x, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &ttxt, s, INK(), PAPER(), plot);
+    }
+}
+
+/// The bars: the same Y axis with the taps in order. Press or drag sets the bar
+/// under the pointer, so a drag across draws a shape — on touch a finger can't
+/// miss a narrow column. The number under a bar mutes or unmutes it.
+#[allow(clippy::too_many_arguments)]
+fn bars(
+    ui: &mut egui::Ui, plot: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
+    sc: &mut ScopeState, axis: Axis,
+) {
+    let p = ui.painter().clone();
+    let ch = params.channel_mode.value();
+    axis_grid(&p, plot, axis, ch, s);
+    let n = n_active(params);
+    let slot = plot.width() / n as f32;
+    let bw = (slot * 0.46).clamp(5.0 * s, 36.0 * s);
+    let wide = bw > 12.0 * s;
+
+    let id = ui.id().with("sc_bars");
+    let d = drag_at(ui, id, plot);
+    let begun_id = id.with("begun");
+    let mut begun: u32 = ui.ctx().data(|m| m.get_temp(begun_id)).unwrap_or(0);
+    if d.pressing {
+        if let Some(pos) = d.pos {
+            let i = (((pos.x - plot.left()) / slot).floor().max(0.0) as usize).min(n - 1);
+            let prm = axis.param(&params.taps[i]);
+            if begun & (1 << i) == 0 {
+                setter.begin_set_parameter(prm);
+                begun |= 1 << i;
+            }
+            setter.set_parameter(prm, axis.value((pos.y - plot.top()) / plot.height()));
+            sc.sel = Some(i);
+            sc.focus = Some(axis.id(i));
+        }
+    }
+    if d.released {
+        for i in 0..NUM_TAPS {
+            if begun & (1 << i) != 0 {
+                setter.end_set_parameter(axis.param(&params.taps[i]));
+            }
+        }
+        begun = 0;
+    }
+    ui.ctx().data_mut(|m| m.insert_temp(begun_id, begun));
+
+    // values above every bar when they fit, else only the selected one's
+    let show_all = slot >= if axis == Axis::Gain { 40.0 } else { 58.0 } * s;
+    let pills = slot >= 38.0 * s;
+    let step = (20.0 * s / slot).ceil().max(1.0) as usize;
+    for i in 0..n {
+        let tap = &params.taps[i];
+        let prm = axis.param(tap);
+        let cx = plot.left() + slot * (i as f32 + 0.5);
+        let yv = plot.top() + axis.norm(prm.value()) * plot.height();
+        let yb = if axis == Axis::Pan { plot.center().y } else { plot.bottom() };
+        let sel = sc.sel == Some(i);
+        let col = tap_col(i, n);
+        let active = tap.active.value();
+
+        let track = Rect::from_center_size(Pos2::new(cx, plot.center().y), Vec2::new(bw, plot.height()));
+        p.rect_filled(track, if wide { 6.0 } else { 2.0 } * s, if sel { theme::on_fill() } else { PANEL() });
+        let fw = (bw - if wide { 8.0 } else { 2.0 } * s).max(3.0 * s);
+        let (top, bot) = (yv.min(yb), yv.max(yb).max(yv.min(yb) + 2.0 * s));
+        let fill = Rect::from_min_max(Pos2::new(cx - fw * 0.5, top), Pos2::new(cx + fw * 0.5, bot));
+        if active {
+            p.rect_filled(fill, 3.0 * s, col);
+        } else {
+            p.rect_stroke(fill, 3.0 * s, Stroke::new(1.5 * s, col), egui::StrokeKind::Inside);
+        }
+        p.line_segment(
+            [Pos2::new(cx - bw * 0.5 + 2.0 * s, yv), Pos2::new(cx + bw * 0.5 - 2.0 * s, yv)],
+            Stroke::new(if wide { 3.0 } else { 2.0 } * s, INK()),
+        );
+        if show_all || sel {
+            mono(&p, Pos2::new(cx, plot.top() - 10.0 * s), Align2::CENTER_CENTER, &axis.short(tap, ch), 11.0, s, if sel { INK() } else { INK2() });
+        }
+
+        // the number under the bar: tap it to mute / unmute
+        let num = Rect::from_center_size(Pos2::new(cx, plot.bottom() + 17.0 * s), Vec2::new(if pills { 34.0 * s } else { slot.max(4.0 * s) }, 24.0 * s));
+        let resp = ui.interact(num, ui.id().with(("sc_mute", i)), Sense::click());
+        if pills {
+            let pr = Rect::from_center_size(num.center(), Vec2::new(34.0, 22.0) * s);
+            if active {
+                p.rect_filled(pr, 7.0 * s, col);
+            } else {
+                p.rect_stroke(pr, 7.0 * s, Stroke::new(1.5 * s, col), egui::StrokeKind::Inside);
+            }
+            mono(&p, pr.center(), Align2::CENTER_CENTER, &format!("{:02}", i + 1), 11.0, s, if active { PAPER() } else { col });
+            if sel {
+                p.rect_stroke(pr.expand(3.0 * s), 9.0 * s, Stroke::new(1.5 * s, INK()), egui::StrokeKind::Outside);
+            }
+        } else {
+            let strip = Rect::from_center_size(Pos2::new(cx, plot.bottom() + 8.0 * s), Vec2::new(bw.max(4.0 * s), 4.0 * s));
+            if active {
+                p.rect_filled(strip, 2.0 * s, col);
+            } else {
+                p.rect_stroke(strip, 2.0 * s, Stroke::new(1.0 * s, col), egui::StrokeKind::Inside);
+            }
+            if i % step == 0 || sel {
+                mono(&p, Pos2::new(cx, plot.bottom() + 21.0 * s), Align2::CENTER_CENTER, &format!("{}", i + 1), 10.0, s, if sel { INK() } else { SOFT() });
+            }
+        }
+        if epo::tap_or_click(ui, &resp) {
+            setter.begin_set_parameter(&tap.active);
+            setter.set_parameter(&tap.active, !active);
+            setter.end_set_parameter(&tap.active);
+            sc.sel = Some(i);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lane: Echo (the real repeats) · Motion (Phase 4)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn lane(
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter,
+    sc: &mut ScopeState, tempo: f32,
+) {
     let (x, y, w, h) = l.lane;
     let rect = r(o, s, x, y, w, h);
     let p = ui.painter().clone();
@@ -650,11 +1220,24 @@ fn lane(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams
     } else {
         (r(o, s, x, y + 40.0, 470.0, h - 40.0), r(o, s, x + 482.0, y + 44.0, w - 496.0, h - 48.0), 3)
     };
-    let placeholder = if sc.lane_tab == 0 { "Echo lane — next pass" } else { "Motion — next pass" };
-    text(&p, curves.center(), Align2::CENTER_CENTER, placeholder, 12.0, s, SOFT());
 
-    // The loop's controls (real params). Feedback is a knob until the lane's
-    // drag handles exist.
+    if sc.lane_tab == 0 {
+        // The cycle: Auto follows the cluster; Manual keeps its own time, in
+        // Time's unit (the feedback time follows Time's Sync since v2.19).
+        let locked = params.feedback_time_locked.value();
+        if let Some(i) = seg(ui, r(o, s, x + 174.0, y + 7.0, 150.0, 26.0), &["Auto", "Manual"], if locked { 0 } else { 1 }, "sc_cycle", s, 12.0, PAPER(), true) {
+            setter.begin_set_parameter(&params.feedback_time_locked);
+            setter.set_parameter(&params.feedback_time_locked, i == 0);
+            setter.end_set_parameter(&params.feedback_time_locked);
+        }
+        let viz = crate::gui::compute_viz_data_ex(params, tempo, 3);
+        text(&p, o + Vec2::new(x + w - 14.0, y + 20.0) * s, Align2::RIGHT_CENTER, &echo_readout(&viz, l.lane_stacked), 12.0, s, INK2());
+        echo(ui, curves, s, params, setter, &mut sc.focus, &viz, tempo);
+    } else {
+        text(&p, curves.center(), Align2::CENTER_CENTER, "Motion — next pass", 12.0, s, SOFT());
+    }
+
+    // the loop's controls; Feedback and the cycle are the lane's own handles
     let title_w = 52.0 * s;
     let cells = Rect::from_min_max(ctl.min + Vec2::new(title_w, 0.0), ctl.max);
     let c = |row, col, span| cell_at(cells, cols, 2, row, col, span, s);
@@ -664,8 +1247,159 @@ fn lane(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams
     }
     knob_cell(ui, c(0, 0, 1), s, setter, &params.crossfeed, "crossfeed", "X-feed", false, true, None, &mut sc.focus);
     enum_cell(ui, c(0, 1, 2), s, setter, &params.crossfeed_mode, "crossfeed_mode", "Mode", &["Mix", "Ping", "Diffuse"], true, &mut sc.focus);
-    knob_cell(ui, c(1, 0, 1), s, setter, &params.feedback, "feedback", "Feedback", false, true, None, &mut sc.focus);
-    enum_cell(ui, c(1, 1, 2), s, setter, &params.fb_curve, "fb_curve", "Curve", &["Natural", "Bloom", "Gate"], true, &mut sc.focus);
+    enum_cell(ui, c(1, 0, 2), s, setter, &params.fb_curve, "fb_curve", "Curve", &["Natural", "Bloom", "Gate"], true, &mut sc.focus);
+}
+
+/// "−4.4 dB per repeat · 13 repeats to −60 dB", from the same per-cycle levels
+/// the lane draws (they follow the FB curve).
+fn echo_readout(viz: &VizData, short: bool) -> String {
+    if viz.feedback < 1e-3 {
+        return "No repeats".into();
+    }
+    let g1 = viz.cycle_gains[1];
+    if g1 >= 0.999 {
+        return "Repeats hold · self-oscillates".into();
+    }
+    let per = format!("{} per repeat", db_text(20.0 * g1.max(1e-6).log10()));
+    if short {
+        return per;
+    }
+    // compute_viz_data stops counting at 64 cycles
+    let reps = if viz.n_echo_cycles >= 64 { "64+".to_string() } else { viz.n_echo_cycles.to_string() };
+    format!("{per} · {reps} repeats to −60 dB")
+}
+
+/// The Echo lane: one band per cycle, each tap and its repeats as stems (height
+/// = level, −60 dB floor), the loop's decay as a dashed line. Drag ↕ anywhere:
+/// feedback. Drag the band edge ↔: the cycle (switches it to Manual).
+#[allow(clippy::too_many_arguments)]
+fn echo(
+    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
+    focus: &mut Option<String>, viz: &VizData, tempo: f32,
+) {
+    let p = ui.painter().clone();
+    let plot = Rect::from_min_max(area.min + Vec2::new(18.0, 36.0) * s, area.max - Vec2::new(20.0, 22.0) * s);
+    p.line_segment([plot.left_bottom(), plot.right_bottom()], Stroke::new(1.0 * s, theme::line2()));
+    let n = n_active(params);
+    let active: Vec<usize> = (0..n).filter(|&i| params.taps[i].active.value()).collect();
+    if active.is_empty() {
+        return;
+    }
+
+    // Everything in seconds. The view covers the taps, the repeats worth
+    // showing and at least one cycle (so the handles exist at 0 % feedback);
+    // while the cycle edge is dragged it's held, so the edge stays under the pointer.
+    let secs = |norm: f32| norm * viz.grid_range_secs;
+    let t0 = active.iter().map(|&i| secs(viz.times_l[i])).fold(f32::INFINITY, f32::min);
+    let cyc = secs(viz.fb_cycle_norm).max(1e-4);
+    let held_id = ui.id().with("sc_echo_range");
+    let held: Option<f32> = ui.ctx().data(|m| m.get_temp(held_id));
+    let range = held.unwrap_or_else(|| viz.grid_range_secs.max((t0 + cyc) * 1.08)).max(1e-4);
+    let tx = |t: f32| plot.left() + t / range * plot.width();
+    let ly = |db: f32| plot.bottom() - plot.height() * (1.0 + db / 60.0).clamp(0.0, 1.0);
+    let margin = (0.015 * range).min(cyc * 0.25);
+    let shown = viz.n_echo_cycles.min(3);
+    let gdb = |k: usize| 20.0 * viz.cycle_gains[k].max(1e-6).log10();
+
+    // bands: one per cycle, every other one lighter, labelled with its level
+    for k in 0..=shown.max(1) {
+        let b0 = if k == 0 { 0.0 } else { t0 + k as f32 * cyc - margin };
+        let (x0, x1) = (tx(b0).max(plot.left()), tx(t0 + (k + 1) as f32 * cyc - margin).min(plot.right()));
+        if x0 >= plot.right() {
+            break;
+        }
+        if k % 2 == 1 {
+            p.rect_filled(Rect::from_min_max(Pos2::new(x0, area.top()), Pos2::new(x1, plot.bottom())), 0.0, PANEL());
+        }
+        if x1 - x0 > 96.0 * s {
+            let label = match k {
+                0 => "Taps · 0 dB".to_string(),
+                k if viz.cycle_gains[k] < 1e-3 => format!("Repeat {k} · silent"),
+                k => format!("Repeat {k} · {}", db_text(gdb(k))),
+            };
+            text(&p, Pos2::new(x0 + 8.0 * s, area.top() + 14.0 * s), Align2::LEFT_CENTER, &label, 11.0, s, SOFT());
+        }
+    }
+    // the taps and their repeats
+    for k in 0..=shown {
+        if viz.cycle_gains[k] < 1e-3 {
+            break;
+        }
+        for &i in &active {
+            let x = tx(secs(viz.times_l[i]) + k as f32 * cyc);
+            if x > plot.right() {
+                continue;
+            }
+            let yv = ly(params.taps[i].gain_db.value() + gdb(k));
+            let col = if k == 0 { tap_col(i, n) } else { theme::with_alpha(G(), (217.0 * 0.72f32.powi(k as i32 - 1)) as u8) };
+            p.line_segment([Pos2::new(x, plot.bottom()), Pos2::new(x, yv)], Stroke::new(2.0 * s, col));
+            p.circle_filled(Pos2::new(x, yv), if k == 0 { 3.5 } else { 2.5 } * s, col);
+        }
+    }
+    // the loop's decay through the cycles (follows the FB curve)
+    let env: Vec<Pos2> = (0..=shown.max(1))
+        .take_while(|&k| k == 0 || viz.cycle_gains[k] >= 1e-3)
+        .map(|k| Pos2::new(tx(t0 + k as f32 * cyc), ly(gdb(k))))
+        .filter(|q| q.x <= plot.right())
+        .collect();
+    if env.len() > 1 {
+        p.extend(egui::Shape::dashed_line(&env, Stroke::new(1.4 * s, theme::with_alpha(INK(), 150)), 5.0 * s, 4.0 * s));
+    }
+
+    // ↕ feedback: anywhere on the lane, relative so it can pass 100 %
+    let fid = ui.id().with("sc_echo_fb");
+    let fd = drag_at(ui, fid, plot.expand2(Vec2::new(0.0, 14.0 * s)));
+    let fb = params.feedback.value();
+    let fv = (fd.delta.y != 0.0).then(|| (fb - fd.delta.y / plot.height() * 1.05).clamp(0.0, 1.05));
+    if fv.is_some() {
+        *focus = Some("feedback".into());
+    }
+    gesture_set(ui, fid.with("g"), setter, &params.feedback, &fd, fv);
+    if fd.double {
+        setter.begin_set_parameter(&params.feedback);
+        setter.set_parameter(&params.feedback, params.feedback.default_plain_value());
+        setter.end_set_parameter(&params.feedback);
+    }
+
+    // ↔ the cycle edge (registered last, so it wins over the lane)
+    let gx = tx(t0 + cyc - margin);
+    let cid = ui.id().with("sc_echo_cycle");
+    let cd = drag_at(ui, cid, Rect::from_center_size(Pos2::new(gx, plot.center().y), Vec2::new(22.0 * s, plot.height() + 28.0 * s)));
+    if cd.started {
+        ui.ctx().data_mut(|m| m.insert_temp(held_id, range));
+        if params.feedback_time_locked.value() {
+            setter.begin_set_parameter(&params.feedback_time_locked);
+            setter.set_parameter(&params.feedback_time_locked, false);
+            setter.end_set_parameter(&params.feedback_time_locked);
+        }
+    }
+    let cv = if cd.delta != Vec2::ZERO {
+        cd.pos.map(|q| {
+            let cycle = ((q.x - plot.left()) / plot.width() * range - t0 + margin).max(topology::MIN_FB_SECS);
+            PetalParams::feedback_time_norm_for_secs(params.sync_mode.value(), cycle, tempo)
+        })
+    } else {
+        None
+    };
+    if cv.is_some() {
+        *focus = Some("feedback_time".into());
+    }
+    gesture_set(ui, cid.with("g"), setter, &params.feedback_time, &cd, cv);
+    if cd.released {
+        ui.ctx().data_mut(|m| m.remove::<f32>(held_id));
+    }
+
+    // handles and their readouts
+    let mid = plot.center().y;
+    p.line_segment([Pos2::new(gx, area.top() + 4.0 * s), Pos2::new(gx, plot.bottom())], Stroke::new(1.4 * s, INK()));
+    p.rect_filled(Rect::from_center_size(Pos2::new(gx, mid), Vec2::new(6.0, 18.0) * s), 3.0 * s, INK());
+    let h = Pos2::new(tx(t0 + cyc), ly(gdb(1)));
+    p.circle_filled(h, 6.0 * s, PAPER());
+    p.circle_stroke(h, 6.0 * s, Stroke::new(2.0 * s, INK()));
+    let auto = params.feedback_time_locked.value();
+    pill(&p, Pos2::new(gx + 10.0 * s, mid), Align2::LEFT_CENTER, &format!("↔ Cycle {}{}", secs_text(cyc), if auto { " · auto" } else { "" }), s, PAPER(), INK());
+    pill(&p, h + Vec2::new(14.0 * s, -2.0 * s), Align2::LEFT_BOTTOM, &format!("Feedback {:.0} %  ↕", fb * 100.0), s, PAPER(), INK());
+    time_grid(&p, plot, range, tempo, params.sync_mode.value() == SyncMode::Sync, s, false);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -689,10 +1423,17 @@ fn focus_card(
         (ptr.name().to_string(), n, ptr.normalized_value_to_string(n, true))
     };
     // Read exactly like the control that was touched.
+    let mut name = name;
     match id.as_str() {
         "base_time_l" => val = params.format_base_time(n, tempo),
         "base_time_r" => val = PetalParams::format_base_time_mode(params.sync_mode_r_eff(), n, tempo),
+        "feedback_time" => val = params.format_feedback_time(tempo),
         _ => {}
+    }
+    if let Some((i, axis)) = (0..NUM_TAPS).find_map(|i| Axis::ALL.iter().find(|a| a.id(i) == id).map(|a| (i, *a))) {
+        name = format!("Tap {} · {}", i + 1, axis.name());
+        // SAFETY: as above.
+        val = axis.text(unsafe { ptr.unmodulated_plain_value() }, params.channel_mode.value());
     }
     let mid = l.focus.1 * 0.5;
     let p = ui.painter();

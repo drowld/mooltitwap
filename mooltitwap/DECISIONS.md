@@ -2,6 +2,57 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-27 · Tap field, Bars and the Echo lane on the new page (v2.29.0)
+
+**Tap field.** X is time on v3's tight taps-only range; the Y picker chooses
+Pan, Gain or Cutoff.
+- v3's drag rules are kept:
+  - `time_offset` is in cluster-span units, clamped to ±0.5;
+  - a raw accumulator keeps Snap from being sticky (Snap is the `tap_snap` param);
+  - pan has −1 at the top, and gain uses the DAW-fader skew;
+  - double-click resets the tap.
+- The Gain view draws stems; the Pan view sizes the dots by level.
+- The selected tap's value sits above its dot (below it near the top edge), so a
+  tight cluster stays visible. Its time sits on the axis.
+
+**Bars.** The same Y axis with the taps in order.
+- One surface covers all the bars: press or drag sets the bar under the pointer,
+  so dragging across draws a shape. On touch, a finger can't miss a narrow column.
+- The number under each bar mutes or unmutes it.
+- Values show above every bar when they fit, otherwise above the selected one only.
+
+**Echo lane.** Drawn from `compute_viz_data` (the DSP mirror):
+- one band per cycle, labelled with its level;
+- the taps and their repeats as stems (dB, −60 floor);
+- the loop's decay as a dashed line, which follows the FB curve.
+
+Drag anywhere ↕ for feedback. It's relative, so it can pass 100 %. Drag the band
+edge ↔ for the cycle: that switches the cycle to Manual, and the time range holds
+still during the drag so the edge stays under the pointer.
+
+**The cycle is Auto · Manual, not the canvas's Auto · Free · Sync.**
+- Since v2.19 the feedback time follows Time's Sync, so Free / Sync here would be
+  a second copy of that switch. Manual's time is in Time's unit.
+- New exact inverse `PetalParams::feedback_time_norm_for_secs`, with a
+  round-trip test. `feedback_time_seconds` now calls a mode-explicit twin; the
+  math is unchanged.
+- The lane's Feedback knob is gone: the lane's handle and Last touched replace it.
+
+**Touch.**
+- Every drag goes through Tide's per-finger layer, so several taps can move at once.
+- Host gestures begin on the first change and end on release.
+- Not tried on a device yet.
+
+**Desktop previews.** `AFTERECHO_PREVIEW=tall,bars,gain|cutoff,selN` replaces
+`AFTERECHO_SHAPE`. Synthetic clicks don't reach the standalone window reliably,
+so states are checked by opening them directly.
+
+_Not yet:_
+- R-channel times when L/R is unlinked: the field and the lane show L, like v3.
+- Ping-pong isn't drawn.
+- The Motion tab is a placeholder.
+- The field's first-repeat ghost is dropped, because the lane shows the repeats.
+
 ## 2026-10-27 · Scope-first page, first pass, on Tide's own UI layer (v2.28.0)
 
 **The redesign is built on a local copy of Tide's UI layer, not on epoche-ui.**

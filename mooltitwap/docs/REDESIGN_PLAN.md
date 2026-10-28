@@ -162,10 +162,10 @@ Canvas: https://claude.ai/artifact/6osu4gEG6f8RzfBqfsCr7Z.
   - Colour;
   - Output;
   - the lane's Cross and Loop rows.
+- **v2.29.0:** the tap field (Field and Bars, the Y picker, dragging and drawing) and the Echo lane (bands, repeats, the decay line, feedback and cycle handles) are built. The cycle is Auto · Manual (see DECISIONS.md).
 - Next:
-  - the tap field (Field and Bars, the Y picker, dragging taps);
-  - the Echo lane drawing and its drag handles;
-  - restyling the preset browser;
+  - restyling the preset browser (the name in the header doesn't open it yet);
+  - the R channel and ping-pong in the drawings;
   - then the new functions (Phase 4).
 
 - [ ] **A new page module** in the style of Tide's `editor_scope.rs`:

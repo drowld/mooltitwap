@@ -676,15 +676,36 @@ impl PetalParams {
     /// (v2.19.0: synced delay → synced feedback divisions, free delay →
     /// free ms; the separate `feedback_time_mode` param is deprecated).
     pub fn feedback_time_seconds(&self, tempo_bpm: f32) -> f32 {
-        match self.sync_mode.value() {
+        Self::feedback_time_seconds_mode(self.sync_mode.value(), self.feedback_time.value(), tempo_bpm)
+    }
+
+    /// `feedback_time_seconds` under an explicit sync mode.
+    pub fn feedback_time_seconds_mode(mode: SyncMode, normalized: f32, tempo_bpm: f32) -> f32 {
+        match mode {
             SyncMode::Free => {
                 // Exponential 10 ms..8000 ms — same feel as the base-time knob.
-                let ms = 10.0_f32 * 800.0_f32.powf(self.feedback_time.value().clamp(0.0, 1.0));
+                let ms = 10.0_f32 * 800.0_f32.powf(normalized.clamp(0.0, 1.0));
                 ms * 0.001
             }
             SyncMode::Sync => {
-                let (beats, _) = snap_to_div(self.feedback_time.value());
+                let (beats, _) = snap_to_div(normalized);
                 (60.0 / tempo_bpm) * beats
+            }
+        }
+    }
+
+    /// The `feedback_time` value whose cycle is closest to `secs` — the inverse
+    /// of `feedback_time_seconds_mode`, for dragging the Echo lane's cycle edge.
+    pub fn feedback_time_norm_for_secs(mode: SyncMode, secs: f32, tempo_bpm: f32) -> f32 {
+        match mode {
+            SyncMode::Free => ((secs * 100.0).max(1.0).ln() / 800.0_f32.ln()).clamp(0.0, 1.0),
+            SyncMode::Sync => {
+                let beats = secs * tempo_bpm / 60.0;
+                let last = SYNC_DIVS.len() - 1;
+                let nearest = (0..=last)
+                    .min_by(|&a, &b| (SYNC_DIVS[a].0 - beats).abs().total_cmp(&(SYNC_DIVS[b].0 - beats).abs()))
+                    .unwrap_or(0);
+                nearest as f32 / last as f32
             }
         }
     }
@@ -702,6 +723,27 @@ impl PetalParams {
                 let (_, label) = snap_to_div(self.feedback_time.value());
                 label.to_string()
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feedback_time_inverse_round_trips() {
+        // Free: any time in range comes back within a hair.
+        for ms in [10.0f32, 37.0, 250.0, 1000.0, 3333.0, 8000.0] {
+            let n = PetalParams::feedback_time_norm_for_secs(SyncMode::Free, ms / 1000.0, 120.0);
+            let back = PetalParams::feedback_time_seconds_mode(SyncMode::Free, n, 120.0) * 1000.0;
+            assert!((back - ms).abs() < ms * 1e-3, "{ms} ms came back as {back}");
+        }
+        // Sync: every division maps back onto itself.
+        for (i, &(beats, label)) in SYNC_DIVS.iter().enumerate() {
+            let secs = beats * 60.0 / 120.0;
+            let n = PetalParams::feedback_time_norm_for_secs(SyncMode::Sync, secs, 120.0);
+            assert_eq!(snap_to_div(n).1, label, "division {i}");
         }
     }
 }
