@@ -5,7 +5,37 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.27.0 · 2026-07-14 · branch `nice-plug-port`
+## ⭐ CURRENT STATE — v2.39.0 · 2026-10-29 · branch `ui/scope-first`
+
+**Worked on (2026-10-28 → 29):** the scope-first page (new look, spacing, Bars
+tap/double-tap mute, preset browser restyle), Ping as a mono bounce (v2.32), then all
+six Phase 4 functions: Loop tone (v2.34), Freeze (v2.35), Ducking (v2.36), Pattern
+tools + Reso/Type axes + per-tap glides (v2.37), Euclid + Swing (v2.38), Motion
+(v2.39). Each has a DECISIONS.md entry.
+
+**Current state:** v2.39.0 committed locally (`b88320d`, nothing pushed) and installed
+on desktop (CLAP + VST3). 56 unit tests pass; every feature, when off, is bit-identical
+to the version before it (21-render A/B). **Nothing heard by ear yet** — the owner is
+testing it all at once. The iPad is still on v2.34.0.
+
+**Problems / open:**
+- `DelayLine::read` interpolates fractional delays backwards (SOF-60): small jumps in
+  Repitch glides; the feedback cycle runs one sample long. Not fixed.
+- Motion's CPU on the iPad not measured (filters recomputed while Cutoff/Reso move).
+- iPad installs refuse while the iPad is locked; screenshots need the Mac unlocked, and
+  the standalone's window can open off-screen (find it with CGWindowList `.optionAll`).
+
+**Next session:** fold in the owner's hand-test notes, then fix SOF-60 (own version +
+A/B). **Estimated next task:** SOF-60.
+
+**How things were checked (reuse):** an A/B test renders 21 cases (every mode, colour
+routing, channel mode, curve, self-oscillation, mode switching) on a worktree of HEAD
+and on the working tree, compared byte for byte; click tests compare the sharpest
+second difference against held baselines, each with a control that disables the fix.
+Previews: `AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern`
+(params can't be set by token: flip a default, build, shoot, restore).
+
+## PRIOR STATE — v2.27.0 · 2026-07-14 · branch `nice-plug-port`
 
 **The plugin is απόηχος / Afterecho** (display name; the `mooltitwap` crate/folder
 rename is deferred — see TASKS). It runs as **VST3 + CLAP on desktop AND as a real AUv3
@@ -13,8 +43,8 @@ on the physical iPad** (Bussien team `6ABFQC732N`, bundle `com.tlkm.afterecho`).
 v2.27.0 is installed to `~/Library/Audio/Plug-Ins` (CLAP+VST3) and pushed+launched
 on the iPad.
 > **All of §1–§11 far below predate v2.18** and describe the nih-plug era; trust
-> ARCHITECTURE.md + DECISIONS.md for anything structural. This CURRENT STATE block +
-> DECISIONS.md are the source of truth for v2.18→v2.27.
+> ARCHITECTURE.md + DECISIONS.md for anything structural. This block + DECISIONS.md
+> were the source of truth for v2.18→v2.27.
 
 ### What changed 2026-07-14 (v2.25.0 → v2.27.0)
 All editor/UX; no DSP changes. **Still desktop-screenshot-verified only** — the iPad

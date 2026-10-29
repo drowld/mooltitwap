@@ -1,77 +1,38 @@
-# TASKS — mooltitwap
-_State & detail live in docs/HANDOFF.md. This is the live todo list (role.md format)._
+# TASKS — mooltitwap (Afterecho)
+_State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDESIGN_PLAN.md. Branch `ui/scope-first`, local commits only (push on major milestones, owner's call)._
 
 ## In Progress
-- **Phase 4, new functions** (order agreed 2026-10-28): Loop tone → Freeze → Ducking → Pattern tools → Euclidean (Swing still to decide) → Motion. See docs/REDESIGN_PLAN.md Phase 4.
-- **Motion (v2.39.0)** — one source (Sine, Tri, Ramp, Square, S&H, Glide, Env) moves every tap's Pan, Gain, Cutoff and Reso around their set values; Rate follows Time's Sync (locks to the song in Sync); Scatter spreads phases; the field shows taps moving (set values as rings). Built, 56 tests pass, all-depths-0 bit-identical to v2.38.0, checked on screen. NEXT: owner's hand test; measure CPU on iPad with Cutoff/Reso moving. Linear SOF-83. See DECISIONS.md 2026-10-29.
-- **Euclid + Swing (v2.38.0)** — Steps/Rotate with a ring in the Shape pad's place (drag round to rotate), taps beyond Steps silent, Auto cycle = the whole pattern; Swing 50–75 % under L/R (Lin and Euclid). Built, 47 tests pass, Lin/straight bit-identical to v2.37.0, checked on screen (Wide, Tall, light). NEXT: owner's hand test. Linear SOF-82. See DECISIONS.md 2026-10-29.
-- **Pattern tools (v2.37.0)** — "Taps" menu (Alternate (again = flip), Ramp down, Ramp up, Random (again = re-roll), two-pin Range per axis, Reset, Undo); Y list down the field's left: Pan, Gain, Cutoff, Reso, Type; engine per-tap glides + type crossfade. Built, 43 tests pass, nothing-moving bit-identical to v2.36.0. NEXT: screenshots (screen was locked), then owner's hand test. Linear SOF-69. See DECISIONS.md 2026-10-29.
-- **Ducking (v2.36.0)** — Duck (Off → 24 dB) and Release (50 ms → 2 s) in the Output card: the echoes dip while you play, keyed from the dry input (linked, before In), only the wet; live dip on the Duck knob. Built, 39 tests pass, off is bit-identical to v2.35.0. Installed on desktop 2026-10-29 (iPad skipped). NEXT: owner's hand test. Linear SOF-68. See DECISIONS.md 2026-10-29.
-- **Freeze (v2.35.0)** — header button holds the current loop at exactly 100 % (input kept out, Feedback/Curve/loop colour bypassed, length latched in whole samples); 20 ms fades; not in presets or A/B; the Echo lane shows the hold. Built, 35 tests pass, off is bit-identical to v2.34.0. Installed on desktop 2026-10-29; iPad skipped for now (it still has v2.34.0). NEXT: owner's hand test. Linear SOF-59. See DECISIONS.md 2026-10-29.
-- **Loop tone (v2.34.0)** — one Tone knob in the lane's Loop row (LP 20 kHz→600 Hz left, HP 20 Hz→1 kHz right, off at centre), in both loops. Committed `8d99907`, installed desktop + iPad 2026-10-28. NEXT: owner's by-ear test. Linear SOF-58. See DECISIONS.md 2026-10-28.
-- **v2.30–v2.33.2 committed** as checkpoint `66cb842` (local, not pushed). v2.33.2 installed on desktop + iPad 2026-10-28 (iPad launch refused while locked: open Afterecho once so hosts see it).
-- **v2.33.2** — Time & taps no longer moves when L/R splits (Time always three rows). Installed.
-- **v2.33.1** — breathing room around dividers, Bars tap-to-select / double-tap-to-mute, preset browser in the new look. Installed.
-- **New look + spacing (v2.33.0)** — Mono/Paper, soft corners, underlined choices, ink controls, Time | Pattern grouping, 36 px knobs, field fits the pattern. Built, unit tests pass, screenshots dark + light. NEXT: second spacing pass (tall Time group loose; owner says spacing still not perfect), then hand test on desktop + iPad. See DECISIONS.md 2026-10-28.
-- **Ping bounces a mono source (v2.32.0)** — built and unit-tested (bounce, panned taps, M/S, self-oscillation, click-free mode switches; Mix/Diffuse/colour/M/S render the same as v2.31). NEXT: owner's by-ear test in a DAW, then install on desktop + iPad when asked. See DECISIONS.md 2026-10-28.
-- **iPad/AUv3 build path OPEN (v2.18.0)** — runs fullscreen on the iPad Pro 11 simulator as a real AUv3. Build+install: `cargo nice-plug bundle-ios mooltitwap` (booted sim, ad-hoc, no creds). Config: `impl AuPlugin` + `nice_export_auv3!` in lib.rs, `bundler.toml` at workspace root, target-cfg deps in Cargo.toml (iOS=auv3 / no standalone / no opengl), main.rs iOS-stubbed. **INSTALLED on the physical iPad (com.tlkm.afterecho, team 6ABFQC732N).** Reusable path in DECISIONS.md 2026-07-11: xcodegen mint project at `scratchpad/afmint/` → `xcodebuild -allowProvisioningUpdates` → `cargo nice-plug bundle-ios mooltitwap --device`. Free-team profiles expire ~2026-07-18 → re-mint then. First launch: unlock iPad + trust developer (Settings ▸ General ▸ VPN & Device Management). NEXT: hand-test true multitouch on the hand-painted pan/gain tracks + knob_rt in an AU host (AUM/Cubasis/GarageBand)
-- **απόηχος v3 port — PAN page preview shipped (v2.18.0)**: new `src/gui_v3.rs` behind `gui.rs::V3_PREVIEW=true` (flip false → v2.17 editor returns intact). Canvas 1194×834 (Figma ÷2), light theme seeded, all PAN-page controls live (left panel, stems viz, XY pads, scroll rows w/ full-cell mute hits + hand-painted pan sliders). Owner round-2 feedback applied: 48px knobs, per-cell centered chips, inactive taps HIDDEN not dimmed, pads centered, **NEW `sync_r` param** — per-channel L/R sync (DSP `base_time_seconds_mode` + viz updated; R follows L when time-linked, chip disabled). Round 3: custom `v3_button` to Figma spec (49×27, r8, full-cell hits) replaces epo chips. Round 4: tabs now use the KIT's `epo::card_tabs` (cumulus-style, proper size — my hand-painted chips were wrong); **FILTER page shipped as 2-up squared blocks** (## / type / slope chips + CUT & Q sliders, 8 scrolling rows, normalized API for skewed cutoff/Q); tap rows tightened pitch 54→50. Desktop bundle FILENAME is now `Afterecho.*` (bundler.toml name) but Plugin::NAME + VST3/CLAP IDs unchanged → DAW still shows "Mooltitwap", sessions intact; stale mooltitwap.vst3/clap removed from install dir. NOT yet in v3: SPACE page (XFEED+DIFFUSE merged), hamburger menu contents, preset pill interaction, resize grip, Grid view, Plugin::NAME rename. v2 editor has NO Sync-R control (param defaults Free = old behavior). Round 5: FILTER CUT/Q now KNOBS (were sliders) matching Figma; tap rows tightened 50→46; renamed to Afterecho (display). ("DELAY spacing" confusion resolved — owner meant the tap rows, done.)
-
-## Rename to Afterecho (in progress)
-- [x] Display rename: `Plugin::NAME`→"Afterecho", CLAP desc, bundle files Afterecho.* (IDs kept → sessions safe)
-- [ ] DEFERRED coordinated rename: struct `Mooltitwap`, crate/folder `mooltitwap`, `bundle mooltitwap` cmds, bundler.toml `[mooltitwap]`, docs, git. Invasive — owner flagged folder rename as a problem. Do as one careful pass
-- [ ] Consider whether to also change VST3_CLASS_ID/CLAP_ID (NO unless we accept breaking every existing session)
-
-## ⭐ NEXT PHASE — custom multitouch GUI (owner-directed, like cumulus)
-- [ ] Convert v3's single-pointer `ui.interact` elements to raw-touch so 2+ fingers work at once on iPad. Kit plumbing exists: `epo::tap_touch(ui, hit_rect, id)` (one-finger tap), `epo::knob_rt` (raw-touch knob), iOS touch dispatch in nice-plug-egui `editor_ios.rs`. Targets: `v3_button` (all chips/toggles/mute pills/A-B) → tap_touch; hand-painted PAN/GAIN tracks + FILTER/SPACE need a raw-touch horizontal-slider helper (claim a finger, drag X — mirror knob_rt); XY SHAPE pads → raw-touch claim (both at once). Study cumulus editor.rs (uses tap_touch/raw-touch pervasively). Already multitouch: all knobs (knob_ex→knob_rt), preset_slot, card_tabs.
-
-## v3 — preset palette shipped (hand-test next)
-- [x] Tag field now validates on Return/tap-away (was: soft-keyboard Enter never reached the global key read → tags never committed). Fixed via TextEdit `lost_focus()`, Esc still cancels
-- [x] Card tags (DELAY/STEMS/SHAPE) fill PAPER (page bg) so they fade into the backdrop; A/B gap widened (~22px) so they don't read as joined
-- [x] Full spotlight preset palette ported (src/palette_v3.rs): search, ALL/FAV/RECENT, save-as/rename/delete/fav/tags, keyboard + footer keycaps. Header pill = epo::preset_slot
-- [ ] HAND-TEST the palette: save a preset (disk icon), load (click/Enter), rename (✎), delete (✕✕), favorite (star), add/remove tag, ◀/▶ step, dirty * appears on edit. Desktop + iPad
-- [ ] Dark mode: toggle DARK/LIGHT (sun or menu), switch SHADE COOL/WARM/INK in the menu — confirm on iPad
-- [ ] A/B now 31×27 w/ gap — confirm placement reads right
-
-## v3 — hand-test on iPad (touch mode now ON)
-- [ ] Tab TEXT −/+ now resizes tabs on iPad (touch fix) — confirm it works + pick a good default size
-- [ ] Cutoff→20 Hz knob lock: likely fixed by touch/raw-touch switch — CONFIRM on device
-- [ ] A/B compare: tweak A, tweak B, toggle to confirm recall (logic sound, not tested live)
-- [ ] Raw-touch knobs feel (all knobs switched to knob_rt on iPad) + 44pt hit floors
-
-## Deferred design passes
-- [ ] DARK MODE for v3 — apply Epoché dark palette (see `y-flanger/design/dark-modes.html`: Warm graphite ★ foundation + leveled accents). v3 currently light-only
-- [ ] v3: preset-pill wiring (prev/next/save), resize grip, Grid view, fuller hamburger menu (theme/font/zoom like v2)
-- [x] v3 SPACE page (XFEED+DIFFUSE merged) — done; hamburger menu exists w/ TAB TEXT + theme
-
-## Open questions (owner)
-- SATURATION (soft clip): owner unsure it's needed — kept for now, decide during the redesign
-- Feedback / FB TIME UX feels unintuitive to the owner — redesign discussion pending
-- XFEED + DIFFUSE value formatting (percent readouts) — deprioritized by owner
+- [ ] **Owner hand test of Phase 4 (v2.34–v2.39)** on desktop, all at once: Loop tone, Freeze, Ducking, Pattern tools (+ Reso/Type axes), Euclid + Swing, Motion; plus Ping (v2.32) and the new look (v2.33) by ear/hand. Installed 2026-10-29, committed `b88320d`. Built + unit/A-B tested; nothing heard by ear yet. Linear SOF-57.
 
 ## Next
-- [ ] **Fix fractional delay reads (found 2026-10-29)** — `DelayLine::read` interpolates fractional delays backwards (`read(10.25)` returns 9.75 samples back, then jumps 2 samples at each whole one), so gliding delays (Repitch, taps and the feedback head) get small jumps; the feedback cycle also runs one sample long. Changes the sound of glides: its own version, with an A/B. Linear SOF-60. See DECISIONS.md 2026-10-29.
-- [ ] **← NEXT UP:** DAW hand-test v2.17.5 (one pass covers .3/.4/.5): taller tap rows + scroll, stepped values drag feel (steps quantize host automation — if 0.1 dB GAIN feels notchy, switch to display-only formatting), wobble gone, Sync caption BARS/BEATS
-- [ ] ECHO strip (feedback footer redesign, sketch agreed 2026-07-11): CYCLE segmented AUTO/FREE/SYNC replaces LOCK + right-click; FEEDBACK readout "−X dB/repeat · ~N echoes" + red >100% arc zone; dashed cycle marker in Stems viz. UI-only — `feedback_time_locked`+`feedback_time_mode` already encode the states
-- [ ] DAW hand-test v2.17.4 viz fixes: drag a tap in GRID (ball tracks pointer AND audio lands on the shown gridline), snap lands on base-time multiples, mute the last tap / offset a tap with FB locked and check echoes still align, PING at 0% crossfeed must not alternate sides
-- [ ] Ghost/arrow indicator for taps clamped at the viz right edge (out-of-range) — deferred from v2.17.4
-- [ ] DAW hand-test v2.17.3 in Ableton by ear/waveform — esp. the reshaped layout (in-card footer drag targets: TAPS drag/scroll, FB TIME unlock+drag; SHAPE link; per-tap mute), preset browser open→click-outside→reopen, XFEED/DIFFUSE knobs, and resize/zoom (aspect-lock at 1080×660) — verified by code + screenshot, not live
-- [ ] Layout polish nits if any read off in the DAW: left-panel chip rows are hug-width (not full-width segmented like v2.15 — kept epo chip style); FILTER row is dense at RIGHT_W=284
-- [ ] Merge `nice-plug-port` → `main` once hand-tested (decision left to owner)
-- [ ] Ducker (sidechain envelope follower) — optional; Wobble itself was removed in v2.17.5, left-panel space is free
-- [ ] Preset browser polish: tags / search / delete / rename / favorites (MVP only ships prev-next + save-as)
-- [ ] **απόηχος / Afterecho redesign port** (owner's Figma "Mooltitwap" file, canvas 2388×1668 @2x = iPad Pro 11, ratio 1.432): new columns 490/1032/758 + 24px gutters, tap rows h100/pitch108 w/ scroll fade, FILTER blocks h245, taps-count as slider. IMPLEMENTATION NOTES — touch-correctness is code-side, the Figma file needs NO further edits (owner decision 2026-07-11): menu items render 96px tall (mockup shows 47), tab strip becomes discrete chips w/ padded hits, row-leading tap pill gets a full-cell (130×100) hit area — interact on the cell rect, paint the pill; rename touches plugin name + CLAP/VST3 IDs + preset folder
-- [ ] Verify Fade mode thoroughly with feedback interaction
-- [ ] Implement real Euclidean rhythm spacing
+1. [ ] **Fix fractional delay reads** (found 2026-10-29): `DelayLine::read` interpolates backwards (2-sample jump at each whole sample) → small jumps in Repitch glides; feedback cycle runs 1 sample long. Changes glide sound: own version + A/B. Linear SOF-60.
+2. [ ] Fold in the hand-test feedback. Linear SOF-84.
+3. [ ] iPad: install v2.39.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving. Linear SOF-85.
+4. [ ] Second spacing pass (owner: "spacing still not perfect"; Tall Time group loose). Linear SOF-86.
+5. [ ] Restyle the Settings menu to the new look (still old epo chips). Linear SOF-87.
+6. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
+7. [ ] Retire the old editors: `gui.rs` v2 drawing, `gui_v3.rs`, `palette_v3.rs` glue, `V3_PREVIEW` (Phase 3). Linear SOF-89.
+8. [ ] Phase 5: hosts (AUM, Drambo, Logic iPad, Cubasis; Ableton, Reaper, Bitwig, FL; pluginval), release list (bundle IDs, App Group, 60 fps cap), licences (RE-DEEMER notice, GPL vs Soft Systems plan). Linear SOF-90.
+9. [ ] Verify Fade mode thoroughly with feedback interaction. Linear SOF-91.
+10. [ ] Coordinated rename to Afterecho (struct, crate/folder, bundler key, docs; IDs stay unless owner accepts broken sessions). Linear SOF-92.
+- Later (after release): 32 taps. Linear SOF-93 (Backlog).
+
+## Open questions (owner)
+- Keep SATURATE?
+- Rename the Linear project "Mooltitwap" → "Afterecho"?
+- Merge / push `ui/scope-first` (owner's call).
+
+## Blocked
+- iPad installs: devicectl refuses while the iPad is locked or "not unlocked recently" — unlock first.
 
 ## Done (recent)
-- [x] v2.17.6 — FILTER tab two-line rows: chips (mute/type/slope) on top, full-width CUTOFF + Q sliders below; un-cramps the old 5-control row at RIGHT_W=284
-- [x] v2.17.5 — Wobble removed entirely (params+DSP+UI; Ducker NOT built), per-tap rows taller + scrollable, per-tap value steps (PAN ±100/1, GAIN 0.1 dB, CUTOFF 1 Hz, Q 0.1 max 12), Stems axis headroom 2×→1.1×, Sync caption in BARS/BEATS (was "64/1"-style raw beats). See DECISIONS.md 2026-07-11
-- [x] v2.17.4 — viz now mirrors DSP: time_offset unit fix (span not range — timeline/drag/snap/cross-view all agree), echo cycle uses the DSP's true cluster span (offsets+mutes+in-range, 10 ms floor), Grid caption shows its own axis range, ping-pong viz is the exact (1+dᵏ)/2 blend gated on crossfeed. Position/time math single-sourced in topology.rs (gui.rs::compute_positions deleted). See DECISIONS.md 2026-07-11
-- [x] v2.17.3 — full layout parity with v2.15 body geometry: card widths 224/284, window 660, CARD_BODY_H 564, footer moved back inside the right card, LEFT panel rebuilt on the v2.15 section rhythm + dividers, CENTER viz/shaping split inverted (tall viz again), SHAPE-link column 56px. See DECISIONS.md 2026-07-10
-- [x] v2.17.2 — UI placement parity vs pre-port v2.15: restored SHAPE link toggle + per-tap mute (2 dropped controls), preset-pill centering, hero-knob size, dB/crossfeed captions, SATURATION label, even 3-thirds footer (measured centering). See docs/UI_PARITY_AUDIT.md
-- [x] v2.17.1 — restored TAPS/FB-TIME editing, viz range adapts in sync+free, rounded pill bars, XFEED/DIFFUSE knobs, preset-browser z-order fix, footer un-clipped
-- [x] v2.17.0 — hamburger menu + persisted dark/light, aspect-locked resize grip, named preset system (src/presets.rs)
-- [x] v2.16.x — full editor rebuilt on epo widgets: cards, real stems/grid viz, XY pads, grid drag, per-tab gradient tap colors, FILTER/XFEED/DIFFUSE tabs
-- [x] **Framework port nih-plug → nice-plug + nice-plug-egui + epoche-ui** (egui 0.31→0.34); DSP modules unchanged
-- [x] Local git checkpoint of the whole v2.2–v2.15 working tree before the port (`be061d8` on main)
+- [x] v2.39.0 Motion: one source moves every tap's Pan/Gain/Cutoff/Reso (SOF-83)
+- [x] v2.38.0 Euclid (Steps, Rotate, ring) + Swing (SOF-82)
+- [x] v2.37.0 Pattern tools, Reso/Type Y axes, per-tap glides + type crossfade (SOF-69)
+- [x] v2.36.0 Ducking (SOF-68)
+- [x] v2.35.0 Freeze (SOF-59)
+- [x] v2.34.0 Loop tone (SOF-58)
+- [x] v2.33.0–2.33.2 new look (Mono/Paper, underlined choices, ink), spacing passes, Bars tap/double-tap mute, preset browser restyle, Time holds still on L/R split
+- [x] v2.32.0 Ping bounces a mono source (two loops, click-free mode switches)
+- [x] v2.30–2.31 Lock time, longer cycles, Tap tab, preset browser (`palette_scope.rs`), whole-sound presets, R taps drawn
+- _Older (v2.17–v2.29): see DECISIONS.md and git log._
