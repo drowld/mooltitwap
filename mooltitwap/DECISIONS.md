@@ -2,6 +2,44 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-28 · Loop tone: one Tone knob on the feedback (v2.34.0)
+
+The first Phase 4 function. Until now nothing filtered the loop unless Tape,
+Diffuse or Saturate was routed to it, so repeats stayed as bright as the first
+pass. The owner approved one knob in the lane's Loop row, beside Curve.
+- **One bipolar knob, as Tide's FB tilt:** left of centre a low-pass darkens
+  each repeat (20 kHz → 600 Hz), right of centre a high-pass thins it (20 Hz →
+  1 kHz), both exponential; the centre is off. It reads "LP 3.5 kHz",
+  "HP 140 Hz" or "Off". Rejected: separate low-cut and high-cut knobs. They
+  would do both at once, but they don't fit the Loop row without squeezing
+  Curve into a cycling pill, which the owner dislikes.
+- **One pole (6 dB/oct) per pass, so it adds up:** the n-th repeat has been
+  through n poles, as in a tape echo.
+- **Ranges are wider than Tide's** (low-pass 10 → 1.77 kHz, high-pass 40 →
+  320 Hz there): a flanger's loop goes round hundreds of times a second, a
+  delay's a few times, so each pass needs to do more.
+- **Off at the centre, bit for bit**, checked by rendering 21 cases (every
+  mode, colour routing, channel mode and curve, self-oscillation, mode
+  switching) on v2.33.2 and v2.34.0: identical. A Tone of −0.01 changes them,
+  so the comparison can see the knob.
+- **The centre never jumps.** Both filters always run, each parked at its end
+  of the range while the other side is used, and within 0.1 of the centre the
+  filtered signal is blended in. Tide switches straight from off to a
+  10 kHz low-pass or a 40 Hz high-pass; a one-pole high-pass still shifts a
+  bass note's phase by 10–20°, so that switch would click. The knob also
+  glides (a unit per 20 ms) so stepped automation doesn't click.
+- **Where it sits in the loop:** after Saturate and before the safety soft
+  clip, like a tape echo's playback losing highs after the tape saturates.
+  The soft clip stays the last stage and the only bound on the loop. No gain
+  compensation: the passband stays at unity, so feedback above 100 % still
+  self-oscillates (tested at both ends of the knob, in Mix and in Ping).
+- **Ping's bounce loop has its own tone filters**, as it has its own Diffuse
+  and Tape, so switching modes mid-tail stays click-free (tested dark and
+  thin). A loop that stops getting input keeps running 0.1 s so the filters
+  ring out.
+- In the tall shape, the lane's single control row gains a sixth column for
+  it.
+
 ## 2026-10-28 · Time & taps holds still when L/R splits (v2.33.2)
 
 Splitting L/R used to re-space the Time group from two rows to three, and the

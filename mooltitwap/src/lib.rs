@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use crate::delay::{ChannelTaps, DelayLine, SlewedTime};
 use crate::diffusion::Diffusion;
-use crate::filter::{soft_clip, PeakLimiter, Svf};
+use crate::filter::{soft_clip, LoopTone, PeakLimiter, Svf, ToneCoefs};
 use crate::params::{
     ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, PetalParams, TapeType, NUM_TAPS,
 };
@@ -34,22 +34,25 @@ fn s_curve(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// What the feedback path does to each pass (set per block): Diffuse, Tape
-/// and Saturate when they're routed to it.
+/// What the feedback path does to each pass: Diffuse, Tape and Saturate
+/// when they're routed to it (set per block), and the loop tone (which
+/// glides per sample).
 #[derive(Clone, Copy)]
 struct LoopColour {
     /// Diffuse depth when routed to the feedback path, else 0.
     diffuse: f32,
     tape: bool,
     sat: bool,
+    tone: ToneCoefs,
 }
 
 impl LoopColour {
     /// One pass through the loop's colour, then the soft clip that bounds it.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn apply(
         self, mut l: f32, mut r: f32, diff_l: &mut Diffusion, diff_r: &mut Diffusion, tape: &mut TapeDegrade,
-        sat: &impl Fn(f32) -> f32,
+        tone: &mut LoopTone, sat: &impl Fn(f32) -> f32,
     ) -> (f32, f32) {
         // DIFFUSE routing = Feedback: smear the recirculating signal so
         // each cluster repeat picks up more allpass density.
@@ -70,6 +73,10 @@ impl LoopColour {
             l = sat(l);
             r = sat(r);
         }
+        // Loop tone: after the drive, as a tape echo's playback loses highs
+        // after the tape saturates. Off (bit-exact) at the centre.
+        l = tone.process(&self.tone, 0, l);
+        r = tone.process(&self.tone, 1, r);
         // In-loop soft saturation (v2.18.2) — the ONLY thing bounding the
         // loop; there is deliberately NO gain compensation (project rule:
         // feedback paths must be allowed to self-oscillate). Headroomed
@@ -134,6 +141,11 @@ pub struct Mooltitwap {
     diff_odd: Diffusion,
     diff_even: Diffusion,
     tape_bounce: TapeDegrade,
+    /// The loop tone's filters, one set per loop (main L/R, bounce odd/even),
+    /// and the knob as it glides to the param (a unit per 20 ms).
+    tone_main: LoopTone,
+    tone_bounce: LoopTone,
+    tone_t: f32,
     /// Samples since the loop last became the bounce (saturating). A tap
     /// starts swinging once the first bounced repeat has reached it.
     ping_age: usize,
@@ -233,6 +245,9 @@ impl Default for Mooltitwap {
             diff_odd: Diffusion::new(),
             diff_even: Diffusion::new(),
             tape_bounce: TapeDegrade::new(48_000.0),
+            tone_main: LoopTone::default(),
+            tone_bounce: LoopTone::default(),
+            tone_t: 0.0,
             ping_age: usize::MAX,
             ping_live: 0,
             ping_since_off: usize::MAX,
@@ -346,6 +361,8 @@ impl Plugin for Mooltitwap {
         self.diff_odd.reset();
         self.diff_even.reset();
         self.tape_bounce.reset();
+        self.tone_main.reset();
+        self.tone_bounce.reset();
         self.ping_live = 0;
         self.ping_since_off = usize::MAX;
         self.ping_age = usize::MAX;
@@ -693,15 +710,30 @@ impl Plugin for Mooltitwap {
             self.xf_diffuse = diffuse_target;
         }
 
-        // What the feedback path does to each pass, in both loops. Diffuse and
-        // Tape have memory: a loop that stops getting input keeps running
-        // this long so they ring out.
-        let colour = LoopColour {
+        // The loop tone glides to the knob, a unit per 20 ms.
+        let tone_target = p.loop_tone.value();
+        if initial_snap {
+            self.tone_t = tone_target;
+        }
+        let tone_step = 1.0 / (0.02 * sr);
+
+        // What the feedback path does to each pass, in both loops. Diffuse,
+        // Tape and the tone have memory: a loop that stops getting input
+        // keeps running this long so they ring out (the tone's longest tail
+        // is its high-pass's, 8 ms at 20 Hz).
+        let mut colour = LoopColour {
             diffuse: if diffuse_routing == DiffuseRouting::Feedback { diffuse_amount } else { 0.0 },
             tape: degrade_on && degrade_routing == DiffuseRouting::Feedback,
             sat: sat_on && sat_routing == DiffuseRouting::Feedback,
+            tone: ToneCoefs::new(self.tone_t, sr),
         };
-        let ring_len = if colour.diffuse > 1e-4 || colour.tape { (3.0 * sr) as usize } else { 1 };
+        let ring_len = if colour.diffuse > 1e-4 || colour.tape {
+            (3.0 * sr) as usize
+        } else if tone_target != 0.0 || self.tone_t != 0.0 {
+            (0.1 * sr) as usize
+        } else {
+            1
+        };
         // Ping's lines are read (by the loop and the taps) while they may hold anything.
         let ping_read = self.ping_on || self.ping_share > 0.0 || self.ping_live > 0;
 
@@ -831,6 +863,11 @@ impl Plugin for Mooltitwap {
                 }
             };
 
+            if self.tone_t != tone_target {
+                self.tone_t += (tone_target - self.tone_t).clamp(-tone_step, tone_step);
+                colour.tone = ToneCoefs::new(self.tone_t, sr);
+            }
+
             // The main loop, while it has input or its colour rings out.
             let (mut fb_sat_l, mut fb_sat_r) = (0.0, 0.0);
             if b < 1.0 || self.main_quiet < ring_len {
@@ -844,6 +881,7 @@ impl Plugin for Mooltitwap {
                     if colour.tape {
                         self.tape.reset();
                     }
+                    self.tone_main.reset();
                 }
                 let mut fb_in_l = main_l * fb_gain;
                 let mut fb_in_r = main_r * fb_gain;
@@ -859,17 +897,25 @@ impl Plugin for Mooltitwap {
                     fb_in_l = fb_in_l * (1.0 - cf * w) + dl * cf * w;
                     fb_in_r = fb_in_r * (1.0 - cf * w) + dr * cf * w;
                 }
-                (fb_sat_l, fb_sat_r) =
-                    colour.apply(fb_in_l, fb_in_r, &mut self.diff_wet_l, &mut self.diff_wet_r, &mut self.tape, &sat);
+                (fb_sat_l, fb_sat_r) = colour.apply(
+                    fb_in_l,
+                    fb_in_r,
+                    &mut self.diff_wet_l,
+                    &mut self.diff_wet_r,
+                    &mut self.tape,
+                    &mut self.tone_main,
+                    &sat,
+                );
             }
 
-            // The bounce loop, the same way, with its own Diffuse and Tape.
+            // The bounce loop, the same way, with its own Diffuse, Tape and tone.
             let (mut odd_out, mut even_out) = (0.0, 0.0);
             if b > 0.0 || self.bounce_quiet < ring_len {
                 if self.bounce_quiet >= ring_len {
                     self.diff_odd.reset();
                     self.diff_even.reset();
                     self.tape_bounce.reset();
+                    self.tone_bounce.reset();
                 }
                 (odd_out, even_out) = colour.apply(
                     odd_in * fb_gain,
@@ -877,6 +923,7 @@ impl Plugin for Mooltitwap {
                     &mut self.diff_odd,
                     &mut self.diff_even,
                     &mut self.tape_bounce,
+                    &mut self.tone_bounce,
                     &sat,
                 );
             }
@@ -1167,18 +1214,22 @@ mod tests {
 
     #[test]
     fn ping_at_zero_width_sounds_like_plain_feedback() {
-        let run = |mode: f32| {
-            let mut plug = plugin(&[-0.6, 0.3, 1.0]);
-            set(&plug, "feedback", 0.8);
-            set(&plug, "crossfeed_mode", mode);
-            set(&plug, "crossfeed", 0.0);
-            set(&plug, "tap_filter_cutoff_2", 2000.0);
-            render(&mut plug, &click(0.4), |_, _| {})
-        };
-        let (mix, ping) = (run(0.0), run(PING));
-        let worst = mix.iter().zip(&ping).fold(0.0f32, |m, (a, b)| m.max((a.0 - b.0).abs()).max((a.1 - b.1).abs()));
-        let peak = mix.iter().fold(0.0f32, |m, s| m.max(s.0.abs()).max(s.1.abs()));
-        assert!(peak > 0.01 && worst < 1e-5 * peak / 0.01, "worst {worst:e}, peak {peak}");
+        // with the loop tone off, dark and thin: the bounce gets the same tone
+        for tone in [0.0, -0.5, 0.5] {
+            let run = |mode: f32| {
+                let mut plug = plugin(&[-0.6, 0.3, 1.0]);
+                set(&plug, "feedback", 0.8);
+                set(&plug, "crossfeed_mode", mode);
+                set(&plug, "crossfeed", 0.0);
+                set(&plug, "tap_filter_cutoff_2", 2000.0);
+                set(&plug, "loop_tone", tone);
+                render(&mut plug, &click(0.4), |_, _| {})
+            };
+            let (mix, ping) = (run(0.0), run(PING));
+            let worst = mix.iter().zip(&ping).fold(0.0f32, |m, (a, b)| m.max((a.0 - b.0).abs()).max((a.1 - b.1).abs()));
+            let peak = mix.iter().fold(0.0f32, |m, s| m.max(s.0.abs()).max(s.1.abs()));
+            assert!(peak > 0.01 && worst < 1e-5 * peak / 0.01, "tone {tone}: worst {worst:e}, peak {peak}");
+        }
     }
 
     #[test]
@@ -1198,21 +1249,25 @@ mod tests {
         }
     }
 
+    /// 50 ms of white noise, then silence, `secs` long.
+    fn noise_burst(secs: f32) -> Vec<(f32, f32)> {
+        let mut seed = 1u32;
+        (0..(SR * secs) as usize)
+            .map(|n| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let v = if n < 2400 { (seed >> 8) as f32 / 16_777_216.0 - 0.5 } else { 0.0 };
+                (v, v)
+            })
+            .collect()
+    }
+
     #[test]
     fn the_bounce_self_oscillates_and_stays_bounded() {
         let mut plug = plugin(&[0.0, 0.4]);
         set(&plug, "feedback", 1.05);
         set(&plug, "crossfeed_mode", PING);
         set(&plug, "crossfeed", 1.0);
-        let mut seed = 1u32;
-        let input: Vec<(f32, f32)> = (0..(SR * 3.0) as usize)
-            .map(|n| {
-                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                let v = if n < 2400 { (seed >> 8) as f32 / 16_777_216.0 - 0.5 } else { 0.0 };
-                (v, v)
-            })
-            .collect();
-        let out = render(&mut plug, &input, |_, _| {});
+        let out = render(&mut plug, &noise_burst(3.0), |_, _| {});
         // still going after 3 s (no gain compensation), and the loop itself
         // never passes the soft clip's ceiling
         let last = &out[out.len() - (SR / 2.0) as usize..];
@@ -1221,24 +1276,43 @@ mod tests {
         assert!(rms > 0.01 && lines <= 2.0, "rms {rms}, loop peak {lines}");
     }
 
-    #[test]
-    fn switching_modes_mid_tail_does_not_click() {
-        // A held low tone with a little spread through three spread taps,
-        // X-feed at 100 %: Mix → Ping → Diffuse → Ping → Mix, a second each,
-        // against the same tone held in one mode. The sharpest bend in the
-        // output (its second difference) is the click detector: a step
-        // shows up hundreds of times above the tone's own.
-        let f = 110.0;
-        let n = (SR * 5.0) as usize;
-        let input: Vec<(f32, f32)> = (0..n)
+    /// A held low tone (110 Hz, a little spread), five seconds.
+    fn held_tone() -> Vec<(f32, f32)> {
+        (0..(SR * 5.0) as usize)
             .map(|i| {
                 let t = i as f32 / SR;
-                let v = 0.2 * (t / 0.05).min(1.0) * (2.0 * PI * f * t).sin();
+                let v = 0.2 * (t / 0.05).min(1.0) * (2.0 * PI * 110.0 * t).sin();
                 (v, 0.6 * v)
             })
-            .collect();
-        // plain, then Diffuse and then Tape in the loop (both have memory)
-        for colour in [&[][..], &[("diffuse_routing", 1.0), ("diffuse_amount", 0.5)], &[("degrade_routing", 1.0), ("degrade_amount", 0.6)]] {
+            .collect()
+    }
+
+    /// The click detector: the sharpest bend in the output after its first
+    /// 0.3 s (the second difference) and where it is. A step shows up
+    /// hundreds of times above a low tone's own.
+    fn sharpest_bend(out: &[(f32, f32)]) -> (f32, usize) {
+        let d2 = |a: f32, b: f32, c: f32| (a - 2.0 * b + c).abs();
+        out[(0.3 * SR) as usize..].windows(3).enumerate().fold((0.0f32, 0), |(m, at), (i, w)| {
+            let v = d2(w[0].0, w[1].0, w[2].0).max(d2(w[0].1, w[1].1, w[2].1));
+            if v > m { (v, i) } else { (m, at) }
+        })
+    }
+
+    #[test]
+    fn switching_modes_mid_tail_does_not_click() {
+        // The held tone through three spread taps, X-feed at 100 %:
+        // Mix → Ping → Diffuse → Ping → Mix, a second each, against the same
+        // tone held in one mode.
+        let input = held_tone();
+        let n = input.len();
+        // plain, then Diffuse, Tape and the loop tone in the loop (all have memory)
+        for colour in [
+            &[][..],
+            &[("diffuse_routing", 1.0), ("diffuse_amount", 0.5)],
+            &[("degrade_routing", 1.0), ("degrade_amount", 0.6)],
+            &[("loop_tone", -0.6)],
+            &[("loop_tone", 0.6)],
+        ] {
             let sharpest = |schedule: [f32; 5]| {
                 let mut plug = plugin(&[-0.5, 0.7, 0.0]);
                 set(&plug, "feedback", 0.6);
@@ -1246,12 +1320,7 @@ mod tests {
                 for &(id, v) in colour {
                     set(&plug, id, v);
                 }
-                let out = render(&mut plug, &input, |s, plug| set(plug, "crossfeed_mode", schedule[s * 5 / n]));
-                let d2 = |a: f32, b: f32, c: f32| (a - 2.0 * b + c).abs();
-                out[(0.3 * SR) as usize..].windows(3).enumerate().fold((0.0f32, 0), |(m, at), (i, w)| {
-                    let v = d2(w[0].0, w[1].0, w[2].0).max(d2(w[0].1, w[1].1, w[2].1));
-                    if v > m { (v, i) } else { (m, at) }
-                })
+                sharpest_bend(&render(&mut plug, &input, |s, plug| set(plug, "crossfeed_mode", schedule[s * 5 / n])))
             };
             let held = [[0.0; 5], [PING; 5], [2.0; 5]].map(|s| sharpest(s).0).into_iter().fold(0.0, f32::max);
             let (switched, at) = sharpest([0.0, PING, 2.0, PING, 0.0]);
@@ -1262,5 +1331,104 @@ mod tests {
                 at as f32 / SR + 0.3
             );
         }
+    }
+
+    /// How the repeat around `ms` leans (−1 … +15 ms, left side): the energy
+    /// of its first difference (its top) over that of its 16-sample average
+    /// (its bottom). Lower is darker.
+    fn lean(out: &[(f32, f32)], ms: f32) -> f32 {
+        let c = (ms * 0.001 * SR) as usize;
+        let w: Vec<f32> = out[c - 48..c + 720].iter().map(|s| s.0).collect();
+        let top: f32 = w.windows(2).map(|p| (p[1] - p[0]).powi(2)).sum();
+        let bottom: f32 = w.windows(16).map(|p| (p.iter().sum::<f32>() / 16.0).powi(2)).sum();
+        top / bottom
+    }
+
+    #[test]
+    fn the_loop_tone_darkens_or_thins_every_repeat() {
+        // One tap at 20 ms and a 20 ms cycle: the taps' pass, then repeats
+        // that have been round the loop once, twice… Off, every repeat leans
+        // like the first pass; dark, each leans darker than the one before;
+        // thin, each brighter.
+        let run = |tone: f32| {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "feedback", 0.8);
+            set(&plug, "loop_tone", tone);
+            let out = render(&mut plug, &click(0.2), |_, _| {});
+            (0..5).map(|k| lean(&out, 20.0 + 20.0 * k as f32)).collect::<Vec<_>>()
+        };
+        // (each pass adds one pole, so each step is smaller than the last)
+        let (off, dark, thin) = (run(0.0), run(-0.6), run(0.6));
+        for k in 1..5 {
+            assert!((off[k] / off[0] - 1.0).abs() < 0.05, "off: {off:?}");
+            assert!(dark[k] < 0.8 * dark[k - 1], "dark: {dark:?}");
+            assert!(thin[k] > 1.05 * thin[k - 1], "thin: {thin:?}");
+        }
+    }
+
+    #[test]
+    fn the_loop_tone_leaves_the_taps_own_pass_alone() {
+        // No feedback, so nothing goes round: every tone sounds the same.
+        let run = |tone: f32| {
+            let mut plug = plugin(&[-0.3, 0.5]);
+            set(&plug, "feedback", 0.0);
+            set(&plug, "loop_tone", tone);
+            render(&mut plug, &noise_burst(0.3), |_, _| {})
+        };
+        let off = run(0.0);
+        assert!(off.iter().any(|s| s.0.abs() > 0.01));
+        for tone in [-1.0, 1.0] {
+            assert!(run(tone) == off, "tone {tone} changed the taps' own pass");
+        }
+    }
+
+    #[test]
+    fn the_loop_tone_still_lets_the_loop_self_oscillate() {
+        // Feedback past 1 with the tone at either end, in Mix and in Ping: the
+        // passband still gains, so the loop keeps going (no gain
+        // compensation) and stays under the soft clip's ceiling.
+        for mode in [0.0, PING] {
+            for tone in [-1.0, 1.0] {
+                let mut plug = plugin(&[0.0, 0.4]);
+                set(&plug, "feedback", 1.05);
+                set(&plug, "crossfeed_mode", mode);
+                set(&plug, "crossfeed", 1.0);
+                set(&plug, "loop_tone", tone);
+                let out = render(&mut plug, &noise_burst(3.0), |_, _| {});
+                let half = (SR / 2.0) as usize;
+                let last = &out[out.len() - half..];
+                let rms = (last.iter().map(|s| s.0 * s.0 + s.1 * s.1).sum::<f32>() / half as f32).sqrt();
+                // what went round over the last half second
+                let lines = if mode == PING {
+                    plug.ping_odd.buffer_peak().max(plug.ping_even.buffer_peak())
+                } else {
+                    (1..half).fold(0.0f32, |m, d| {
+                        m.max(plug.main_l.delay.read(d as f32).abs()).max(plug.main_r.delay.read(d as f32).abs())
+                    })
+                };
+                assert!(rms > 0.01 && lines <= 2.0, "mode {mode}, tone {tone}: rms {rms}, loop peak {lines}");
+            }
+        }
+    }
+
+    #[test]
+    fn turning_the_tone_does_not_click() {
+        // The held tone in the loop, the knob jumping 0 → −1 → +1 → −1 → 0 a
+        // second each (as stepped automation can), against it held at each.
+        let input = held_tone();
+        let n = input.len();
+        let sharpest = |schedule: [f32; 5]| {
+            let mut plug = plugin(&[-0.5, 0.7, 0.0]);
+            set(&plug, "feedback", 0.6);
+            sharpest_bend(&render(&mut plug, &input, |s, plug| set(plug, "loop_tone", schedule[s * 5 / n])))
+        };
+        let held = [[0.0; 5], [-1.0; 5], [1.0; 5]].map(|s| sharpest(s).0).into_iter().fold(0.0, f32::max);
+        let (switched, at) = sharpest([0.0, -1.0, 1.0, -1.0, 0.0]);
+        assert!(
+            switched < 1.5 * held,
+            "{:.1}× the held tone's sharpest bend, at {:.3} s",
+            switched / held,
+            at as f32 / SR + 0.3
+        );
     }
 }

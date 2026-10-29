@@ -1430,7 +1430,7 @@ fn lane(
         Stroke::new(1.0 * s, theme::line()),
     );
     let (curves, ctl, cols) = if l.lane_stacked {
-        (r(o, s, x, y + 40.0, w, 136.0), r(o, s, x + 14.0, y + 176.0, w - 28.0, h - 180.0), 5)
+        (r(o, s, x, y + 40.0, w, 136.0), r(o, s, x + 14.0, y + 176.0, w - 28.0, h - 180.0), 6)
     } else {
         (r(o, s, x, y + 40.0, 470.0, h - 40.0), r(o, s, x + 490.0, y + 44.0, w - 504.0, h - 48.0), 3)
     };
@@ -1490,9 +1490,9 @@ fn lane(
 
     // the loop's controls; Feedback and the cycle are the lane's own handles.
     // Under the curves they share one row; beside them, two (Cross, Loop).
-    let (c_xf, c_mode, c_curve) = if l.lane_stacked {
+    let (c_xf, c_mode, c_curve, c_tone) = if l.lane_stacked {
         let c = |col, span| cell_at(ctl, cols, 1, 0, col, span, s);
-        (c(0, 1), c(1, 2), c(3, 2))
+        (c(0, 1), c(1, 2), c(4, 2), c(3, 1))
     } else {
         let title_w = 52.0 * s;
         let cells = Rect::from_min_max(ctl.min + Vec2::new(title_w, 0.0), ctl.max);
@@ -1503,7 +1503,8 @@ fn lane(
         }
         let ym = (c(0, 0, 1).bottom() + c(1, 0, 1).top()) * 0.5;
         rule(&p, Pos2::new(ctl.left(), ym), Pos2::new(ctl.right(), ym), s);
-        (c(0, 0, 1), c(0, 1, 2), c(1, 0, 2))
+        // each row reads knob then selector, so the columns line up
+        (c(0, 0, 1), c(0, 1, 2), c(1, 1, 2), c(1, 0, 1))
     };
     // In Ping, X-feed is the bounce's width; Mono has no sides to bounce between.
     let ping = params.crossfeed_mode.value() == CrossfeedMode::PingPong;
@@ -1512,6 +1513,8 @@ fn lane(
     knob_cell(ui, c_xf, s, setter, &params.crossfeed, "crossfeed", xf_label, false, !(ping && mono), None, &mut sc.focus);
     enum_cell_ex(ui, c_mode, s, setter, &params.crossfeed_mode, "crossfeed_mode", "Mode", &["Mix", "Ping", "Diffuse"], &[true, !mono, true], &mut sc.focus);
     enum_cell(ui, c_curve, s, setter, &params.fb_curve, "fb_curve", "Curve", &["Natural", "Bloom", "Gate"], true, &mut sc.focus);
+    // Left darkens each repeat, right thins it, the centre is off.
+    knob_cell(ui, c_tone, s, setter, &params.loop_tone, "loop_tone", "Tone", true, true, None, &mut sc.focus);
 }
 
 /// The Tap tab: one tap's time, place, level and filter at once (v3's tap

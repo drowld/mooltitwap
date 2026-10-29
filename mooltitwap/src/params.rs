@@ -63,6 +63,37 @@ pub fn fb_div(norm: f32) -> (f32, &'static str) {
     }
 }
 
+/// The loop tone as its filter: "Off", "LP 3.5 kHz", "HP 140 Hz".
+pub fn tone_text(t: f32) -> String {
+    let (kind, hz) = match t {
+        t if t < 0.0 => ("LP", crate::filter::dark_hz(t)),
+        t if t > 0.0 => ("HP", crate::filter::thin_hz(t)),
+        _ => return "Off".into(),
+    };
+    if hz >= 1000.0 { format!("{kind} {:.1} kHz", hz / 1000.0) } else { format!("{kind} {hz:.0} Hz") }
+}
+
+/// Reads [`tone_text`] back ("off", "lp 3.5 khz", "hp 140", "HP 1k").
+pub fn tone_from_text(s: &str) -> Option<f32> {
+    let s = s.trim().to_ascii_lowercase();
+    if s == "off" {
+        return Some(0.0);
+    }
+    let (dark, rest) = match (s.strip_prefix("lp"), s.strip_prefix("hp")) {
+        (Some(r), _) => (true, r),
+        (_, Some(r)) => (false, r),
+        _ => return None,
+    };
+    let rest = rest.trim();
+    let (num, k) = if let Some(n) = rest.strip_suffix("khz").or(rest.strip_suffix('k')) {
+        (n, 1000.0)
+    } else {
+        (rest.strip_suffix("hz").unwrap_or(rest), 1.0)
+    };
+    let hz = num.trim().parse::<f32>().ok()? * k;
+    Some(crate::filter::tone_at(dark, hz))
+}
+
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum SpacingMode {
     #[id = "linear"]
@@ -336,6 +367,11 @@ pub struct PetalParams {
     /// Decay shape of the feedback repeats: Natural / Bloom / Gate.
     #[id = "fb_curve"]
     pub fb_curve: EnumParam<FbCurve>,
+    /// Loop tone (v2.34), on the feedback only: below 0 a low-pass darkens
+    /// each repeat, above 0 a high-pass thins it, 0 is off. See
+    /// `filter::LoopTone`.
+    #[id = "loop_tone"]
+    pub loop_tone: FloatParam,
 
     // ---- Filter ----
     #[id = "filter_type"]
@@ -591,6 +627,9 @@ impl Default for PetalParams {
             sat_routing: EnumParam::new("Saturate Routing", DiffuseRouting::Output),
 
             fb_curve: EnumParam::new("Feedback Curve", FbCurve::Natural),
+            loop_tone: FloatParam::new("Loop Tone", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
+                .with_value_to_string(Arc::new(tone_text))
+                .with_string_to_value(Arc::new(tone_from_text)),
 
             filter_type: EnumParam::new("Filter Type", FilterType::LowPass),
             filter_cutoff: FloatParam::new(
