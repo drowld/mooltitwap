@@ -976,10 +976,9 @@ pub(crate) fn compute_viz_data(params: &PetalParams, tempo_bpm: f32) -> VizData 
 /// GRID/STEMS editing views pass 1 (only the first repeat is ghosted there —
 /// reserving 4 squeezed the editable taps into the left edge).
 pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_cap: usize) -> VizData {
-    let n_active = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
-    let pos_l = compute_positions(params.spacing_mode.value(), params.shape_x_l.value(), params.shape_y_l.value(), n_active);
-    let pos_r = if params.shape_linked.value() { pos_l }
-        else { compute_positions(params.spacing_mode.value(), params.shape_x_r.value(), params.shape_y_r.value(), n_active) };
+    let n_active = params.taps_heard();
+    let pos_l = compute_positions(params.spacing(false), n_active);
+    let pos_r = compute_positions(params.spacing(true), n_active);
 
     let time_l_norm = params.base_time_l.value();
     let time_r_norm = if params.time_linked.value() { time_l_norm } else { params.base_time_r.value() };
@@ -1006,7 +1005,8 @@ pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_ca
     // active, in-range taps (offsets included); UNLOCKED = free, 10 ms floor
     // only (v2.18.2: the cluster-span floor is gone — in-loop saturation now
     // bounds short-cycle feedback instead).
-    let cluster_span_secs = topology::cluster_span_secs(&t_l, &t_r, &in_range, n_active);
+    let cluster_span_secs =
+        topology::cluster_span_secs(&t_l, &t_r, &in_range, n_active, params.pattern_secs(base_secs_l, base_secs_r));
     // Frozen, the loop keeps the length it had when the hold began (the audio
     // thread reports it; until it does, the params' cycle stands in).
     let frozen = params.freeze.value();

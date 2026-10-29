@@ -504,17 +504,12 @@ impl Plugin for Mooltitwap {
         let base_sec_l = p.base_time_seconds(time_l_norm, tempo_bpm);
         let base_sec_r = PetalParams::base_time_seconds_mode(p.sync_mode_r_eff(), time_r_norm, tempo_bpm);
 
-        let n_active = (p.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+        // the taps heard (Euclid places one per step at most)
+        let n_active = p.taps_heard();
 
-        // Topology — XY pad shape + spacing per channel
-        let mode = p.spacing_mode.value();
-        let shape_linked = p.shape_linked.value();
-        self.topology_l.compute(mode, p.shape_x_l.value(), p.shape_y_l.value(), n_active);
-        if shape_linked {
-            self.topology_r.compute(mode, p.shape_x_l.value(), p.shape_y_l.value(), n_active);
-        } else {
-            self.topology_r.compute(mode, p.shape_x_r.value(), p.shape_y_r.value(), n_active);
-        }
+        // Topology — spacing per channel (each side's own Shape pad when unlinked)
+        self.topology_l.compute(p.spacing(false), n_active);
+        self.topology_r.compute(p.spacing(true), n_active);
 
         let pos_l = *self.topology_l.positions();
         let pos_r = *self.topology_r.positions();
@@ -723,7 +718,7 @@ impl Plugin for Mooltitwap {
         // ugly "feedback racing the taps" wash the user described).
         // Shared with gui.rs::compute_viz_data so echo bars land where the audio does.
         let cluster_span_samples =
-            topology::cluster_span_secs(&t_secs_l, &t_secs_r, &tap_in_range, n_active) * sr;
+            topology::cluster_span_secs(&t_secs_l, &t_secs_r, &tap_in_range, n_active, p.pattern_secs(base_sec_l, base_sec_r)) * sr;
         let fb_time_target = if p.feedback_time_locked.value() {
             cluster_span_samples
         } else {
@@ -1963,4 +1958,24 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn euclid_loops_on_the_whole_pattern() {
+        // 3 taps over 8 steps of 20 ms, turned a step: taps on steps 1, 4 and
+        // 7 (20, 80, 140 ms). Auto loops on all 8 steps (160 ms), not on the
+        // last tap; the page draws the same cycle. Taps past the steps are
+        // silent.
+        let mut plug = plugin(&[0.0, 0.0, 0.0]);
+        set(&plug, "spacing_mode", 3.0);
+        set(&plug, "euclid_steps", 8.0);
+        set(&plug, "euclid_rotate", 1.0);
+        render(&mut plug, &click(0.05), |_, _| {});
+        let cycle = plug.fb_time_slew.current() / SR;
+        assert!((cycle - 0.16).abs() < 1e-4, "cycle {cycle} s");
+        let viz = crate::gui::compute_viz_data_ex(&plug.params, 120.0, 3);
+        assert!((viz.fb_cycle_norm * viz.grid_range_secs - 0.16).abs() < 1e-4);
+        set(&plug, "num_taps_active", 12.0);
+        assert_eq!(plug.params.taps_heard(), 8);
+    }
 }
+

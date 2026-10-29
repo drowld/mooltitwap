@@ -255,6 +255,17 @@ pub struct PetalParams {
 
     #[id = "spacing_mode"]
     pub spacing_mode: EnumParam<SpacingMode>,
+    /// Euclid (v2.38): the pattern's length in Time-knob steps; the taps
+    /// spread over them as evenly as possible (see `topology::euclid_steps`).
+    #[id = "euclid_steps"]
+    pub euclid_steps: IntParam,
+    /// Euclid: the pattern turned this many steps against the dry note.
+    #[id = "euclid_rotate"]
+    pub euclid_rotate: IntParam,
+    /// Swing (v2.38), 0.5 straight … 0.75: taps on odd steps land late, in
+    /// Lin and Euclid.
+    #[id = "swing"]
+    pub swing: FloatParam,
     #[id = "shape_x_l"]
     pub shape_x_l: FloatParam,
     #[id = "shape_y_l"]
@@ -533,6 +544,17 @@ impl Default for PetalParams {
             time_linked: BoolParam::new("Time Link", true),
 
             spacing_mode: EnumParam::new("Spacing", SpacingMode::Linear),
+            euclid_steps: IntParam::new("Euclid Steps", 16, IntRange::Linear { min: 2, max: NUM_TAPS as i32 }),
+            euclid_rotate: IntParam::new("Euclid Rotate", 0, IntRange::Linear { min: 0, max: NUM_TAPS as i32 - 1 }),
+            swing: FloatParam::new("Swing", 0.5, FloatRange::Linear { min: 0.5, max: 0.75 })
+                .with_value_to_string(Arc::new(|v| if v < 0.505 { "Straight".into() } else { format!("{:.0} %", v * 100.0) }))
+                .with_string_to_value(Arc::new(|s| {
+                    let s = s.trim().to_ascii_lowercase();
+                    if s == "straight" {
+                        return Some(0.5);
+                    }
+                    s.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| if v > 1.0 { v / 100.0 } else { v })
+                })),
 
             shape_x_l: FloatParam::new("Shape X L", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(20.0)),
@@ -740,6 +762,42 @@ impl Default for PetalParams {
 
 // ─── Time conversion helpers ──────────────────────────────────────────────
 impl PetalParams {
+    /// How the taps spread on one side: the mode, that side's Shape pad (the
+    /// left one while they're linked), Euclid's steps and rotation, swing.
+    pub fn spacing(&self, right: bool) -> crate::topology::Spacing {
+        let (x, y) = if right && !self.shape_linked.value() {
+            (&self.shape_x_r, &self.shape_y_r)
+        } else {
+            (&self.shape_x_l, &self.shape_y_l)
+        };
+        crate::topology::Spacing {
+            mode: self.spacing_mode.value(),
+            shape_x: x.value(),
+            shape_y: y.value(),
+            steps: self.euclid_steps.value() as usize,
+            rotate: self.euclid_rotate.value() as usize,
+            swing: self.swing.value(),
+        }
+    }
+
+    /// The taps heard: Euclid places at most one per step, and any more stay
+    /// silent (v2.38).
+    pub fn taps_heard(&self) -> usize {
+        let n = (self.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+        if self.spacing_mode.value() == SpacingMode::Euclidean { n.min(self.euclid_steps.value() as usize) } else { n }
+    }
+
+    /// The whole pattern's length, the shortest the Auto cycle may be: in
+    /// Euclid, its steps on the longer side's grid, so the rhythm loops on
+    /// the pattern even when its last tap lands early. 0 otherwise.
+    pub fn pattern_secs(&self, base_l: f32, base_r: f32) -> f32 {
+        if self.spacing_mode.value() == SpacingMode::Euclidean {
+            self.euclid_steps.value() as f32 * base_l.max(base_r)
+        } else {
+            0.0
+        }
+    }
+
     /// Convert a base-time param value (0..1) to seconds, depending on sync mode and tempo.
     /// Effective sync mode for the R channel: follows L while time is linked.
     pub fn sync_mode_r_eff(&self) -> SyncMode {

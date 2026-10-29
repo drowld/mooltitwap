@@ -2,6 +2,41 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-29 · Euclidean spacing and Swing (v2.38.0)
+
+The fifth Phase 4 function, built as proposed and approved by the owner; it
+answers the plan's open Swing question (yes, with Euclid).
+- **Euclid is real now** (it was a copy of Lin): Steps (2–16, in Time-knob
+  steps) and Rotate; the Taps knob's taps spread over the steps as evenly as
+  possible, E(k, n) by Bresenham's spread (`topology::euclid_steps`). The dry
+  note is step 0, so a tap that lands there sounds at step n, the next
+  pattern's start (as Lin's last tap does). 3 of 8 gives the tresillo, 4 of
+  16 four on the floor.
+- **Taps beyond Steps are silent** (`PetalParams::taps_heard`, shared by the
+  engine, the Echo lane and the page, which hides them); the ring says how
+  many ("of 8 · 4 silent"). Rejected: keeping Steps ≥ Taps, which couples two
+  knobs and fights automation.
+- **In Auto the cycle is the whole pattern** (Steps × Time, the longer side
+  when L/R is split) through a floor on the cluster span
+  (`PetalParams::pattern_secs`), so a turned pattern whose last tap lands
+  early still loops on its length.
+- **The ring replaces the Shape pad in Euclid** (the pad has nothing to shape
+  there): the steps round a circle, the dry note's step ringed at the top,
+  the taps as dots in their colours, "5 of 16" in the middle, Steps and
+  Rotate knobs under it. Dragging round the ring turns the pattern; the
+  angle travelled counts in steps, past a whole turn too.
+- **Swing**, 50 % (Straight) to 75 % as on an MPC: a tap on an odd step (the
+  "e" of each beat) lands late by (2·swing − 1) of a step. In Lin that's
+  every other tap, moved toward the next one by that share of their gap, so a
+  bent Shape still swings. Lin and Euclid only; greyed in Exp and Log, which
+  have no grid. It sits in the Time group's slot under L/R, which nothing else
+  uses, so nothing on the card moves.
+- **Straight changes nothing:** with Swing at 50 % and Lin, the 21-case
+  comparison with v2.37.0 is bit-identical. Presets saved with Euclid picked
+  (which sounded like Lin) now sound Euclidean.
+- Steps stop at 16 because the tap grid is 16 × Time; longer patterns come
+  with the deferred 32-tap update (or use a longer Time).
+
 ## 2026-10-29 · Pattern tools, Reso and Type on the field, per-tap glides (v2.37.0)
 
 The fourth Phase 4 function, built from the second interactive mock the owner

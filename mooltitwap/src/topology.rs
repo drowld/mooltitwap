@@ -19,18 +19,13 @@ pub struct TopologyEngine {
 impl TopologyEngine {
     pub fn new() -> Self {
         let mut e = Self { positions: [0.0; NUM_TAPS] };
-        e.compute(SpacingMode::Linear, 0.0, 0.0, NUM_TAPS);
+        e.compute(Spacing::LINEAR, NUM_TAPS);
         e
     }
 
-    /// Recompute tap positions.
-    ///
-    /// `shape_x` [-1, 1] biases density toward earlier (< 0) or later (> 0) taps.
-    /// `shape_y` [0, 1] morphs linear → sigmoid distribution.
-    /// `n_active` — the number of live taps; positions [0..n_active) are anchored
-    /// to [1/N, n_active/N]; positions [n_active..NUM_TAPS) continue linearly.
-    pub fn compute(&mut self, mode: SpacingMode, shape_x: f32, shape_y: f32, n_active: usize) {
-        self.positions = compute_positions(mode, shape_x, shape_y, n_active);
+    /// Recompute tap positions (see [`compute_positions`]).
+    pub fn compute(&mut self, spacing: Spacing, n_active: usize) {
+        self.positions = compute_positions(spacing, n_active);
     }
 
     /// Tap positions, normalized.
@@ -44,14 +39,78 @@ impl Default for TopologyEngine {
     fn default() -> Self { Self::new() }
 }
 
+/// How the taps spread: the mode, the Shape pad (`shape_x` [-1, 1] biases
+/// density toward earlier or later taps, `shape_y` [0, 1] morphs linear →
+/// sigmoid), and since v2.38 Euclid's steps and rotation and swing.
+#[derive(Clone, Copy, Debug)]
+pub struct Spacing {
+    pub mode: SpacingMode,
+    pub shape_x: f32,
+    pub shape_y: f32,
+    /// Euclid: the pattern's length in steps (a step is the base time) and
+    /// how many steps it's turned against the dry note.
+    pub steps: usize,
+    pub rotate: usize,
+    /// 0.5 straight … 0.75: a tap on an odd step (the "e" of each beat, the
+    /// dry note being step 0) lands late by (2·swing − 1) of a step; in Lin
+    /// of its gap to the next tap, so a bent Shape still swings. Lin and
+    /// Euclid only: Exp and Log have no grid.
+    pub swing: f32,
+}
+
+impl Spacing {
+    pub const LINEAR: Spacing =
+        Spacing { mode: SpacingMode::Linear, shape_x: 0.0, shape_y: 0.0, steps: NUM_TAPS, rotate: 0, swing: 0.5 };
+}
+
+/// Euclid: the steps (1..=n) that get a tap for `k` taps over `n` steps
+/// turned by `rotate`: E(k, n), every tap as far from the next as can be
+/// (Bresenham's spread). The dry note is step 0, so a tap that lands there
+/// sounds at step n, the next pattern's start. Returns the steps in order and
+/// how many there are (k, at most n). No allocation: it runs per block.
+pub fn euclid_steps(k: usize, n: usize, rotate: usize) -> ([usize; NUM_TAPS], usize) {
+    let n = n.clamp(1, NUM_TAPS);
+    let k = k.clamp(1, n);
+    let mut out = [0usize; NUM_TAPS];
+    let mut count = 0;
+    for i in 0..n {
+        if (i * k) % n < k {
+            let step = (i + rotate) % n;
+            out[count] = if step == 0 { n } else { step };
+            count += 1;
+        }
+    }
+    out[..count].sort_unstable();
+    (out, count)
+}
+
 /// Free-function form of `TopologyEngine::compute` — the single copy of the
 /// anchoring/shaping math, shared by the DSP (via the engine) and the GUI
 /// visualizer (directly), so the two can never drift.
-pub fn compute_positions(mode: SpacingMode, shape_x: f32, shape_y: f32, n_active: usize) -> [f32; NUM_TAPS] {
+///
+/// `n_active` — the number of live taps; positions [0..n_active) are anchored
+/// to [1/N, n_active/N]; positions [n_active..NUM_TAPS) continue linearly. In
+/// Euclid the live taps sit on their pattern's steps instead.
+pub fn compute_positions(sp: Spacing, n_active: usize) -> [f32; NUM_TAPS] {
     let n_active = n_active.clamp(1, NUM_TAPS);
+    let step = 1.0 / NUM_TAPS as f32;
+    let late = 2.0 * sp.swing - 1.0;
+    let mut positions = [0.0; NUM_TAPS];
+    if sp.mode == SpacingMode::Euclidean {
+        let (steps, count) = euclid_steps(n_active, sp.steps, sp.rotate);
+        for (i, p) in positions.iter_mut().enumerate() {
+            *p = if i < count {
+                let st = steps[i];
+                (st as f32 + if st % 2 == 1 { late } else { 0.0 }) * step
+            } else {
+                (i + 1) as f32 * step
+            };
+        }
+        return positions;
+    }
+    let (mode, shape_x, shape_y) = (sp.mode, sp.shape_x, sp.shape_y);
     let first = 1.0 / NUM_TAPS as f32;
     let last  = n_active as f32 / NUM_TAPS as f32;
-    let mut positions = [0.0; NUM_TAPS];
 
     for i in 0..NUM_TAPS {
         if i < n_active {
@@ -66,7 +125,7 @@ pub fn compute_positions(mode: SpacingMode, shape_x: f32, shape_y: f32, n_active
                 SpacingMode::Linear      => t,
                 SpacingMode::Exponential => t.powf(2.0).min(1.0),
                 SpacingMode::Logarithmic => t.sqrt(),
-                SpacingMode::Euclidean   => t,   // placeholder
+                SpacingMode::Euclidean   => unreachable!(),
             };
 
             let shaped = sigmoid_blend(base, shape_y);
@@ -79,6 +138,17 @@ pub fn compute_positions(mode: SpacingMode, shape_x: f32, shape_y: f32, n_active
         } else {
             // Inactive taps beyond the active window: linear continuation
             positions[i] = (i + 1) as f32 / NUM_TAPS as f32;
+        }
+    }
+    // Swing: the taps on odd steps (the 1st, 3rd, 5th…) move toward the next.
+    if mode == SpacingMode::Linear && late != 0.0 {
+        for i in (0..n_active).step_by(2) {
+            let next = if i + 1 < n_active {
+                positions[i + 1]
+            } else {
+                2.0 * positions[i] - if i > 0 { positions[i - 1] } else { 0.0 }
+            };
+            positions[i] += late * (next - positions[i]);
         }
     }
     positions
@@ -103,19 +173,22 @@ pub fn tap_fits(t_l_secs: f32, t_r_secs: f32, max_delay_secs: f32) -> bool {
 pub const MIN_FB_SECS: f32 = 0.010;
 
 /// Cluster span in seconds: max delay across active, in-range taps (offsets
-/// included), floored at MIN_FB_SECS. This is the feedback-cycle length when
-/// FB TIME is locked, and the floor when unlocked — shared by lib.rs and the
-/// echo visualizer so echo bars land where the audio does.
+/// included), floored at MIN_FB_SECS and at `pattern_secs` (Euclid's whole
+/// pattern, v2.38, so a pattern whose last tap lands early still loops on
+/// its length). This is the feedback-cycle length when FB TIME is locked —
+/// shared by lib.rs and the echo visualizer so echo bars land where the
+/// audio does.
 pub fn cluster_span_secs(
     t_l: &[f32; NUM_TAPS],
     t_r: &[f32; NUM_TAPS],
     in_range: &[bool; NUM_TAPS],
     n_active: usize,
+    pattern_secs: f32,
 ) -> f32 {
     (0..n_active.min(NUM_TAPS))
         .filter(|&i| in_range[i])
         .map(|i| t_l[i].max(t_r[i]))
-        .fold(MIN_FB_SECS, f32::max)
+        .fold(MIN_FB_SECS.max(pattern_secs), f32::max)
 }
 
 /// Blend between linear (y=0) and sigmoid (y=1) curves.
@@ -132,4 +205,57 @@ fn bias_curve(v: f32, x: f32) -> f32 {
     if x.abs() < 1e-6 { return v; }
     let power = if x >= 0.0 { 1.0 / (1.0 + 2.0 * x) } else { 1.0 + 2.0 * (-x) };
     v.powf(power)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn steps(k: usize, n: usize, r: usize) -> Vec<usize> {
+        let (s, c) = euclid_steps(k, n, r);
+        s[..c].to_vec()
+    }
+
+    #[test]
+    fn euclid_spreads_the_taps_evenly() {
+        // the tresillo, its first hit moved to the next downbeat
+        assert_eq!(steps(3, 8, 0), [3, 6, 8]);
+        assert_eq!(steps(4, 16, 0), [4, 8, 12, 16]);
+        assert_eq!(steps(5, 16, 0), [4, 7, 10, 13, 16]);
+        // turned a step, and turns wrap
+        assert_eq!(steps(3, 8, 1), [1, 4, 7]);
+        assert_eq!(steps(3, 8, 9), steps(3, 8, 1));
+        // every step, and never more taps than steps
+        assert_eq!(steps(8, 8, 0), (1..=8).collect::<Vec<_>>());
+        assert_eq!(steps(12, 8, 0).len(), 8);
+    }
+
+    #[test]
+    fn euclid_puts_each_tap_on_its_step() {
+        let sp = Spacing { mode: SpacingMode::Euclidean, steps: 8, rotate: 1, ..Spacing::LINEAR };
+        let pos = compute_positions(sp, 3);
+        assert_eq!(&pos[..3], &[1.0, 4.0, 7.0].map(|st| st / NUM_TAPS as f32));
+    }
+
+    #[test]
+    fn swing_pushes_the_odd_steps_late() {
+        let step = 1.0 / NUM_TAPS as f32;
+        // Euclid, steps 3, 6, 8 at 75 %: the 3 lands half a step late, the rest stay
+        let sp = Spacing { mode: SpacingMode::Euclidean, steps: 8, swing: 0.75, ..Spacing::LINEAR };
+        assert_eq!(&compute_positions(sp, 3)[..3], &[3.5 * step, 6.0 * step, 8.0 * step]);
+        // Lin, straight: the taps on steps 1…4; swung, the 1st and 3rd move half a step
+        assert_eq!(&compute_positions(Spacing::LINEAR, 4)[..4], &[1.0, 2.0, 3.0, 4.0].map(|x| x * step));
+        let lin = compute_positions(Spacing { swing: 0.75, ..Spacing::LINEAR }, 4);
+        let want = [1.5, 2.0, 3.5, 4.0].map(|x| x * step);
+        assert!(lin.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "{lin:?}");
+        // a bent Shape still swings: an odd-step tap goes halfway to the next
+        let bent = Spacing { shape_x: 0.4, shape_y: 0.7, ..Spacing::LINEAR };
+        let (plain, swung) = (compute_positions(bent, 6), compute_positions(Spacing { swing: 0.75, ..bent }, 6));
+        assert!((swung[2] - (plain[2] + 0.5 * (plain[3] - plain[2]))).abs() < 1e-6 && swung[3] == plain[3]);
+        // Exp and Log have no grid: swing leaves them be
+        for mode in [SpacingMode::Exponential, SpacingMode::Logarithmic] {
+            let sp = Spacing { mode, ..Spacing::LINEAR };
+            assert_eq!(compute_positions(sp, 7), compute_positions(Spacing { swing: 0.75, ..sp }, 7));
+        }
+    }
 }

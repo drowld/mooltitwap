@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::gui::{gain_db_to_pos, pos_to_gain_db, EditorState, VizData};
 use crate::bounce;
-use crate::params::{ChannelMode, CrossfeedMode, FilterType, PetalParams, SyncMode, TapParams, NUM_TAPS};
+use crate::params::{ChannelMode, CrossfeedMode, FilterType, PetalParams, SpacingMode, SyncMode, TapParams, NUM_TAPS};
 use crate::topology;
 use crate::ui::epo;
 use crate::ui::theme::{self, G, INK, INK2, INSET, PANEL, PAPER, SOFT};
@@ -1082,9 +1082,10 @@ fn secs_text(t: f32) -> String {
     if t < 1.0 { format!("{:.0} ms", t * 1000.0) } else { format!("{t:.2} s") }
 }
 
-/// Taps that are live; the rest are hidden, as in v3.
+/// Taps that are live; the rest are hidden, as in v3. Euclid places one per
+/// step at most; any more are silent and hidden too.
 fn n_active(params: &PetalParams) -> usize {
-    (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS)
+    params.taps_heard()
 }
 
 /// Tap `i` of `n`: the accent, lighter towards the last tap (v3's ramp).
@@ -2083,9 +2084,15 @@ fn time_card(
         knob_cell(ui, t(2, 0, 1), s, setter, &params.base_time_r, "base_time_r", "Time R", false, true, Some(r_txt), focus);
         enum_cell(ui, t(2, 1, 1), s, setter, &params.sync_mode_r, "sync_r", "Sync R", &["Free", "Sync"], true, focus);
     }
+    // Swing, in the slot under L/R that nothing else uses (so nothing moves).
+    // Lin and Euclid have a grid to swing; Exp and Log don't.
+    let euclid = params.spacing_mode.value() == SpacingMode::Euclidean;
+    let grid = euclid || params.spacing_mode.value() == SpacingMode::Linear;
+    knob_cell(ui, t(2, 2, 1), s, setter, &params.swing, "swing", "Swing", false, grid, None, focus);
 
-    // Pattern: the tap count over the list of spacings, the Shape pad beside;
-    // both start level with Time's first row.
+    // Pattern: the tap count over the list of spacings, the Shape pad beside
+    // (Euclid's ring in Euclid, where the pad has nothing to shape); both
+    // start level with Time's first row.
     let row0 = t(0, 0, 1);
     let taps = Rect::from_min_size(Pos2::new(c(0, 3, 1).left(), row0.top()), row0.size());
     knob_cell(ui, taps, s, setter, &params.num_taps_active, "num_taps_active", "Taps", false, true, None, focus);
@@ -2098,7 +2105,90 @@ fn time_card(
         *focus = Some("spacing_mode".into());
     }
     let pad = Rect::from_min_max(Pos2::new(c(0, 4, 1).left(), row0.top()), Pos2::new(c(0, 5, 1).right(), inner.bottom()));
-    shape_pad(ui, pad, s, params, setter, focus);
+    if euclid {
+        euclid_ring(ui, pad, s, params, setter, focus);
+    } else {
+        shape_pad(ui, pad, s, params, setter, focus);
+    }
+}
+
+/// Euclid's ring, in the Shape pad's place (v2.38): the pattern's steps round
+/// a circle, the dry note's step at the top, the taps as dots in their
+/// colours (one that lands on the dry note's step sounds at the pattern's
+/// end, the same spot). Drag round it to turn the pattern; Steps and Rotate
+/// under it.
+fn euclid_ring(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, focus: &mut Option<String>) {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let p = ui.painter().clone();
+    let n = params.euclid_steps.value() as usize;
+    let rot = params.euclid_rotate.value() as usize;
+    let heard = n_active(params);
+    let asked = (params.num_taps_active.value() as usize).clamp(1, NUM_TAPS);
+    let (steps, count) = topology::euclid_steps(heard, n, rot);
+
+    text(&p, Pos2::new(area.center().x, area.top() + g::LBL_H * 0.5 * s), Align2::CENTER_CENTER, "Euclid", 11.0, s, INK2());
+    let knobs = Rect::from_min_max(Pos2::new(area.left(), area.bottom() - g::CELL_H * s), area.max);
+    let half = Vec2::new(knobs.width() * 0.5, knobs.height());
+    knob_cell(ui, Rect::from_min_size(knobs.min, half), s, setter, &params.euclid_steps, "euclid_steps", "Steps", false, true, None, focus);
+    let rot_cell = Rect::from_min_size(knobs.min + Vec2::new(half.x, 0.0), half);
+    knob_cell(ui, rot_cell, s, setter, &params.euclid_rotate, "euclid_rotate", "Rotate", false, true, None, focus);
+
+    let ring_box = Rect::from_min_max(Pos2::new(area.left(), area.top() + (g::LBL_H + 2.0) * s), Pos2::new(area.right(), knobs.top() - 4.0 * s));
+    let rad = (ring_box.width().min(ring_box.height()) * 0.5).max(16.0 * s);
+    let c = ring_box.center();
+    p.circle_filled(c, rad, INSET());
+    let r = rad - 11.0 * s;
+    p.circle_stroke(c, r, Stroke::new(1.0 * s, theme::line()));
+    let at = |i: usize| {
+        let a = i as f32 / n as f32 * TAU - FRAC_PI_2;
+        c + Vec2::new(a.cos(), a.sin()) * r
+    };
+    p.circle_stroke(at(0), 7.5 * s, Stroke::new(1.5 * s, INK()));
+    for i in 0..n {
+        let (dot, col) = match (0..count).find(|&j| steps[j] % n == i) {
+            Some(j) => (5.0, tap_col(j, heard)),
+            None => (2.0, theme::FAINT()),
+        };
+        p.circle_filled(at(i), dot * s, col);
+    }
+    mono(&p, c - Vec2::new(0.0, 7.0 * s), Align2::CENTER_CENTER, &count.to_string(), 18.0, s, INK());
+    let sub = if asked > heard { format!("of {n} · {} silent", asked - heard) } else { format!("of {n}") };
+    text(&p, c + Vec2::new(0.0, 11.0 * s), Align2::CENTER_CENTER, &sub, 10.5, s, SOFT());
+
+    // Drag round the ring to turn it: the angle travelled counts in steps,
+    // and keeps counting past a whole turn.
+    let id = ui.id().with("sc_euclid_ring");
+    let d = drag_at(ui, id, Rect::from_center_size(c, Vec2::splat(rad * 2.0)));
+    let key = id.with("turn");
+    let angle = |pos: Pos2| (pos.y - c.y).atan2(pos.x - c.x);
+    if d.started {
+        if let Some(pos) = d.pos {
+            ui.ctx().data_mut(|m| m.insert_temp(key, (angle(pos), 0.0f32, rot as i32)));
+        }
+    }
+    let mut new = None;
+    if d.pressing {
+        if let (Some(pos), Some((last, acc, from))) = (d.pos, ui.ctx().data(|m| m.get_temp::<(f32, f32, i32)>(key))) {
+            let a = angle(pos);
+            let mut da = a - last;
+            if da > PI {
+                da -= TAU;
+            } else if da < -PI {
+                da += TAU;
+            }
+            let acc = acc + da;
+            ui.ctx().data_mut(|m| m.insert_temp(key, (a, acc, from)));
+            let turned = (from + (acc / (TAU / n as f32)).round() as i32).rem_euclid(n as i32);
+            if turned != params.euclid_rotate.value() {
+                new = Some(turned);
+                *focus = Some("euclid_rotate".into());
+            }
+        }
+    }
+    gesture_set(ui, id.with("g"), setter, &params.euclid_rotate, &d, new);
+    if d.released {
+        ui.ctx().data_mut(|m| m.remove::<(f32, f32, i32)>(key));
+    }
 }
 
 /// The Shape pad: X bends where the taps bunch up, Y how hard (shape_x −1…1,
@@ -2144,8 +2234,8 @@ fn shape_pad(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, s
     p.line_segment([Pos2::new(dot.x, pad.top()), Pos2::new(dot.x, pad.bottom())], hair);
     p.line_segment([Pos2::new(pad.left(), dot.y), Pos2::new(pad.right(), dot.y)], hair);
     // where the taps actually sit (first … last active), along the top edge
-    let n = params.num_taps_active.value().max(1) as usize;
-    let pos = topology::compute_positions(params.spacing_mode.value(), sx, sy, n);
+    let n = n_active(params);
+    let pos = topology::compute_positions(topology::Spacing { shape_x: sx, shape_y: sy, ..params.spacing(false) }, n);
     let (first, last) = (pos[0], pos[n - 1].max(pos[0] + 1e-6));
     for &t in pos.iter().take(n) {
         let x = inner.left() + inner.width() * ((t - first) / (last - first)).clamp(0.0, 1.0);
