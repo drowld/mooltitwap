@@ -34,6 +34,11 @@ impl Svf {
         self.a3 = a3;
     }
 
+    /// Take another filter's coefficients, not its state.
+    pub fn copy_coefs(&mut self, from: &Svf) {
+        (self.g, self.k, self.a1, self.a2, self.a3) = (from.g, from.k, from.a1, from.a2, from.a3);
+    }
+
     #[inline]
     pub fn process(&mut self, x: f32, kind: FilterType) -> f32 {
         let v3 = x - self.s2;

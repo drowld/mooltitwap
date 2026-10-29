@@ -255,6 +255,62 @@ pub struct ScopeState {
     last_tap: usize,
     /// Colour card tab: 0 Diffuse · 1 Tape · 2 Saturate.
     colour_tab: usize,
+    /// The Taps menu (pattern tools, v2.37): open, and its button (a click
+    /// there isn't "outside" the menu).
+    pat_open: bool,
+    pat_btn: Option<Rect>,
+    /// The last shape applied, so the range can re-spread it: Alternate's
+    /// flip, Random's seed.
+    pat_shape: Option<PatShape>,
+    pat_flip: bool,
+    pat_seed: u32,
+    /// Each axis's range on the menu's slider (0 left … 1 right; unset =
+    /// the axis's default), the pin being dragged, and each axis's undo
+    /// history (every tap's value before a pattern).
+    pat_range: [Option<[f32; 2]>; 5],
+    pat_pin: Option<usize>,
+    pat_undo: [Vec<[f32; NUM_TAPS]>; 5],
+    /// Preview: apply a shape on the first frame, to see it without clicking.
+    pat_demo: bool,
+}
+
+/// The pattern menu's shapes: where each tap sits between the range's ends.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PatShape {
+    Alternate,
+    RampDown,
+    RampUp,
+    Random,
+}
+
+impl PatShape {
+    const ALL: [PatShape; 4] = [PatShape::Alternate, PatShape::RampDown, PatShape::RampUp, PatShape::Random];
+}
+
+/// Where each of `n` taps sits for `shape`, 0 (the range's top end, as the
+/// field shows it) … 1 (its bottom end). Alternate starts at the top unless
+/// flipped; Random is the same for the same seed.
+fn pattern_t(shape: PatShape, flip: bool, n: usize, seed: u32) -> Vec<f32> {
+    let mut x = seed.max(1);
+    (0..n)
+        .map(|i| {
+            let f = if n > 1 { i as f32 / (n - 1) as f32 } else { 0.0 };
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            match shape {
+                PatShape::Alternate => ((i % 2 == 1) != flip) as u8 as f32,
+                PatShape::RampDown => f,
+                PatShape::RampUp => 1.0 - f,
+                PatShape::Random => (x >> 8) as f32 / 16_777_216.0,
+            }
+        })
+        .collect()
+}
+
+/// The values a shape gives `n` taps on `axis` between the slider's pins.
+fn pattern_values(axis: Axis, shape: PatShape, flip: bool, n: usize, seed: u32, range: [f32; 2]) -> Vec<f32> {
+    let (a, b) = (axis.u_norm(range[0]), axis.u_norm(range[1]));
+    let (top, bot) = (a.min(b), a.max(b));
+    pattern_t(shape, flip, n, seed).into_iter().map(|t| axis.value(top + (bot - top) * t)).collect()
 }
 
 impl ScopeState {
@@ -298,10 +354,11 @@ pub fn frame(
             sc.look = Appearance::load();
             sc.look_saved = Some(sc.look);
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff,sel3,tap,lock,presets,light,tape
+            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap,lock,presets,light,tape,pattern
             // (the iPad page, the Bars view, the Y axis, a selected tap, the Tap
             // tab, Lock time, the preset browser, the light page, Colour's Tape
-            // tab). A preview never saves the look it shows.
+            // tab, the Taps menu with Ramp down applied). A preview never saves
+            // the look it shows.
             if let (false, Ok(v)) = (ios, std::env::var("AFTERECHO_PREVIEW")) {
                 for t in v.split(',').map(str::trim) {
                     match t {
@@ -309,6 +366,9 @@ pub fn frame(
                         "bars" => sc.view = 1,
                         "gain" => sc.y_axis = 1,
                         "cutoff" => sc.y_axis = 2,
+                        "reso" => sc.y_axis = 3,
+                        "type" => sc.y_axis = 4,
+                        "pattern" => (sc.pat_open, sc.pat_demo) = (true, true),
                         "tap" => sc.lane_tab = 2,
                         "lock" => sc.lock_time = true,
                         "presets" => open_presets = true,
@@ -409,6 +469,7 @@ fn page(
     colour_card(ui, o, s, l, params, setter, &mut st.scope);
     output_card(ui, o, s, l, params, setter, &mut st.scope.focus);
     settings_menu(ui, o, s, l, &mut st.scope);
+    taps_menu(ui, s, params, setter, &mut st.scope);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,6 +499,20 @@ pub(crate) fn seg(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize,
 fn seg_ex(
     ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32, enabled: &[bool],
 ) -> Option<usize> {
+    seg_draw(ui, rect, labels, Some(active), salt, s, px, enabled, false)
+}
+
+/// [`seg`] for actions (the pattern menu's shapes): nothing need be picked,
+/// and a click on the pick counts too (Alternate flips, Random re-rolls).
+fn seg_again(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: Option<usize>, salt: &str, s: f32, px: f32) -> Option<usize> {
+    seg_draw(ui, rect, labels, active, salt, s, px, &[], true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seg_draw(
+    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: Option<usize>, salt: &str, s: f32, px: f32, enabled: &[bool],
+    again: bool,
+) -> Option<usize> {
     let p = ui.painter().clone();
     p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0 * s, theme::line()));
     let w = rect.width() / labels.len().max(1) as f32;
@@ -447,14 +522,14 @@ fn seg_ex(
         let resp = ui.interact(b, ui.id().with((salt, i)), Sense::click());
         let enabled = enabled.get(i).copied().unwrap_or(true);
         let alpha = if enabled { 255 } else { 90 };
-        let on = i == active;
+        let on = Some(i) == active;
         if on {
             let bar = Rect::from_min_max(Pos2::new(b.left() + 3.0 * s, b.bottom() - 2.0 * s), Pos2::new(b.right() - 3.0 * s, b.bottom()));
             p.rect_filled(bar, 0.0, theme::with_alpha(INK(), alpha));
         }
         let col = if on { INK() } else if enabled && resp.hovered() { INK2() } else { SOFT() };
         text(&p, b.center(), Align2::CENTER_CENTER, l, px, s, theme::with_alpha(col, alpha));
-        if enabled && epo::tap_or_click(ui, &resp) && !on {
+        if enabled && epo::tap_or_click(ui, &resp) && (again || !on) {
             picked = Some(i);
         }
     }
@@ -463,7 +538,10 @@ fn seg_ex(
 
 /// [`seg`] standing up: options stacked on a hairline, the pick ink with a bar
 /// on its left.
-fn seg_v(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32) -> Option<usize> {
+#[allow(clippy::too_many_arguments)]
+fn seg_v(
+    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32, enabled: &[bool],
+) -> Option<usize> {
     let p = ui.painter().clone();
     p.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0 * s, theme::line()));
     let h = rect.height() / labels.len().max(1) as f32;
@@ -472,12 +550,14 @@ fn seg_v(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &s
         let b = Rect::from_min_size(Pos2::new(rect.left(), rect.top() + i as f32 * h), Vec2::new(rect.width(), h));
         let resp = ui.interact(b, ui.id().with((salt, i)), Sense::click());
         let on = i == active;
+        let enabled = enabled.get(i).copied().unwrap_or(true);
         if on {
             p.rect_filled(Rect::from_min_max(Pos2::new(b.left(), b.top() + 3.0 * s), Pos2::new(b.left() + 2.0 * s, b.bottom() - 3.0 * s)), 0.0, INK());
         }
-        let col = if on { INK() } else if resp.hovered() { INK2() } else { SOFT() };
+        let col = if on { INK() } else if enabled && resp.hovered() { INK2() } else { SOFT() };
+        let col = theme::with_alpha(col, if enabled { 255 } else { 90 });
         text(&p, Pos2::new(b.left() + 12.0 * s, b.center().y), Align2::LEFT_CENTER, l, px, s, col);
-        if epo::tap_or_click(ui, &resp) && !on {
+        if enabled && epo::tap_or_click(ui, &resp) && !on {
             picked = Some(i);
         }
     }
@@ -782,30 +862,91 @@ fn header(
 // Picture: the tap field (X = time) or the bars (X = tap order); Y is picked
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// What the picture's vertical axis shows: one per-tap parameter.
+/// What the picture's vertical axis shows: one per-tap parameter. Type is the
+/// filter's choice of three (0 LP · 1 BP · 2 HP), shown as three rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Axis {
     Pan,
     Gain,
     Cutoff,
+    Reso,
+    Type,
 }
 
 impl Axis {
-    const ALL: [Axis; 3] = [Axis::Pan, Axis::Gain, Axis::Cutoff];
+    const ALL: [Axis; 5] = [Axis::Pan, Axis::Gain, Axis::Cutoff, Axis::Reso, Axis::Type];
 
     fn name(self) -> &'static str {
         match self {
             Axis::Pan => "Pan",
             Axis::Gain => "Gain",
             Axis::Cutoff => "Cutoff",
+            Axis::Reso => "Reso",
+            Axis::Type => "Type",
         }
     }
 
-    fn param(self, tap: &TapParams) -> &FloatParam {
+    /// The tap's float param on this axis; Type is an enum (see `get`, `set`).
+    fn float(self, tap: &TapParams) -> Option<&FloatParam> {
         match self {
-            Axis::Pan => &tap.pan,
-            Axis::Gain => &tap.gain_db,
-            Axis::Cutoff => &tap.filter_cutoff,
+            Axis::Pan => Some(&tap.pan),
+            Axis::Gain => Some(&tap.gain_db),
+            Axis::Cutoff => Some(&tap.filter_cutoff),
+            Axis::Reso => Some(&tap.filter_q),
+            Axis::Type => None,
+        }
+    }
+
+    /// The tap's value on this axis (Type as 0 · 1 · 2).
+    fn get(self, tap: &TapParams) -> f32 {
+        self.float(tap).map_or_else(|| enum_index(&tap.filter_type, 3) as f32, |p| p.value())
+    }
+
+    /// A whole gesture: set the tap's value on this axis.
+    fn set(self, setter: &ParamSetter, tap: &TapParams, v: f32) {
+        self.begin(setter, tap);
+        self.put(setter, tap, v);
+        self.end(setter, tap);
+    }
+
+    fn begin(self, setter: &ParamSetter, tap: &TapParams) {
+        match self.float(tap) {
+            Some(p) => setter.begin_set_parameter(p),
+            None => setter.begin_set_parameter(&tap.filter_type),
+        }
+    }
+
+    /// Set within a gesture `begin` opened.
+    fn put(self, setter: &ParamSetter, tap: &TapParams, v: f32) {
+        match self.float(tap) {
+            Some(p) => setter.set_parameter(p, v),
+            None => setter.set_parameter(&tap.filter_type, type_of(v)),
+        }
+    }
+
+    fn end(self, setter: &ParamSetter, tap: &TapParams) {
+        match self.float(tap) {
+            Some(p) => setter.end_set_parameter(p),
+            None => setter.end_set_parameter(&tap.filter_type),
+        }
+    }
+
+    /// A drag's value through [`gesture_set`] (one gesture per drag).
+    fn gesture(self, ui: &egui::Ui, key: Id, setter: &ParamSetter, tap: &TapParams, d: &Drag, v: Option<f32>) {
+        match self.float(tap) {
+            Some(p) => gesture_set(ui, key, setter, p, d, v),
+            None => gesture_set(ui, key, setter, &tap.filter_type, d, v.map(type_of)),
+        }
+    }
+
+    /// The value a tap starts with (Reset, double-click).
+    fn neutral(self) -> f32 {
+        match self {
+            Axis::Pan => 0.0,
+            Axis::Gain => 0.0,
+            Axis::Cutoff => 20_000.0,
+            Axis::Reso => 0.707,
+            Axis::Type => 0.0,
         }
     }
 
@@ -815,17 +956,22 @@ impl Axis {
             Axis::Pan => "pan",
             Axis::Gain => "gain_db",
             Axis::Cutoff => "tap_filter_cutoff",
+            Axis::Reso => "tap_filter_q",
+            Axis::Type => "tap_filter_type",
         };
         format!("{base}_{}", i + 1)
     }
 
     /// A value → 0 (top) … 1 (bottom). Pan has L / Mid at the top and gain the
-    /// DAW-fader skew (0 dB at 75 % height), both as in v3; cutoff is log.
+    /// DAW-fader skew (0 dB at 75 % height), both as in v3; cutoff and Q are
+    /// log; Type has HP on top, LP at the bottom.
     fn norm(self, v: f32) -> f32 {
         let n = match self {
             Axis::Pan => (v + 1.0) * 0.5,
             Axis::Gain => 1.0 - gain_db_to_pos(v),
             Axis::Cutoff => 1.0 - (v / 20.0).max(1.0).ln() / 1000f32.ln(),
+            Axis::Reso => 1.0 - (v / 0.1).max(1.0).ln() / 120f32.ln(),
+            Axis::Type => 1.0 - v / 2.0,
         };
         n.clamp(0.0, 1.0)
     }
@@ -836,6 +982,27 @@ impl Axis {
             Axis::Pan => n * 2.0 - 1.0,
             Axis::Gain => pos_to_gain_db(1.0 - n),
             Axis::Cutoff => 20.0 * 1000f32.powf(1.0 - n),
+            Axis::Reso => 0.1 * 120f32.powf(1.0 - n),
+            Axis::Type => ((1.0 - n) * 2.0).round(),
+        }
+    }
+
+    /// The pattern menu's slider runs low to high left to right, Pan L to R:
+    /// a slider position → the field's 0 (top) … 1 (bottom).
+    fn u_norm(self, u: f32) -> f32 {
+        if self == Axis::Pan { u } else { 1.0 - u }
+    }
+
+    /// The range a shape spreads over until the pins are moved: L 70 to R 70,
+    /// −24 to 0 dB, 500 Hz to 20 kHz, Q 0.7 to 6, LP to HP.
+    fn default_range(self) -> [f32; 2] {
+        let u = |v: f32| self.u_norm(self.norm(v));
+        match self {
+            Axis::Pan => [u(-0.7), u(0.7)],
+            Axis::Gain => [u(-24.0), u(0.0)],
+            Axis::Cutoff => [u(500.0), u(20_000.0)],
+            Axis::Reso => [u(0.7), u(6.0)],
+            Axis::Type => [0.0, 1.0],
         }
     }
 
@@ -844,23 +1011,23 @@ impl Axis {
             Axis::Pan => pan_text(v, ch),
             Axis::Gain => db_text(v),
             Axis::Cutoff => hz_text(v),
+            Axis::Reso => format!("Q {v:.1}"),
+            Axis::Type => type_name(v).to_string(),
         }
     }
 
     /// The short form above a bar: no unit for gain, the filter type for cutoff.
     fn short(self, tap: &TapParams, ch: ChannelMode) -> String {
-        let v = self.param(tap).value();
+        let v = self.get(tap);
         match self {
             Axis::Pan => pan_text(v, ch),
             Axis::Gain => db_text(v).trim_end_matches(" dB").to_string(),
             Axis::Cutoff => {
-                let ty = match tap.filter_type.value() {
-                    FilterType::LowPass => "LP",
-                    FilterType::BandPass => "BP",
-                    FilterType::HighPass => "HP",
-                };
+                let ty = type_name(enum_index(&tap.filter_type, 3) as f32);
                 if v >= 1000.0 { format!("{ty} {:.1}k", v / 1000.0) } else { format!("{ty} {v:.0}") }
             }
+            Axis::Reso => format!("{v:.1}"),
+            Axis::Type => type_name(v).to_string(),
         }
     }
 
@@ -874,8 +1041,19 @@ impl Axis {
             Axis::Pan => at(&[(-1.0, "L"), (0.0, "C"), (1.0, "R")]),
             Axis::Gain => at(&[(6.0, "+6"), (0.0, "0 dB"), (-12.0, "−12"), (-24.0, "−24"), (-48.0, "−48")]),
             Axis::Cutoff => at(&[(20000.0, "20k"), (5000.0, "5k"), (1000.0, "1k"), (200.0, "200"), (50.0, "50")]),
+            Axis::Reso => at(&[(12.0, "Q 12"), (4.0, "4"), (1.2, "1.2"), (0.4, "0.4"), (0.1, "0.1")]),
+            Axis::Type => at(&[(2.0, "HP"), (1.0, "BP"), (0.0, "LP")]),
         }
     }
+}
+
+/// The filter type for a Type value (0 LP · 1 BP · 2 HP).
+fn type_of(v: f32) -> FilterType {
+    FilterType::from_index(v.round().clamp(0.0, 2.0) as usize)
+}
+
+fn type_name(v: f32) -> &'static str {
+    ["LP", "BP", "HP"][v.round().clamp(0.0, 2.0) as usize]
 }
 
 fn pan_text(v: f32, ch: ChannelMode) -> String {
@@ -1080,17 +1258,30 @@ fn picture(
     let rect = r(o, s, x, y, w, h);
     let p = ui.painter().clone();
     p.rect_filled(rect, g::R_CARD * s, theme::FRAME());
-    text(&p, rect.min + Vec2::new(16.0, 24.0) * s, Align2::LEFT_CENTER, "Taps", 12.0, s, INK());
+    // The title opens the Taps menu (pattern tools); the chevron says so.
+    let tb = r(o, s, x + 10.0, y + 10.0, 74.0, 28.0);
+    let tresp = ui.interact(tb, ui.id().with("sc_taps_menu"), Sense::click());
+    outline(&p, tb, sc.pat_open, s);
+    let tcol = if sc.pat_open { PAPER() } else if tresp.hovered() { INK() } else { INK2() };
+    text(&p, Pos2::new(tb.left() + 12.0 * s, tb.center().y), Align2::LEFT_CENTER, "Taps", 12.0, s, tcol);
+    let cv = Pos2::new(tb.right() - 16.0 * s, tb.center().y + 1.5 * s);
+    let chev = Stroke::new(1.4 * s, tcol);
+    p.line_segment([cv + Vec2::new(-4.0, -2.5) * s, cv], chev);
+    p.line_segment([cv, cv + Vec2::new(4.0, -2.5) * s], chev);
+    if epo::tap_or_click(ui, &tresp) {
+        sc.pat_open = !sc.pat_open;
+    }
+    sc.pat_btn = Some(tb);
     if !l.lane_stacked {
         let hint = match (sc.view, sc.lock_time) {
             (0, false) => "drag a dot",
             (0, true) => "drag a dot up or down",
             _ => "drag across the bars",
         };
-        text(&p, rect.min + Vec2::new(54.0, 24.0) * s, Align2::LEFT_CENTER, hint, 12.0, s, SOFT());
+        text(&p, rect.min + Vec2::new(96.0, 24.0) * s, Align2::LEFT_CENTER, hint, 12.0, s, SOFT());
     }
 
-    // header, right to left: Snap · Lock time (field only) · Field / Bars · Y picker
+    // header, right to left: Snap · Lock time (field only) · Field / Bars
     let mut right = x + w - 12.0;
     if sc.view == 0 {
         let snap = params.tap_snap.value();
@@ -1113,19 +1304,23 @@ fn picture(
     if let Some(i) = seg(ui, r(o, s, right - 112.0, y + 10.0, 112.0, 28.0), &["Field", "Bars"], sc.view, "sc_view", s, 12.0, true) {
         sc.view = i;
     }
-    right -= 128.0;
-    let xr = o.x + (right + 8.0) * s;
-    rule(ui.painter(), Pos2::new(xr, o.y + (y + 14.0) * s), Pos2::new(xr, o.y + (y + 34.0) * s), s);
-    // Mono has no pan, so its picture starts on gain.
+    // Y, down the left edge beside the axis it picks. Mono has no pan, so its
+    // picture starts on gain. A new axis starts without a shape to re-spread.
     let mono = params.channel_mode.value() == ChannelMode::Mono;
     let axis_i = if mono && sc.y_axis == 0 { 1 } else { sc.y_axis };
-    if let Some(i) = seg_ex(ui, r(o, s, right - 180.0, y + 10.0, 180.0, 28.0), &["Pan", "Gain", "Cutoff"], axis_i, "sc_y", s, 12.0, &[!mono, true, true]) {
+    let names = Axis::ALL.map(Axis::name);
+    let list = r(o, s, x + 14.0, y + 56.0, 64.0, 26.0 * names.len() as f32);
+    if let Some(i) = seg_v(ui, list, &names, axis_i, "sc_y", s, 12.0, &[!mono, true, true, true, true]) {
         sc.y_axis = i;
+        sc.pat_shape = None;
     }
-    text(&p, r(o, s, right - 198.0, y + 10.0, 12.0, 28.0).center(), Align2::CENTER_CENTER, "Y", 12.0, s, SOFT());
 
     let axis = Axis::ALL[axis_i];
-    let plot = Rect::from_min_max(rect.min + Vec2::new(56.0, 56.0) * s, rect.max - Vec2::new(24.0, 34.0) * s);
+    if std::mem::take(&mut sc.pat_demo) {
+        sc.pat_shape = Some(PatShape::RampDown);
+        pattern_apply(params, setter, sc, axis_i);
+    }
+    let plot = Rect::from_min_max(rect.min + Vec2::new(128.0, 56.0) * s, rect.max - Vec2::new(24.0, 34.0) * s);
     if sc.view == 0 {
         let viz = crate::gui::compute_viz_data_ex(params, tempo, 1);
         field(ui, plot, s, params, setter, sc, &viz, axis, tempo);
@@ -1166,7 +1361,7 @@ fn field(
     if !params.time_linked.value() {
         for i in 0..n {
             let tap = &params.taps[i];
-            let y = plot.top() + axis.norm(axis.param(tap).value()) * plot.height();
+            let y = plot.top() + axis.norm(axis.get(tap)) * plot.height();
             let xl = x_at(viz.times_l_grid[i] * fit);
             let xr = x_at(viz.times_r[i] * viz.grid_range_secs);
             if (xr - xl).abs() < 1.0 {
@@ -1185,9 +1380,9 @@ fn field(
     let mut pressing = false;
     for i in 0..n {
         let tap = &params.taps[i];
-        let prm = axis.param(tap);
+        let v = axis.get(tap);
         let secs = viz.times_l_grid[i] * fit;
-        let c = Pos2::new(x_at(secs), plot.top() + axis.norm(prm.value()) * plot.height());
+        let c = Pos2::new(x_at(secs), plot.top() + axis.norm(v) * plot.height());
         let hit = if theme::touch() { theme::TOUCH_MIN_HIT } else { 28.0 } * s;
         let id = ui.id().with(("sc_tap", i));
         let d = drag_at(ui, id, Rect::from_center_size(c, Vec2::splat(hit)));
@@ -1196,6 +1391,8 @@ fn field(
             ui.ctx().data_mut(|m| m.insert_temp(held_id, range));
         }
         let virt_id = id.with("virt");
+        // the value's own accumulator: Type's three rows would hold a dot still
+        let yvirt_id = id.with("yvirt");
         // Whether the dot was already selected when the press began: a finger
         // starts a drag on touch-down, which selects, so the tap that follows
         // must read the state from before the press or it undoes its own select.
@@ -1206,6 +1403,7 @@ fn field(
             // raw (unsnapped) offset accumulator: quantizing the running value
             // directly makes the dot sticky (v3)
             ui.ctx().data_mut(|m| m.insert_temp(virt_id, tap.time_offset.value()));
+            ui.ctx().data_mut(|m| m.insert_temp(yvirt_id, axis.norm(v)));
         }
         let (mut off, mut val) = (None, None);
         if d.delta != Vec2::ZERO {
@@ -1217,11 +1415,14 @@ fn field(
                 let o = if snap { snap_offset(secs, tap.time_offset.value(), virt, span) } else { virt };
                 off = Some(o.clamp(-0.5, 0.5));
             }
-            val = Some(axis.value(axis.norm(prm.value()) + d.delta.y / plot.height()));
+            let yv: f32 = ui.ctx().data(|m| m.get_temp(yvirt_id)).unwrap_or_else(|| axis.norm(v));
+            let yv = (yv + d.delta.y / plot.height()).clamp(0.0, 1.0);
+            ui.ctx().data_mut(|m| m.insert_temp(yvirt_id, yv));
+            val = Some(axis.value(yv));
             sc.focus = Some(axis.id(i));
         }
         gesture_set(ui, id.with("off"), setter, &tap.time_offset, &d, off);
-        gesture_set(ui, id.with("val"), setter, prm, &d, val);
+        axis.gesture(ui, id.with("val"), setter, tap, &d, val);
         // A double-click's second click resets; it doesn't toggle the selection.
         if d.clicked && !d.double {
             let was = ui.ctx().data(|m| m.get_temp(was_id)).unwrap_or(sc.sel == Some(i));
@@ -1236,9 +1437,7 @@ fn field(
             ui.ctx().data_mut(|m| m.remove::<bool>(was_id));
         }
         if d.double {
-            setter.begin_set_parameter(prm);
-            setter.set_parameter(prm, prm.default_plain_value());
-            setter.end_set_parameter(prm);
+            axis.set(setter, tap, axis.neutral());
             if !lock {
                 setter.begin_set_parameter(&tap.time_offset);
                 setter.set_parameter(&tap.time_offset, 0.0);
@@ -1269,14 +1468,13 @@ fn field(
 
     // the selected tap on top: ring, crosshair, its value and its time
     if let Some((i, c, rad)) = selected {
-        let prm = axis.param(&params.taps[i]);
         p.circle_stroke(c, rad + 3.5 * s, Stroke::new(1.5 * s, INK()));
         let hair = Stroke::new(1.0 * s, theme::with_alpha(INK(), 60));
         p.line_segment([Pos2::new(c.x, plot.top()), Pos2::new(c.x, plot.bottom())], hair);
         p.line_segment([Pos2::new(plot.left(), c.y), Pos2::new(plot.right(), c.y)], hair);
         // The value goes above the dot (below near the top edge), not beside it,
         // so it never covers the neighbouring taps in a tight cluster.
-        let ytxt = format!("{} {}  ↕", axis.name(), axis.text(prm.value(), ch));
+        let ytxt = format!("{} {}  ↕", axis.name(), axis.text(axis.get(&params.taps[i]), ch));
         let (at, align) = if c.y - rad - 34.0 * s > plot.top() {
             (Pos2::new(c.x, c.y - rad - 8.0 * s), Align2::CENTER_BOTTOM)
         } else {
@@ -1315,12 +1513,12 @@ fn bars(
     if d.pressing {
         if let Some(pos) = d.pos {
             let i = (((pos.x - plot.left()) / slot).floor().max(0.0) as usize).min(n - 1);
-            let prm = axis.param(&params.taps[i]);
+            let tap = &params.taps[i];
             if begun & (1 << i) == 0 {
-                setter.begin_set_parameter(prm);
+                axis.begin(setter, tap);
                 begun |= 1 << i;
             }
-            setter.set_parameter(prm, axis.value((pos.y - plot.top()) / plot.height()));
+            axis.put(setter, tap, axis.value((pos.y - plot.top()) / plot.height()));
             sc.sel = Some(i);
             sc.focus = Some(axis.id(i));
         }
@@ -1328,7 +1526,7 @@ fn bars(
     if d.released {
         for i in 0..NUM_TAPS {
             if begun & (1 << i) != 0 {
-                setter.end_set_parameter(axis.param(&params.taps[i]));
+                axis.end(setter, &params.taps[i]);
             }
         }
         begun = 0;
@@ -1341,9 +1539,8 @@ fn bars(
     let step = (20.0 * s / slot).ceil().max(1.0) as usize;
     for i in 0..n {
         let tap = &params.taps[i];
-        let prm = axis.param(tap);
         let cx = plot.left() + slot * (i as f32 + 0.5);
-        let yv = plot.top() + axis.norm(prm.value()) * plot.height();
+        let yv = plot.top() + axis.norm(axis.get(tap)) * plot.height();
         let yb = if axis == Axis::Pan { plot.center().y } else { plot.bottom() };
         let sel = sc.sel == Some(i);
         let col = tap_col(i, n);
@@ -1896,7 +2093,7 @@ fn time_card(
     text(&p, Pos2::new(taps.center().x, sp_top + g::LBL_H * 0.5 * s), Align2::CENTER_CENTER, "Spacing", 11.0, s, INK2());
     let list = Rect::from_min_max(Pos2::new(taps.left() + 8.0 * s, sp_top + (g::LBL_H + 4.0) * s), Pos2::new(taps.right(), inner.bottom()));
     let cur = enum_index(&params.spacing_mode, 4);
-    if let Some(i) = seg_v(ui, list, &["Lin", "Exp", "Log", "Euclid"], cur, "spacing_mode", s, 12.0) {
+    if let Some(i) = seg_v(ui, list, &["Lin", "Exp", "Log", "Euclid"], cur, "spacing_mode", s, 12.0, &[]) {
         set_norm(setter, &params.spacing_mode, i as f32 / 3.0);
         *focus = Some("spacing_mode".into());
     }
@@ -2024,6 +2221,141 @@ fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Peta
         let (ctl, _, _) = cell_parts(c(4), s);
         let arc = dial_arc(ctl.center(), (g::DIAL * 0.5 - 5.5) * s, 0.0, (dip / 24.0).min(1.0));
         ui.painter().add(egui::Shape::line(arc, Stroke::new(2.0 * s, G())));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Taps menu: pattern tools (v2.37) — shape every tap at once on the picked axis
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write the current shape across the live taps on axis `ai`, between its
+/// range's pins. One gesture per tap.
+fn pattern_apply(params: &PetalParams, setter: &ParamSetter, sc: &ScopeState, ai: usize) {
+    let Some(shape) = sc.pat_shape else { return };
+    let axis = Axis::ALL[ai];
+    let range = sc.pat_range[ai].unwrap_or_else(|| axis.default_range());
+    let vals = pattern_values(axis, shape, sc.pat_flip, n_active(params), sc.pat_seed, range);
+    for (tap, v) in params.taps.iter().zip(vals) {
+        axis.set(setter, tap, v);
+    }
+}
+
+/// Keep every tap's value on axis `ai` so Undo can put it back (the last 32).
+fn pattern_keep(params: &PetalParams, sc: &mut ScopeState, ai: usize) {
+    let axis = Axis::ALL[ai];
+    let undo = &mut sc.pat_undo[ai];
+    undo.push(core::array::from_fn(|i| axis.get(&params.taps[i])));
+    if undo.len() > 32 {
+        undo.remove(0);
+    }
+}
+
+/// The Taps menu, under its button: Shape (Alternate, Ramp down, Ramp up,
+/// Random), Range (two pins; the shape re-spreads as they move), Reset and
+/// Undo, all on the picked axis. Alternate clicked again flips, Random
+/// re-rolls. A click outside closes it.
+fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState) {
+    let Some(btn) = sc.pat_btn.filter(|_| sc.pat_open) else { return };
+    let ch = params.channel_mode.value();
+    let ai = if ch == ChannelMode::Mono && sc.y_axis == 0 { 1 } else { sc.y_axis };
+    let axis = Axis::ALL[ai];
+    let n = n_active(params);
+    let area = egui::Area::new(Id::new("afterecho_taps_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(btn.left_bottom() + Vec2::new(0.0, 8.0 * s))
+        .show(ui.ctx(), |ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(330.0, 206.0) * s, Sense::hover());
+            let p = ui.painter().clone();
+            p.rect_filled(rect, g::R_CARD * s, PANEL());
+            p.rect_stroke(rect, g::R_CARD * s, Stroke::new(1.0 * s, theme::line2()), egui::StrokeKind::Inside);
+            let at = |dx: f32, dy: f32, w: f32, h: f32| Rect::from_min_size(rect.min + Vec2::new(dx, dy) * s, Vec2::new(w, h) * s);
+
+            text(&p, at(16.0, 12.0, 200.0, 20.0).left_center(), Align2::LEFT_CENTER, &format!("Taps · {}", axis.name()), 13.0, s, INK());
+            text(&p, at(214.0, 12.0, 100.0, 20.0).right_center(), Align2::RIGHT_CENTER, &format!("{n} taps"), 11.0, s, SOFT());
+
+            group_head(&p, at(16.0, 42.0, 100.0, 12.0).left_center(), Align2::LEFT_CENTER, "Shape", s);
+            let cur = sc.pat_shape.and_then(|sh| PatShape::ALL.iter().position(|&x| x == sh));
+            let labels = ["Alternate", "Ramp down", "Ramp up", "Random"];
+            if let Some(i) = seg_again(ui, at(16.0, 50.0, 298.0, 28.0), &labels, cur, "sc_pat_shape", s, 12.0) {
+                let shape = PatShape::ALL[i];
+                match shape {
+                    PatShape::Alternate => sc.pat_flip = sc.pat_shape == Some(shape) && !sc.pat_flip,
+                    PatShape::Random => sc.pat_seed = sc.pat_seed.wrapping_mul(7919).wrapping_add(17),
+                    _ => {}
+                }
+                pattern_keep(params, sc, ai);
+                sc.pat_shape = Some(shape);
+                pattern_apply(params, setter, sc, ai);
+            }
+
+            // Range: two pins on the axis's own scale; the span between is ink.
+            group_head(&p, at(16.0, 94.0, 100.0, 12.0).left_center(), Align2::LEFT_CENTER, "Range", s);
+            let mut range = sc.pat_range[ai].unwrap_or_else(|| axis.default_range());
+            let track = at(24.0, 104.0, 282.0, 22.0);
+            let xu = |u: f32| track.left() + u * track.width();
+            let cy = track.center().y;
+            p.line_segment([Pos2::new(track.left(), cy), Pos2::new(track.right(), cy)], Stroke::new(3.0 * s, theme::line2()));
+            p.line_segment([Pos2::new(xu(range[0]), cy), Pos2::new(xu(range[1]), cy)], Stroke::new(3.0 * s, INK()));
+            for u in range {
+                p.circle_filled(Pos2::new(xu(u), cy), 7.0 * s, INK());
+            }
+            let d = drag_at(ui, Id::new("sc_pat_range"), track.expand2(Vec2::new(10.0, 6.0) * s));
+            let u_at = |x: f32| {
+                let u = ((x - track.left()) / track.width()).clamp(0.0, 1.0);
+                if axis == Axis::Type { (u * 2.0).round() / 2.0 } else { u }
+            };
+            if d.started {
+                if let Some(pos) = d.pos {
+                    let u = u_at(pos.x);
+                    sc.pat_pin = Some(if (u - range[0]).abs() <= (u - range[1]).abs() { 0 } else { 1 });
+                    if sc.pat_shape.is_some() {
+                        pattern_keep(params, sc, ai);
+                    }
+                }
+            }
+            if let (true, Some(k), Some(pos)) = (d.pressing, sc.pat_pin, d.pos) {
+                let u = u_at(pos.x);
+                range[k] = if k == 0 { u.min(range[1]) } else { u.max(range[0]) };
+                if sc.pat_range[ai] != Some(range) {
+                    sc.pat_range[ai] = Some(range);
+                    pattern_apply(params, setter, sc, ai);
+                }
+            }
+            if d.released {
+                sc.pat_pin = None;
+            }
+            let end = |u: f32| axis.text(axis.value(axis.u_norm(u)), ch);
+            mono(&p, at(16.0, 130.0, 150.0, 16.0).left_center(), Align2::LEFT_CENTER, &end(range[0]), 12.0, s, INK2());
+            mono(&p, at(164.0, 130.0, 150.0, 16.0).right_center(), Align2::RIGHT_CENTER, &end(range[1]), 12.0, s, INK2());
+
+            rule(&p, at(16.0, 158.0, 0.0, 0.0).min, at(314.0, 158.0, 0.0, 0.0).min, s);
+            let reset = button(ui, at(16.0, 168.0, 76.0, 26.0), "Reset", false, "sc_pat_reset", s, 12.0);
+            if epo::tap_or_click(ui, &reset) {
+                pattern_keep(params, sc, ai);
+                for tap in params.taps.iter().take(n) {
+                    axis.set(setter, tap, axis.neutral());
+                }
+                sc.pat_shape = None;
+            }
+            let can_undo = !sc.pat_undo[ai].is_empty();
+            let undo = button(ui, at(100.0, 168.0, 76.0, 26.0), "Undo", false, "sc_pat_undo", s, 12.0);
+            if epo::tap_or_click(ui, &undo) {
+                if let Some(vals) = sc.pat_undo[ai].pop() {
+                    for (tap, v) in params.taps.iter().zip(vals) {
+                        axis.set(setter, tap, v);
+                    }
+                    sc.pat_shape = None;
+                }
+            }
+            if !can_undo {
+                p.rect_filled(undo.rect, 6.0 * s, theme::with_alpha(PANEL(), 150));
+            }
+            text(&p, at(184.0, 168.0, 130.0, 26.0).right_center(), Align2::RIGHT_CENTER, "every tap, this axis", 11.0, s, SOFT());
+        });
+    // A click outside closes it, except on its own button (which toggles it).
+    let on_btn = ui.ctx().input(|i| i.pointer.interact_pos()).is_some_and(|pos| btn.contains(pos));
+    if !on_btn && area.response.clicked_elsewhere() {
+        sc.pat_open = false;
     }
 }
 
@@ -2271,4 +2603,54 @@ mod tests {
             assert!(tabs_end < preset.0 && preset.1 < l.w - l.pad - 38.0 - 10.0 - 80.0);
         }
     }
+
+    #[test]
+    fn each_shape_places_the_taps_between_the_ends() {
+        let t = |shape, flip| pattern_t(shape, flip, 4, 5);
+        assert_eq!(t(PatShape::Alternate, false), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(t(PatShape::Alternate, true), [1.0, 0.0, 1.0, 0.0]);
+        let down = t(PatShape::RampDown, false);
+        assert!(down[0] == 0.0 && down[3] == 1.0 && down.windows(2).all(|w| w[0] < w[1]));
+        let up = t(PatShape::RampUp, false);
+        assert!(up[0] == 1.0 && up[3] == 0.0);
+        // Random: inside the range, the same for a seed, new for another
+        let r = pattern_t(PatShape::Random, false, 16, 9);
+        assert!(r.iter().all(|&x| (0.0..1.0).contains(&x)));
+        assert_eq!(r, pattern_t(PatShape::Random, false, 16, 9));
+        assert_ne!(r, pattern_t(PatShape::Random, false, 16, 10));
+    }
+
+    #[test]
+    fn a_shape_spans_each_axis_between_its_pins() {
+        let close = |a: f32, b: f32| (a - b).abs() <= 1e-3 * b.abs().max(1.0);
+        // the default ranges: L 70 to R 70, −24 to 0 dB, 500 Hz to 20 kHz, Q 0.7 to 6
+        let v = |axis: Axis, shape| pattern_values(axis, shape, false, 8, 3, axis.default_range());
+        let pan = v(Axis::Pan, PatShape::Alternate);
+        assert!(close(pan[0], -0.7) && close(pan[1], 0.7), "Pan alternates L and R: {pan:?}");
+        let gain = v(Axis::Gain, PatShape::RampDown);
+        assert!(close(gain[0], 0.0) && close(gain[7], -24.0), "Gain fades out from the top: {gain:?}");
+        let cut = v(Axis::Cutoff, PatShape::RampUp);
+        assert!(close(cut[0], 500.0) && close(cut[7], 20_000.0), "Cutoff opens up: {cut:?}");
+        let q = v(Axis::Reso, PatShape::Alternate);
+        assert!(close(q[0], 6.0) && close(q[1], 0.7), "Reso alternates high and low: {q:?}");
+        // Type stays on its three values, HP at the top
+        let ty = v(Axis::Type, PatShape::RampDown);
+        assert_eq!(ty, [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0]);
+        // a narrower range: the shape only reaches the pins
+        let mid = pattern_values(Axis::Pan, PatShape::RampDown, false, 3, 1, [0.5, 0.75]);
+        assert!(close(mid[0], 0.0) && close(mid[2], 0.5), "C to R 50: {mid:?}");
+    }
+
+    #[test]
+    fn the_new_axes_read_back_their_own_values() {
+        for q in [0.1, 0.707, 3.0, 12.0] {
+            assert!((Axis::Reso.value(Axis::Reso.norm(q)) - q).abs() < 1e-3 * q, "Q {q}");
+        }
+        for ty in [0.0, 1.0, 2.0] {
+            assert_eq!(Axis::Type.value(Axis::Type.norm(ty)), ty);
+            assert_eq!(type_of(ty) as usize, ty as usize);
+        }
+        assert_eq!(Axis::Type.text(2.0, ChannelMode::Stereo), "HP");
+    }
 }
+

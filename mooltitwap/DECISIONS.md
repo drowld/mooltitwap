@@ -2,6 +2,48 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-29 · Pattern tools, Reso and Type on the field, per-tap glides (v2.37.0)
+
+The fourth Phase 4 function, built from the second interactive mock the owner
+approved, plus their addition: clicking Alternate again flips it.
+- **The field's title is the "Taps" menu button** (a drawn chevron; the UI font
+  may lack "▾"). The menu acts on the picked Y axis: Shape (Alternate, Ramp
+  down, Ramp up, Random), Range (two pins), Reset, Undo. Alternate clicked
+  again flips which taps take which end; Random re-rolls. The mock's
+  Spread/Tilt became these four, which read the same on every axis.
+- **Range replaces Amount** (the owner's idea): a shape spreads the taps
+  between the pins, and moving a pin re-spreads it live. Each axis keeps its
+  own range; defaults L 70 to R 70, −24 to 0 dB, 500 Hz to 20 kHz, Q 0.7 to 6,
+  LP to HP. Positions are in the field's own scale, so what you see is evenly
+  spaced.
+- **Five Y axes: Pan, Gain, Cutoff, Reso (Q, log) and Type** (the filter's
+  three types as three rows, HP on top). The Y picker moved from the toolbar
+  to a vertical list down the field's left edge, like Spacing's list: five
+  options don't fit Tall's toolbar, and the list sits beside the axis it
+  picks. Rejected: a second toolbar row in Tall (field height lost) or a
+  dropdown (hides the options, which the owner dislikes). The cost is about
+  70 px of field width in both shapes. A field drag now accumulates its own
+  value so a Type dot can step between rows.
+- **Patterns write the live taps** (muted ones too), one gesture per tap.
+  **Undo** keeps each axis's last 32 states in the page (not saved); Reset
+  is undoable too. Patterns don't touch tap times.
+- **Engine: per-tap glides,** because each tap's gain, pan, cutoff, Q and type
+  used to change once per block, so a pattern moving every tap at once
+  clicked. Now gain and pan glide through two 5 ms one-poles (no corner at
+  either end); cutoff and Q in log steps (their whole range in 20 ms, the
+  filters recomputed only while they move); a type change crossfades over
+  10 ms from a copy of the filter still running the old type. Test: eight
+  taps switching all five at once, four times over a held tone: 0.98× the
+  held patterns' sharpest bend; with the glides off, 1,808×. A first version
+  with straight-line gain and pan ramps reached 3.1×: their corners added up
+  across taps.
+- **Side effect:** a tap that's unmuted or added now comes in over the glide
+  instead of at full level at once. Muting is unchanged (the tap stops).
+- **Nothing moving, nothing changes:** the 21-case comparison with v2.36.0 is
+  bit-identical.
+- Not checked on screen yet (the Mac's screen was locked when the build was
+  ready).
+
 ## 2026-10-29 · Ducking: the echoes dip while you play (v2.36.0)
 
 The third Phase 4 function, built as proposed and approved by the owner

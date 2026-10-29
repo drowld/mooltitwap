@@ -34,6 +34,24 @@ fn s_curve(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
+/// Move `now` toward `target` by at most the factor `up` (or `1 / up`) a
+/// sample, landing on it exactly. True if it moved.
+#[inline]
+fn glide_log(now: &mut f32, target: f32, up: f32) -> bool {
+    if *now == target {
+        return false;
+    }
+    let r = target / *now;
+    *now = if r > up {
+        *now * up
+    } else if r * up < 1.0 {
+        *now / up
+    } else {
+        target
+    };
+    true
+}
+
 /// What the feedback path does to each pass: Diffuse, Tape and Saturate
 /// when they're routed to it (set per block), and the loop tone (which
 /// glides per sample).
@@ -188,6 +206,26 @@ pub struct Mooltitwap {
     tap_svf_l: [[Svf; 4]; NUM_TAPS],
     tap_svf_r: [[Svf; 4]; NUM_TAPS],
 
+    /// Per-tap glides (v2.37), so a pattern that moves every tap at once
+    /// (or stepped automation) doesn't click: each tap's gain and pan gains
+    /// as heard, through two 5 ms one-poles (`_mid`, then `_now`) so a glide
+    /// starts and ends without a corner; its cutoff and Q, their whole range
+    /// in 20 ms in log steps, the filters recomputed only while they move.
+    /// Nothing changes while nothing moves.
+    tap_gain_mid: [f32; NUM_TAPS],
+    tap_gain_now: [f32; NUM_TAPS],
+    tap_pan_mid: [(f32, f32); NUM_TAPS],
+    tap_pan_now: [(f32, f32); NUM_TAPS],
+    tap_cut_now: [f32; NUM_TAPS],
+    tap_q_now: [f32; NUM_TAPS],
+    /// A filter-type change crossfades over 10 ms (`tap_type_xf` 0..1) from
+    /// a copy of the filter still running the old type to the new one.
+    tap_type_now: [crate::params::FilterType; NUM_TAPS],
+    tap_type_old: [crate::params::FilterType; NUM_TAPS],
+    tap_type_xf: [f32; NUM_TAPS],
+    tap_svf_old_l: [[Svf; 4]; NUM_TAPS],
+    tap_svf_old_r: [[Svf; 4]; NUM_TAPS],
+
     // Crossfeed diffusion (ChowMatrix-style allpass cascade), one per channel.
     // Used exclusively by CrossfeedMode::Diffuse (feedback path).
     diff_l: Diffusion,
@@ -278,6 +316,17 @@ impl Default for Mooltitwap {
             xf_diffuse: 0.0,
             tap_svf_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
             tap_svf_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
+            tap_gain_mid: [0.0; NUM_TAPS],
+            tap_gain_now: [0.0; NUM_TAPS],
+            tap_pan_mid: [(1.0, 1.0); NUM_TAPS],
+            tap_pan_now: [(1.0, 1.0); NUM_TAPS],
+            tap_cut_now: [20_000.0; NUM_TAPS],
+            tap_q_now: [0.707; NUM_TAPS],
+            tap_type_now: [crate::params::FilterType::LowPass; NUM_TAPS],
+            tap_type_old: [crate::params::FilterType::LowPass; NUM_TAPS],
+            tap_type_xf: [1.0; NUM_TAPS],
+            tap_svf_old_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
+            tap_svf_old_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
             diff_l: Diffusion::new(),
             diff_r: Diffusion::new(),
             diff_wet_l: Diffusion::new(),
@@ -421,6 +470,7 @@ impl Plugin for Mooltitwap {
         self.xf_diffuse = 0.0;
         for st in self.tap_svf_l.iter_mut() { for s in st.iter_mut() { s.reset(); } }
         for st in self.tap_svf_r.iter_mut() { for s in st.iter_mut() { s.reset(); } }
+        self.tap_type_xf = [1.0; NUM_TAPS];
         self.diff_l.reset();
         self.diff_r.reset();
         self.diff_wet_l.reset();
@@ -574,17 +624,32 @@ impl Plugin for Mooltitwap {
         // cutoff/Q. Cascaded biquads do shift the -3dB point slightly with
         // each stage, but for a music plugin the perceptual difference is
         // exactly "steeper roll-off", which is what the slope control means.
-        let mut tap_filter_types = [crate::params::FilterType::LowPass; NUM_TAPS];
+        // The filters run at the gliding cutoff and Q (see `tap_cut_now`); a
+        // new type starts a crossfade from a copy of the filter as it was.
+        let mut tap_cut = [0.0f32; NUM_TAPS];
+        let mut tap_q = [0.0f32; NUM_TAPS];
         let mut tap_filter_stages = [1usize; NUM_TAPS];
         for i in 0..NUM_TAPS {
             let tap = &p.taps[i];
-            let cutoff = tap.filter_cutoff.value();
-            let q = tap.filter_q.value();
-            for st in 0..4 {
-                self.tap_svf_l[i][st].set(cutoff, q, sr);
-                self.tap_svf_r[i][st].set(cutoff, q, sr);
+            (tap_cut[i], tap_q[i]) = (tap.filter_cutoff.value(), tap.filter_q.value());
+            let ty = tap.filter_type.value();
+            if initial_snap {
+                (self.tap_cut_now[i], self.tap_q_now[i]) = (tap_cut[i], tap_q[i]);
+                self.tap_type_now[i] = ty;
+                self.tap_type_xf[i] = 1.0;
+            } else if ty != self.tap_type_now[i] {
+                self.tap_svf_old_l[i] = self.tap_svf_l[i].clone();
+                self.tap_svf_old_r[i] = self.tap_svf_r[i].clone();
+                self.tap_type_old[i] = self.tap_type_now[i];
+                self.tap_type_now[i] = ty;
+                self.tap_type_xf[i] = 0.0;
             }
-            tap_filter_types[i] = tap.filter_type.value();
+            for st in 0..4 {
+                self.tap_svf_l[i][st].set(self.tap_cut_now[i], self.tap_q_now[i], sr);
+                self.tap_svf_r[i][st].copy_coefs(&self.tap_svf_l[i][st]);
+                self.tap_svf_old_l[i][st].copy_coefs(&self.tap_svf_l[i][st]);
+                self.tap_svf_old_r[i][st].copy_coefs(&self.tap_svf_l[i][st]);
+            }
             tap_filter_stages[i] = match tap.filter_slope.value() {
                 crate::params::FilterSlope::Db12 => 1,
                 crate::params::FilterSlope::Db24 => 2,
@@ -720,7 +785,18 @@ impl Plugin for Mooltitwap {
                 nice_plug::util::db_to_gain(p.taps[i].gain_db.value())
             } else { 0.0 };
             (tap_pan_l[i], tap_pan_r[i]) = bounce::pan_gains(p.taps[i].pan.value());
+            // A tap that isn't playing waits where it's going: one that starts
+            // (unmuted, or added) comes in over the glide from silence.
+            if initial_snap || !(i < n_active && tap_in_range[i]) {
+                (self.tap_gain_mid[i], self.tap_gain_now[i]) = (tap_gain[i], tap_gain[i]);
+                self.tap_pan_mid[i] = (tap_pan_l[i], tap_pan_r[i]);
+                self.tap_pan_now[i] = self.tap_pan_mid[i];
+            }
         }
+        let tap_glide = 1.0 - (-1.0 / (0.005 * sr)).exp();
+        let cut_up = 1000f32.powf(1.0 / (0.02 * sr));
+        let q_up = 120f32.powf(1.0 / (0.02 * sr));
+        let type_step = 1.0 / (0.01 * sr);
 
         // ── Ping (see bounce.rs) ─────────────────────────────────────────
         // The loop becomes the bounce once Ping is picked (after Diffuse has
@@ -1043,10 +1119,22 @@ impl Plugin for Mooltitwap {
                 if !tap_in_range[i] { continue; }
                 let hl = self.main_l.readers[i].heads();
                 let hr = self.main_r.readers[i].heads();
+                for (mid, now, to) in [
+                    (&mut self.tap_gain_mid[i], &mut self.tap_gain_now[i], tap_gain[i]),
+                    (&mut self.tap_pan_mid[i].0, &mut self.tap_pan_now[i].0, tap_pan_l[i]),
+                    (&mut self.tap_pan_mid[i].1, &mut self.tap_pan_now[i].1, tap_pan_r[i]),
+                ] {
+                    *mid += (to - *mid) * tap_glide;
+                    *now += (*mid - *now) * tap_glide;
+                    // close enough: land, rather than creep in denormals
+                    if (to - *now).abs() < 1e-9 && (to - *mid).abs() < 1e-9 {
+                        (*mid, *now) = (to, to);
+                    }
+                }
                 // Panned ahead of the filter (the same sound: the filter is
                 // linear), so Ping's repeats can join each side before it.
-                let mut sl = hl.read(&self.main_l.delay) * tap_pan_l[i];
-                let mut sr_s = hr.read(&self.main_r.delay) * tap_pan_r[i];
+                let mut sl = hl.read(&self.main_l.delay) * self.tap_pan_now[i].0;
+                let mut sr_s = hr.read(&self.main_r.delay) * self.tap_pan_now[i].1;
                 if ping_read && ping_tap_fresh[i] {
                     let g = &mut self.ping_gain[i];
                     for ((g, m), t) in g.iter_mut().zip(&mut self.ping_gain_mid[i]).zip(ping_target[i]) {
@@ -1064,13 +1152,39 @@ impl Plugin for Mooltitwap {
                 }
 
                 let stages = tap_filter_stages[i];
+                let moved = glide_log(&mut self.tap_cut_now[i], tap_cut[i], cut_up)
+                    | glide_log(&mut self.tap_q_now[i], tap_q[i], q_up);
+                if moved {
+                    let mut c = Svf::new();
+                    c.set(self.tap_cut_now[i], self.tap_q_now[i], sr);
+                    for st in 0..4 {
+                        self.tap_svf_l[i][st].copy_coefs(&c);
+                        self.tap_svf_r[i][st].copy_coefs(&c);
+                        self.tap_svf_old_l[i][st].copy_coefs(&c);
+                        self.tap_svf_old_r[i][st].copy_coefs(&c);
+                    }
+                }
+                let ty = self.tap_type_now[i];
+                let (dry_l, dry_r) = (sl, sr_s);
                 for st in 0..stages {
-                    sl = self.tap_svf_l[i][st].process(sl, tap_filter_types[i]);
-                    sr_s = self.tap_svf_r[i][st].process(sr_s, tap_filter_types[i]);
+                    sl = self.tap_svf_l[i][st].process(sl, ty);
+                    sr_s = self.tap_svf_r[i][st].process(sr_s, ty);
+                }
+                // a new filter type: the old one (a copy, still running) fades out
+                if self.tap_type_xf[i] < 1.0 {
+                    let (old, mut ol, mut or) = (self.tap_type_old[i], dry_l, dry_r);
+                    for st in 0..stages {
+                        ol = self.tap_svf_old_l[i][st].process(ol, old);
+                        or = self.tap_svf_old_r[i][st].process(or, old);
+                    }
+                    let w = s_curve(self.tap_type_xf[i]);
+                    sl = ol + (sl - ol) * w;
+                    sr_s = or + (sr_s - or) * w;
+                    self.tap_type_xf[i] = (self.tap_type_xf[i] + type_step).min(1.0);
                 }
 
-                tap_out_l += sl * tap_gain[i];
-                tap_out_r += sr_s * tap_gain[i];
+                tap_out_l += sl * self.tap_gain_now[i];
+                tap_out_r += sr_s * self.tap_gain_now[i];
             }
 
             // Crossfeed Mix — post-tap stereo blend on the OUTPUT (not
@@ -1782,6 +1896,41 @@ mod tests {
         let (during, _) = dip_db(&ducked, &plain, 0.7, 0.95);
         let (after, _) = dip_db(&ducked, &plain, 2.3, 2.4);
         assert!(during < -9.0 && after > -1.0, "during {during:.2} dB, after {after:.2} dB");
+    }
+
+    #[test]
+    fn a_pattern_moving_every_tap_does_not_click() {
+        // The held tone through eight taps; four times every tap's gain, pan,
+        // cutoff, Q and filter type jump at once, swapping between two
+        // alternating patterns (as the pattern tools do), against the tone
+        // held under each: the per-tap glides and the type crossfade keep it
+        // from clicking.
+        let input = held_tone();
+        let n = input.len();
+        let pattern = |plug: &Mooltitwap, flip: bool| {
+            for i in 0..8 {
+                let odd = (i % 2 == 1) != flip;
+                let k = i + 1;
+                set(plug, &format!("gain_db_{k}"), if odd { -18.0 } else { 0.0 });
+                set(plug, &format!("pan_{k}"), if odd { 0.8 } else { -0.8 });
+                set(plug, &format!("tap_filter_cutoff_{k}"), if odd { 600.0 } else { 9000.0 });
+                set(plug, &format!("tap_filter_q_{k}"), if odd { 4.0 } else { 0.7 });
+                set(plug, &format!("tap_filter_type_{k}"), if odd { 2.0 } else { 0.0 });
+            }
+        };
+        let sharpest = |schedule: [bool; 4]| {
+            let mut plug = plugin(&[0.0; 8]);
+            set(&plug, "feedback", 0.4);
+            sharpest_bend(&render(&mut plug, &input, |s, plug| pattern(plug, schedule[s * 4 / n])))
+        };
+        let held = [[false; 4], [true; 4]].map(|s| sharpest(s).0).into_iter().fold(0.0, f32::max);
+        let (switched, at) = sharpest([false, true, false, true]);
+        assert!(
+            switched < 1.5 * held,
+            "{:.1}× the held patterns' sharpest bend, at {:.3} s",
+            switched / held,
+            at as f32 / SR + 0.3
+        );
     }
 
     #[test]
