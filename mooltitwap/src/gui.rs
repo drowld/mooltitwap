@@ -934,6 +934,9 @@ pub struct VizData {
     /// d = 1 − 2·crossfeed. The fb crossfeed is a BLEND, not a hard swap: after
     /// k cycles the own-channel weight is (1+dᵏ)/2, swapped weight (1−dᵏ)/2.
     pub pp_own_d: f32,
+    /// Freeze holds the loop (v2.35): every repeat at full level, the cycle
+    /// at the length the audio thread latched.
+    pub frozen: bool,
 }
 
 // Pick the smallest "nice" x-axis range covering `needed_secs`. The old
@@ -1004,7 +1007,12 @@ pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_ca
     // only (v2.18.2: the cluster-span floor is gone — in-loop saturation now
     // bounds short-cycle feedback instead).
     let cluster_span_secs = topology::cluster_span_secs(&t_l, &t_r, &in_range, n_active);
-    let fb_cycle_secs = if params.feedback_time_locked.value() { cluster_span_secs }
+    // Frozen, the loop keeps the length it had when the hold began (the audio
+    // thread reports it; until it does, the params' cycle stands in).
+    let frozen = params.freeze.value();
+    let held = f32::from_bits(params.held_cycle_secs.load(Ordering::Relaxed));
+    let fb_cycle_secs = if frozen && held > 0.0 { held }
+        else if params.feedback_time_locked.value() { cluster_span_secs }
         else {
             params.feedback_time_seconds(tempo_bpm)
                 .clamp(topology::MIN_FB_SECS, MAX_DELAY_SECONDS * 0.95)
@@ -1018,7 +1026,10 @@ pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_ca
     let mut cycle_gains = [0.0f32; MAX_ECHO_CYCLES + 1];
     cycle_gains[0] = 1.0;
     let mut n_echo_cycles = 0usize;
-    if feedback >= 1e-3 && fb_cycle_secs >= 1e-6 {
+    if frozen {
+        cycle_gains = [1.0; MAX_ECHO_CYCLES + 1];
+        n_echo_cycles = MAX_ECHO_CYCLES;
+    } else if feedback >= 1e-3 && fb_cycle_secs >= 1e-6 {
         let mut level = 1.0f32;
         for k in 1..=MAX_ECHO_CYCLES {
             let g = match fb_curve {
@@ -1071,6 +1082,7 @@ pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_ca
         fb_cycle_norm: fb_cycle_secs / grid_range_secs,
         n_echo_cycles, feedback, cycle_gains, ping_pong,
         pp_own_d: 1.0 - 2.0 * crossfeed,
+        frozen,
     }
 }
 

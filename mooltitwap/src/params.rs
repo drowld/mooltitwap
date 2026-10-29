@@ -1,5 +1,6 @@
 use nice_plug::prelude::*;
 use nice_plug_egui::EguiState;
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 pub const NUM_TAPS: usize = 16;
@@ -373,6 +374,16 @@ pub struct PetalParams {
     #[id = "loop_tone"]
     pub loop_tone: FloatParam,
 
+    /// Freeze (v2.35): hold the loop as it is, at exactly 100 %. New input
+    /// stays out of the delay; Feedback, Curve and the loop's colour are
+    /// bypassed. A performance switch, so presets and A/B leave it alone.
+    #[id = "freeze"]
+    pub freeze: BoolParam,
+    /// The held loop's length in seconds (f32 bits) while Freeze holds, else
+    /// 0. Written by the audio thread for the page to draw; not a param and
+    /// not saved.
+    pub held_cycle_secs: AtomicU32,
+
     // ---- Filter ----
     #[id = "filter_type"]
     pub filter_type: EnumParam<FilterType>,
@@ -630,6 +641,8 @@ impl Default for PetalParams {
             loop_tone: FloatParam::new("Loop Tone", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
                 .with_value_to_string(Arc::new(tone_text))
                 .with_string_to_value(Arc::new(tone_from_text)),
+            freeze: BoolParam::new("Freeze", false),
+            held_cycle_secs: AtomicU32::new(0),
 
             filter_type: EnumParam::new("Filter Type", FilterType::LowPass),
             filter_cutoff: FloatParam::new(

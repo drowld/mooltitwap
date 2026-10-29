@@ -3,7 +3,8 @@ _State & detail live in docs/HANDOFF.md. This is the live todo list (role.md for
 
 ## In Progress
 - **Phase 4, new functions** (order agreed 2026-10-28): Loop tone → Freeze → Ducking → Pattern tools → Euclidean (Swing still to decide) → Motion. See docs/REDESIGN_PLAN.md Phase 4.
-- **Loop tone (v2.34.0)** — one Tone knob in the lane's Loop row (LP 20 kHz→600 Hz left, HP 20 Hz→1 kHz right, off at centre), in both loops. Built, 29 tests pass, off is bit-identical to v2.33.2 (21-case A/B). NEXT: owner's by-ear test; install when asked. See DECISIONS.md 2026-10-28.
+- **Freeze (v2.35.0)** — header button holds the current loop at exactly 100 % (input kept out, Feedback/Curve/loop colour bypassed, length latched in whole samples); 20 ms fades; not in presets or A/B; the Echo lane shows the hold. Built, 35 tests pass, off is bit-identical to v2.34.0. Installed on desktop 2026-10-29; iPad skipped for now (it still has v2.34.0). NEXT: owner's hand test. Linear SOF-59. See DECISIONS.md 2026-10-29.
+- **Loop tone (v2.34.0)** — one Tone knob in the lane's Loop row (LP 20 kHz→600 Hz left, HP 20 Hz→1 kHz right, off at centre), in both loops. Committed `8d99907`, installed desktop + iPad 2026-10-28. NEXT: owner's by-ear test. Linear SOF-58. See DECISIONS.md 2026-10-28.
 - **v2.30–v2.33.2 committed** as checkpoint `66cb842` (local, not pushed). v2.33.2 installed on desktop + iPad 2026-10-28 (iPad launch refused while locked: open Afterecho once so hosts see it).
 - **v2.33.2** — Time & taps no longer moves when L/R splits (Time always three rows). Installed.
 - **v2.33.1** — breathing room around dividers, Bars tap-to-select / double-tap-to-mute, preset browser in the new look. Installed.
@@ -45,6 +46,7 @@ _State & detail live in docs/HANDOFF.md. This is the live todo list (role.md for
 - XFEED + DIFFUSE value formatting (percent readouts) — deprioritized by owner
 
 ## Next
+- [ ] **Fix fractional delay reads (found 2026-10-29)** — `DelayLine::read` interpolates fractional delays backwards (`read(10.25)` returns 9.75 samples back, then jumps 2 samples at each whole one), so gliding delays (Repitch, taps and the feedback head) get small jumps; the feedback cycle also runs one sample long. Changes the sound of glides: its own version, with an A/B. Linear SOF-60. See DECISIONS.md 2026-10-29.
 - [ ] **← NEXT UP:** DAW hand-test v2.17.5 (one pass covers .3/.4/.5): taller tap rows + scroll, stepped values drag feel (steps quantize host automation — if 0.1 dB GAIN feels notchy, switch to display-only formatting), wobble gone, Sync caption BARS/BEATS
 - [ ] ECHO strip (feedback footer redesign, sketch agreed 2026-07-11): CYCLE segmented AUTO/FREE/SYNC replaces LOCK + right-click; FEEDBACK readout "−X dB/repeat · ~N echoes" + red >100% arc zone; dashed cycle marker in Stems viz. UI-only — `feedback_time_locked`+`feedback_time_mode` already encode the states
 - [ ] DAW hand-test v2.17.4 viz fixes: drag a tap in GRID (ball tracks pointer AND audio lands on the shown gridline), snap lands on base-time multiples, mute the last tap / offset a tap with FB locked and check echoes still align, PING at 0% crossfeed must not alternate sides

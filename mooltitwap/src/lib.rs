@@ -146,6 +146,11 @@ pub struct Mooltitwap {
     tone_main: LoopTone,
     tone_bounce: LoopTone,
     tone_t: f32,
+    /// Freeze (v2.35): the hold's share of what's written back, 0..1 over
+    /// 20 ms, and the loop length it holds, in whole samples (latched as it
+    /// starts from nothing) so the held loop repeats bit for bit.
+    freeze_w: f32,
+    freeze_len: f32,
     /// Samples since the loop last became the bounce (saturating). A tap
     /// starts swinging once the first bounced repeat has reached it.
     ping_age: usize,
@@ -248,6 +253,8 @@ impl Default for Mooltitwap {
             tone_main: LoopTone::default(),
             tone_bounce: LoopTone::default(),
             tone_t: 0.0,
+            freeze_w: 0.0,
+            freeze_len: 0.0,
             ping_age: usize::MAX,
             ping_live: 0,
             ping_since_off: usize::MAX,
@@ -300,6 +307,32 @@ impl Mooltitwap {
         // calibration, which is why it happens here and not per block.
         self.tape = TapeDegrade::new(self.sample_rate);
         self.tape_bounce = TapeDegrade::new(self.sample_rate);
+    }
+
+    /// What goes round, read `at` samples back: [main L, main R, bounce odd,
+    /// bounce even]. Two loops share it by the bounce's share `b`. The main
+    /// loop takes the main lines, plus the bounce's last pass (centred) once
+    /// Ping hands it back. The bounce takes the main lines' mono sum (the dry
+    /// input) as a new odd repeat, an even repeat back as the next odd one, an
+    /// odd one as the next even.
+    #[inline]
+    fn loop_inputs(&self, at: f32, b: f32, ch_mode: ChannelMode, ping_read: bool) -> [f32; 4] {
+        let raw_l = self.main_l.delay.read(at);
+        let raw_r = self.main_r.delay.read(at);
+        // Ping's lines coming back (see bounce.rs): the odd repeats (bound
+        // left) and the even ones (bound right).
+        let (odd, even) = if ping_read && at <= self.ping_valid as f32 {
+            (self.ping_odd.read(at), self.ping_even.read(at))
+        } else {
+            (0.0, 0.0)
+        };
+        let (tl, tr) = bounce::mono_to(ch_mode, odd + even);
+        [
+            (1.0 - b) * (raw_l + tl),
+            (1.0 - b) * (raw_r + tr),
+            b * (bounce::mono_of(ch_mode, raw_l, raw_r) + even),
+            b * odd,
+        ]
     }
 }
 
@@ -363,6 +396,7 @@ impl Plugin for Mooltitwap {
         self.tape_bounce.reset();
         self.tone_main.reset();
         self.tone_bounce.reset();
+        self.freeze_w = 0.0;
         self.ping_live = 0;
         self.ping_since_off = usize::MAX;
         self.ping_age = usize::MAX;
@@ -637,6 +671,27 @@ impl Plugin for Mooltitwap {
             self.fb_time_slew.set_rate(rate);
             self.fb_time_slew.set_target(fb_time_target);
         }
+        // Freeze reads the loop at a length latched as the hold starts from
+        // nothing, in whole samples so the held loop repeats bit for bit.
+        // While it fully holds, the feedback head waits there, so letting go
+        // moves the cycle on the usual way (Repitch glides it, Jump snaps it).
+        // The page is told the cycle as it was, not its whole-sample rounding,
+        // so its readout doesn't change as the hold begins.
+        let freeze_target = if p.freeze.value() { 1.0 } else { 0.0 };
+        if freeze_target > 0.0 && self.freeze_w == 0.0 {
+            let at = self.fb_time_slew.current().max(2.0);
+            self.freeze_len = at.round();
+            self.params.held_cycle_secs.store((at / sr).to_bits(), Ordering::Relaxed);
+        }
+        if initial_snap {
+            self.freeze_w = freeze_target;
+        }
+        if self.freeze_w >= 1.0 {
+            self.fb_time_slew.snap_to(self.freeze_len);
+        }
+        if freeze_target == 0.0 && self.freeze_w == 0.0 {
+            self.params.held_cycle_secs.store(0, Ordering::Relaxed);
+        }
         let crossfeed = p.crossfeed.value();
         let crossfeed_mode = p.crossfeed_mode.value();
 
@@ -808,26 +863,18 @@ impl Plugin for Mooltitwap {
             // Read BEFORE write so we sample the buffer state from cluster_span
             // ago, not the value we're about to write.
             let fb_at = fb_samps.max(2.0);
-            let raw_fb_l = self.main_l.delay.read(fb_at);
-            let raw_fb_r = self.main_r.delay.read(fb_at);
-            // Ping's lines coming back (see bounce.rs): the odd repeats (bound
-            // left) and the even ones (bound right).
-            let (odd, even) = if ping_read && fb_at <= self.ping_valid as f32 {
-                (self.ping_odd.read(fb_at), self.ping_even.read(fb_at))
-            } else {
-                (0.0, 0.0)
-            };
-            // Two loops share what goes round, by the bounce's share `b`. The
-            // main loop takes the main lines, plus the bounce's last pass
-            // (centred) once Ping hands it back. The bounce takes the main
-            // lines' mono sum (the dry input) as a new odd repeat, an even
-            // repeat back as the next odd one, an odd one as the next even.
             let b = s_curve(self.ping_share);
-            let (tl, tr) = bounce::mono_to(ch_mode, odd + even);
-            let main_l = (1.0 - b) * (raw_fb_l + tl);
-            let main_r = (1.0 - b) * (raw_fb_r + tr);
-            let odd_in = b * (bounce::mono_of(ch_mode, raw_fb_l, raw_fb_r) + even);
-            let even_in = b * odd;
+            let [main_l, main_r, odd_in, even_in] = self.loop_inputs(fb_at, b, ch_mode, ping_read);
+            // Freeze holds the same, read at its latched length, and writes it
+            // back untouched; while it fades in or out both paths run.
+            let hold = s_curve(self.freeze_w);
+            let held = if hold == 0.0 {
+                [0.0; 4]
+            } else if fb_at == self.freeze_len {
+                [main_l, main_r, odd_in, even_in]
+            } else {
+                self.loop_inputs(self.freeze_len, b, ch_mode, ping_read)
+            };
 
             // FB CURVE — bend the effective loop gain by level so the decay
             // envelope isn't limited to the natural exponential. The envelope
@@ -928,12 +975,22 @@ impl Plugin for Mooltitwap {
                 );
             }
 
+            // Freeze: the hold takes over what's written back, at exactly
+            // 100 % (no Feedback, Curve or colour), and new input fades out.
+            if hold > 0.0 {
+                fb_sat_l = fb_sat_l * (1.0 - hold) + held[0] * hold;
+                fb_sat_r = fb_sat_r * (1.0 - hold) + held[1] * hold;
+                odd_out = odd_out * (1.0 - hold) + held[2] * hold;
+                even_out = even_out * (1.0 - hold) + held[3] * hold;
+            }
+            let keep = 1.0 - hold;
+
             // Write the dry input + processed feedback into the main delay.
             // The taps below read from this buffer; each cluster_span the same
             // cluster pattern appears in the buffer, attenuated by feedback^k.
             // In Ping the repeats go to the bounce lines instead.
-            self.main_l.delay.write(x_l + fb_sat_l);
-            self.main_r.delay.write(x_r + fb_sat_r);
+            self.main_l.delay.write(x_l * keep + fb_sat_l);
+            self.main_r.delay.write(x_r * keep + fb_sat_r);
             self.ping_odd.write(odd_out);
             self.ping_even.write(even_out);
             self.main_quiet = if b < 1.0 { 0 } else { self.main_quiet.saturating_add(1) };
@@ -1034,6 +1091,7 @@ impl Plugin for Mooltitwap {
 
             self.xf_mix += (mix_target - self.xf_mix).clamp(-xf_step, xf_step);
             self.xf_diffuse += (diffuse_target - self.xf_diffuse).clamp(-xf_step, xf_step);
+            self.freeze_w += (freeze_target - self.freeze_w).clamp(-xf_step, xf_step);
             self.ping_share += (if self.ping_on { 1.0 } else { 0.0 } - self.ping_share).clamp(-xf_step, xf_step);
             self.ping_fresh = self.ping_fresh.saturating_add(1);
             self.ping_valid = self.ping_valid.saturating_add(1);
@@ -1430,5 +1488,143 @@ mod tests {
             switched / held,
             at as f32 / SR + 0.3
         );
+    }
+
+    /// Freeze from `secs` on, switched at a block's start as a host would.
+    fn freeze_from(secs: f32) -> impl FnMut(usize, &Mooltitwap) {
+        move |s, plug| set(plug, "freeze", if s as f32 >= secs * SR { 1.0 } else { 0.0 })
+    }
+
+    fn rms(out: &[(f32, f32)], from: f32, to: f32) -> f32 {
+        let w = &out[(from * SR) as usize..(to * SR) as usize];
+        (w.iter().map(|s| s.0 * s.0 + s.1 * s.1).sum::<f32>() / w.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn freeze_holds_the_loop_sample_for_sample() {
+        // A noise burst going round two taps (a 40 ms cycle), frozen at 0.1 s,
+        // plain and with every colour, Bloom and Tone in the loop. Once held,
+        // the main lines repeat exactly every latched cycle: nothing decays,
+        // darkens or smears, and what you hear holds its level.
+        for colour in [
+            &[][..],
+            &[
+                ("loop_tone", -1.0),
+                ("diffuse_routing", 1.0),
+                ("diffuse_amount", 0.5),
+                ("degrade_routing", 1.0),
+                ("degrade_amount", 0.6),
+                ("sat_routing", 1.0),
+                ("sat_amount", 0.7),
+                ("fb_curve", 1.0),
+            ],
+        ] {
+            let mut plug = plugin(&[0.0, 0.4]);
+            set(&plug, "feedback", 0.5);
+            for &(id, v) in colour {
+                set(&plug, id, v);
+            }
+            let out = render(&mut plug, &noise_burst(1.5), freeze_from(0.1));
+            let c = plug.freeze_len;
+            assert!((c - 0.04 * SR).abs() <= 1.0, "latched {c} samples");
+            // The feedback head reads before the write, so a cycle of c
+            // samples comes round every c + 1, held or not.
+            for d in 1..(3.0 * c) as usize {
+                let (a, b) = (d as f32, d as f32 + c + 1.0);
+                assert_eq!(plug.main_l.delay.read(a), plug.main_l.delay.read(b), "{colour:?}: L at {d}");
+                assert_eq!(plug.main_r.delay.read(a), plug.main_r.delay.read(b), "{colour:?}: R at {d}");
+            }
+            let (early, late) = (rms(&out, 0.5, 0.9), rms(&out, 1.1, 1.5));
+            assert!(early > 0.01 && (late / early - 1.0).abs() < 1e-3, "{colour:?}: rms {early} then {late}");
+        }
+    }
+
+    #[test]
+    fn freeze_keeps_new_input_out() {
+        // Held from 0.1 s: a loud click at 0.6 s changes nothing (wet only).
+        let run = |late: bool| {
+            let mut plug = plugin(&[0.0, 0.4]);
+            set(&plug, "feedback", 0.5);
+            let mut input = noise_burst(1.0);
+            if late {
+                input[(0.6 * SR) as usize] = (0.9, -0.9);
+            }
+            render(&mut plug, &input, freeze_from(0.1))
+        };
+        let (quiet, clicked) = (run(false), run(true));
+        assert!(quiet.iter().any(|s| s.0.abs() > 0.01));
+        assert!(quiet == clicked, "the click got into the held loop");
+    }
+
+    #[test]
+    fn letting_go_lets_the_loop_decay_at_feedback() {
+        // One tap at 20 ms and a 20 ms cycle: a click going round, held from
+        // 50 ms to 0.5 s, then repeating at Feedback (half the level a cycle).
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "feedback", 0.5);
+        let out = render(&mut plug, &click(0.7), |s, plug| {
+            let t = s as f32 / SR;
+            set(plug, "freeze", if (0.05..0.5).contains(&t) { 1.0 } else { 0.0 })
+        });
+        let e = |ms: f32| {
+            let (l, r) = energy(&out, ms);
+            l + r
+        };
+        assert!(e(300.0) > 0.0 && (e(400.0) / e(300.0) - 1.0).abs() < 1e-3, "held: {} then {}", e(300.0), e(400.0));
+        for ms in [580.0, 600.0, 620.0] {
+            let ratio = e(ms) / e(ms - 20.0);
+            assert!((ratio - 0.25).abs() < 0.03, "{ms} ms: {ratio} of the energy before");
+        }
+    }
+
+    #[test]
+    fn a_frozen_bounce_keeps_bouncing() {
+        // Ping, one tap and a 20 ms cycle, frozen after two repeats: long after,
+        // neighbouring repeats still sit on opposite sides, each side as loud
+        // as two cycles before.
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "feedback", 0.7);
+        set(&plug, "crossfeed_mode", PING);
+        set(&plug, "crossfeed", 1.0);
+        let out = render(&mut plug, &click(1.0), freeze_from(0.05));
+        for ms in [800.0, 820.0, 840.0] {
+            let ((l, r), (l2, r2)) = (energy(&out, ms), energy(&out, ms + 40.0));
+            let near = l.max(r);
+            assert!(near > 0.0 && l.min(r) < 1e-3 * near, "{ms} ms: L {l} R {r}");
+            assert!((l2 - l).abs() <= 1e-3 * near && (r2 - r).abs() <= 1e-3 * near, "{ms} ms: L {l} R {r}, then L {l2} R {r2}");
+        }
+        let (a, b) = (energy(&out, 800.0), energy(&out, 820.0));
+        assert!((a.0 > a.1) != (b.0 > b.1), "neighbouring repeats on the same side");
+    }
+
+    #[test]
+    fn freezing_and_letting_go_do_not_click() {
+        // The held tone through three spread taps, frozen and let go a second
+        // at a time, against it never frozen: in Mix and in Ping, plain and
+        // with Tone and Tape in the loop.
+        let input = held_tone();
+        let n = input.len();
+        for mode in [0.0, PING] {
+            for colour in [&[][..], &[("loop_tone", -0.6), ("degrade_routing", 1.0), ("degrade_amount", 0.6)]] {
+                let sharpest = |schedule: [f32; 5]| {
+                    let mut plug = plugin(&[-0.5, 0.7, 0.0]);
+                    set(&plug, "feedback", 0.6);
+                    set(&plug, "crossfeed", 1.0);
+                    set(&plug, "crossfeed_mode", mode);
+                    for &(id, v) in colour {
+                        set(&plug, id, v);
+                    }
+                    sharpest_bend(&render(&mut plug, &input, |s, plug| set(plug, "freeze", schedule[s * 5 / n])))
+                };
+                let held = sharpest([0.0; 5]).0;
+                let (switched, at) = sharpest([0.0, 1.0, 0.0, 1.0, 0.0]);
+                assert!(
+                    switched < 1.5 * held,
+                    "mode {mode}, {colour:?}: {:.1}× the held tone's sharpest bend, at {:.3} s",
+                    switched / held,
+                    at as f32 / SR + 0.3
+                );
+            }
+        }
     }
 }

@@ -749,6 +749,16 @@ fn header(
         crate::gui_v3::ab_switch(st, params, setter, i as u8);
     }
 
+    // Freeze: a performance switch, so it sits up here in reach whatever the
+    // lane shows. Ink when it holds.
+    let frozen = params.freeze.value();
+    let fresp = button(ui, r(o, s, ab_x - 16.0 - 96.0, y, 96.0, h), "Freeze", frozen, "sc_freeze", s, 13.0);
+    if epo::tap_or_click(ui, &fresp) {
+        setter.begin_set_parameter(&params.freeze);
+        setter.set_parameter(&params.freeze, !frozen);
+        setter.end_set_parameter(&params.freeze);
+    }
+
     // light / dark
     let tb = r(o, s, l.w - l.pad - 38.0, y, 38.0, h);
     let tresp = ui.interact(tb, ui.id().with("sc_theme"), Sense::click());
@@ -1452,8 +1462,10 @@ fn lane(
         0 => {
             // The cycle: Auto follows the cluster; Manual keeps its own time, in
             // Time's unit (the feedback time follows Time's Sync since v2.19).
+            // Frozen, the loop keeps its length, so the choice waits.
             let locked = params.feedback_time_locked.value();
-            if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 140.0, 26.0), &["Auto", "Manual"], if locked { 0 } else { 1 }, "sc_cycle", s, 12.0, true) {
+            let free = !params.freeze.value();
+            if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 140.0, 26.0), &["Auto", "Manual"], if locked { 0 } else { 1 }, "sc_cycle", s, 12.0, free) {
                 setter.begin_set_parameter(&params.feedback_time_locked);
                 setter.set_parameter(&params.feedback_time_locked, i == 0);
                 setter.end_set_parameter(&params.feedback_time_locked);
@@ -1541,8 +1553,13 @@ fn tap_panel(
 }
 
 /// "Feedback 60 % · −4.4 dB per repeat · 13 to −60 dB", from the same
-/// per-cycle levels the lane draws (they follow the FB curve).
+/// per-cycle levels the lane draws (they follow the FB curve); frozen,
+/// "Frozen · holds a 53 ms loop".
 fn echo_readout(viz: &VizData, short: bool) -> String {
+    if viz.frozen {
+        let cycle = secs_text(viz.fb_cycle_norm * viz.grid_range_secs);
+        return if short { format!("Frozen · {cycle}") } else { format!("Frozen · holds a {cycle} loop") };
+    }
     let fb = format!("Feedback {:.0} %", viz.feedback * 100.0);
     if viz.feedback < 1e-3 {
         return format!("{fb} · no repeats");
@@ -1618,6 +1635,7 @@ fn echo(
         if x1 - x0 > 96.0 * s {
             let label = match k {
                 0 => "Taps · 0 dB".to_string(),
+                k if viz.frozen => format!("Repeat {k} · held"),
                 k if viz.cycle_gains[k] < 1e-3 => format!("Repeat {k} · silent"),
                 k => format!("Repeat {k} · {}", db_text(gdb(k))),
             };
@@ -1683,47 +1701,51 @@ fn echo(
         }
     }
 
-    // ↕ feedback: anywhere on the lane, relative so it can pass 100 %
-    let fid = ui.id().with("sc_echo_fb");
-    let fd = drag_at(ui, fid, plot.expand2(Vec2::new(0.0, 14.0 * s)));
-    let fb = params.feedback.value();
-    let fv = (fd.delta.y != 0.0).then(|| (fb - fd.delta.y / plot.height() * 1.05).clamp(0.0, 1.05));
-    if fv.is_some() {
-        *focus = Some("feedback".into());
-    }
-    gesture_set(ui, fid.with("g"), setter, &params.feedback, &fd, fv);
-    if fd.double {
-        setter.begin_set_parameter(&params.feedback);
-        setter.set_parameter(&params.feedback, params.feedback.default_plain_value());
-        setter.end_set_parameter(&params.feedback);
-    }
-
-    // ↔ the cycle edge (registered last, so it wins over the lane)
+    // Frozen, the loop holds its level and length: the handles that set them
+    // step aside until it's let go.
     let gx = tx(t0 + cyc - margin);
-    let cid = ui.id().with("sc_echo_cycle");
-    let cd = drag_at(ui, cid, Rect::from_center_size(Pos2::new(gx, plot.center().y), Vec2::new(22.0 * s, plot.height() + 28.0 * s)));
-    if cd.started {
-        ui.ctx().data_mut(|m| m.insert_temp(held_id, range));
-        if params.feedback_time_locked.value() {
-            setter.begin_set_parameter(&params.feedback_time_locked);
-            setter.set_parameter(&params.feedback_time_locked, false);
-            setter.end_set_parameter(&params.feedback_time_locked);
+    if !viz.frozen {
+        // ↕ feedback: anywhere on the lane, relative so it can pass 100 %
+        let fid = ui.id().with("sc_echo_fb");
+        let fd = drag_at(ui, fid, plot.expand2(Vec2::new(0.0, 14.0 * s)));
+        let fb = params.feedback.value();
+        let fv = (fd.delta.y != 0.0).then(|| (fb - fd.delta.y / plot.height() * 1.05).clamp(0.0, 1.05));
+        if fv.is_some() {
+            *focus = Some("feedback".into());
         }
-    }
-    let cv = if cd.delta != Vec2::ZERO {
-        cd.pos.map(|q| {
-            let cycle = ((q.x - plot.left()) / plot.width() * range - t0 + margin).max(topology::MIN_FB_SECS);
-            PetalParams::feedback_time_norm_for_secs(params.sync_mode.value(), cycle, tempo)
-        })
-    } else {
-        None
-    };
-    if cv.is_some() {
-        *focus = Some("feedback_time".into());
-    }
-    gesture_set(ui, cid.with("g"), setter, &params.feedback_time, &cd, cv);
-    if cd.released {
-        ui.ctx().data_mut(|m| m.remove::<f32>(held_id));
+        gesture_set(ui, fid.with("g"), setter, &params.feedback, &fd, fv);
+        if fd.double {
+            setter.begin_set_parameter(&params.feedback);
+            setter.set_parameter(&params.feedback, params.feedback.default_plain_value());
+            setter.end_set_parameter(&params.feedback);
+        }
+
+        // ↔ the cycle edge (registered last, so it wins over the lane)
+        let cid = ui.id().with("sc_echo_cycle");
+        let cd = drag_at(ui, cid, Rect::from_center_size(Pos2::new(gx, plot.center().y), Vec2::new(22.0 * s, plot.height() + 28.0 * s)));
+        if cd.started {
+            ui.ctx().data_mut(|m| m.insert_temp(held_id, range));
+            if params.feedback_time_locked.value() {
+                setter.begin_set_parameter(&params.feedback_time_locked);
+                setter.set_parameter(&params.feedback_time_locked, false);
+                setter.end_set_parameter(&params.feedback_time_locked);
+            }
+        }
+        let cv = if cd.delta != Vec2::ZERO {
+            cd.pos.map(|q| {
+                let cycle = ((q.x - plot.left()) / plot.width() * range - t0 + margin).max(topology::MIN_FB_SECS);
+                PetalParams::feedback_time_norm_for_secs(params.sync_mode.value(), cycle, tempo)
+            })
+        } else {
+            None
+        };
+        if cv.is_some() {
+            *focus = Some("feedback_time".into());
+        }
+        gesture_set(ui, cid.with("g"), setter, &params.feedback_time, &cd, cv);
+        if cd.released {
+            ui.ctx().data_mut(|m| m.remove::<f32>(held_id));
+        }
     }
 
     // handles and their readouts: the feedback value lives in the lane's header,
@@ -1731,6 +1753,11 @@ fn echo(
     time_grid(&p, plot, range, tempo, params.sync_mode.value() == SyncMode::Sync, s, false);
     let mid = plot.center().y;
     p.line_segment([Pos2::new(gx, area.top() + 4.0 * s), Pos2::new(gx, plot.bottom())], Stroke::new(1.4 * s, INK()));
+    if viz.frozen {
+        let ctxt = format!("Held · {}", secs_text(cyc));
+        pill_in(&p, Pos2::new(gx, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &ctxt, s, INK(), PAPER(), area);
+        return;
+    }
     p.rect_filled(Rect::from_center_size(Pos2::new(gx, mid), Vec2::new(6.0, 18.0) * s), 3.0 * s, INK());
     let h = Pos2::new(tx(t0 + cyc), ly(gdb(1)));
     p.circle_filled(h, 6.0 * s, PAPER());

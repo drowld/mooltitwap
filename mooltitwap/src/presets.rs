@@ -22,6 +22,10 @@ pub const VALUES_FORMAT_PLAIN: u32 = 1;
 /// back exactly.
 const PLAIN_FLOATS: &[&str] = &["feedback_time"];
 
+/// Performance switches a preset or A/B leaves as they are (v2.35): loading
+/// one mustn't let go of a held loop, nor flipping A/B start one.
+const NOT_STORED: &[&str] = &["freeze"];
+
 /// Whether `id` is stored by plain value (discrete, or in PLAIN_FLOATS).
 unsafe fn stored_plain(id: &str, ptr: ParamPtr) -> bool {
     unsafe { ptr.step_count() }.is_some() || PLAIN_FLOATS.contains(&id)
@@ -31,6 +35,9 @@ unsafe fn stored_plain(id: &str, ptr: ParamPtr) -> bool {
 pub fn capture(params: &PetalParams) -> BTreeMap<String, f32> {
     let mut map = BTreeMap::new();
     for (id, ptr, _group) in params.param_map() {
+        if NOT_STORED.contains(&id.as_str()) {
+            continue;
+        }
         // SAFETY: ptr comes from this same params and outlives the call.
         let v = unsafe {
             if stored_plain(&id, ptr) {
@@ -60,6 +67,9 @@ unsafe fn to_normalized(id: &str, ptr: ParamPtr, stored: f32, fmt: u32) -> f32 {
 /// default instead of keeping whatever was set. Unknown ids are skipped.
 pub fn apply(params: &PetalParams, setter: &ParamSetter, snap: &BTreeMap<String, f32>, fmt: u32) {
     for (id, ptr, _group) in params.param_map() {
+        if NOT_STORED.contains(&id.as_str()) {
+            continue;
+        }
         // SAFETY: ptr belongs to params; begin/set/end like a knob drag.
         unsafe {
             let v = match snap.get(&id) {
@@ -78,7 +88,7 @@ pub fn apply(params: &PetalParams, setter: &ParamSetter, snap: &BTreeMap<String,
 /// discrete, normalized for floats), same as `capture`; a param the snapshot
 /// doesn't mention is compared with its default, as `apply` loads it.
 pub fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>) -> bool {
-    params.param_map().into_iter().all(|(id, ptr, _group)| {
+    params.param_map().into_iter().filter(|(id, _, _)| !NOT_STORED.contains(&id.as_str())).all(|(id, ptr, _group)| {
         // SAFETY: ptr comes from these params and outlives the call.
         let (live, default) = unsafe {
             if stored_plain(&id, ptr) {
@@ -300,5 +310,17 @@ mod tests {
         // A real difference still reads as edited.
         *snap.get_mut("feedback").unwrap() += 0.1;
         assert!(!matches(&params, &snap));
+    }
+
+    #[test]
+    fn freeze_stays_out_of_presets_and_a_b() {
+        let params = PetalParams::default();
+        let snap = capture(&params);
+        assert!(!snap.contains_key("freeze"));
+        // Holding a loop doesn't mark the preset edited.
+        let (_, ptr, _) = params.param_map().into_iter().find(|(id, _, _)| id == "freeze").unwrap();
+        // SAFETY: ptr belongs to `params`, alive for the whole test.
+        unsafe { ptr._internal_set_normalized_value(1.0) };
+        assert!(params.freeze.value() && matches(&params, &snap));
     }
 }

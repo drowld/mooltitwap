@@ -2,6 +2,54 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-29 · Freeze: hold the loop as it is (v2.35.0)
+
+The second Phase 4 function, built as proposed and approved by the owner
+(header button, the loop's colour bypassed while frozen, new input kept out,
+tap to switch).
+- **What it holds:** one cycle, the loop that's going round when you press
+  it, at exactly 100 %. Feedback, Curve, Tone, the Diffuse mode and Diffuse,
+  Tape or Saturate routed to FB are bypassed, so the loop doesn't darken,
+  smear or fade. The length is latched in whole samples as the hold starts,
+  so it repeats sample for sample (tested with every colour in the loop).
+- **New input stays out of the delay;** the dry signal still passes, so you
+  play over the held loop. The taps stay live (mute, pan, gain, filter), and
+  so do Mix and the output colour.
+- **Going in and out fades over 20 ms:** new input fades out, the hold fades
+  in over the coloured loop, and the reverse on letting go. Both paths run
+  during the fade, so neither switches (tested in Mix and Ping, plain and
+  with Tone and Tape in the loop). The held loop has one soft 20 ms join where
+  its newest and oldest moments meet.
+- **Letting go:** the loop decays at the Feedback setting again, with the
+  colour back. While fully held the feedback head waits at the latched
+  length, so after letting go the cycle moves on as a time change would
+  (Repitch glides it).
+- **Ping:** the held bounce keeps alternating sides. The last cycle of dry
+  input already in the main lines still enters the bounce once, as in Mix,
+  where the held cycle includes the newest input.
+- **Where it sits:** a button in the page header, between the preset box and
+  A/B, ink when on. Rejected: the Echo lane's header (the plan's first
+  place). It would be hidden behind the Motion and Tap tabs, and in Tall it
+  only fits if the readout loses "Feedback".
+- **The Echo lane shows the hold:** every repeat at full level, labelled
+  "held", the readout "Frozen · holds a 53 ms loop", and the cycle edge
+  reads "Held · 53 ms". The feedback and cycle drags and the Auto/Manual
+  choice wait until it's let go. The audio thread reports the held cycle
+  through `PetalParams::held_cycle_secs` (a plain atomic, not a param), as
+  it was before the whole-sample rounding, so the readout doesn't change
+  from 53 to 54 ms as the hold begins.
+- **Not stored in presets or A/B** (`presets::NOT_STORED`): loading a preset
+  doesn't let go of a held loop, and holding doesn't mark a preset edited. It
+  is a normal automatable param, so a session saved while frozen reopens
+  frozen, with an empty loop (the delay's contents aren't saved).
+- **Off changes nothing:** the 21-case comparison with v2.34.0 is
+  bit-identical.
+- **Found while testing, not changed here:** `DelayLine::read` interpolates
+  fractional delays backwards (`read(10.25)` returns 9.75 samples back and
+  jumps 2 samples at each whole one), so gliding delays get small jumps.
+  And the feedback head reads before the write, so each cycle comes round
+  one sample later than its length. Reported to the owner as a separate fix.
+
 ## 2026-10-28 · Loop tone: one Tone knob on the feedback (v2.34.0)
 
 The first Phase 4 function. Until now nothing filtered the loop unless Tape,
