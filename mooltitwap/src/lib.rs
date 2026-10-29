@@ -151,6 +151,15 @@ pub struct Mooltitwap {
     /// starts from nothing) so the held loop repeats bit for bit.
     freeze_w: f32,
     freeze_len: f32,
+    /// Ducking (v2.36): the dry input's level (a peak follower: 5 ms attack,
+    /// a 20 ms hold so low notes don't flutter, then the Release), the hold's
+    /// samples left, the depth gliding to the Duck knob (dB, 24 per 20 ms),
+    /// and the dip itself (dB), smoothed over 2 ms so it starts and ends
+    /// without a corner.
+    duck_env: f32,
+    duck_hold: usize,
+    duck_depth: f32,
+    duck_dip: f32,
     /// Samples since the loop last became the bounce (saturating). A tap
     /// starts swinging once the first bounced repeat has reached it.
     ping_age: usize,
@@ -255,6 +264,10 @@ impl Default for Mooltitwap {
             tone_t: 0.0,
             freeze_w: 0.0,
             freeze_len: 0.0,
+            duck_env: 0.0,
+            duck_hold: 0,
+            duck_depth: 0.0,
+            duck_dip: 0.0,
             ping_age: usize::MAX,
             ping_live: 0,
             ping_since_off: usize::MAX,
@@ -397,6 +410,9 @@ impl Plugin for Mooltitwap {
         self.tone_main.reset();
         self.tone_bounce.reset();
         self.freeze_w = 0.0;
+        self.duck_env = 0.0;
+        self.duck_hold = 0;
+        self.duck_dip = 0.0;
         self.ping_live = 0;
         self.ping_since_off = usize::MAX;
         self.ping_age = usize::MAX;
@@ -792,6 +808,19 @@ impl Plugin for Mooltitwap {
         // Ping's lines are read (by the loop and the taps) while they may hold anything.
         let ping_read = self.ping_on || self.ping_share > 0.0 || self.ping_live > 0;
 
+        // Ducking: the depth glides to the Duck knob; the follower's attack and
+        // hold are fixed, its release is the knob's.
+        let duck_target = p.duck.value();
+        if initial_snap {
+            self.duck_depth = duck_target;
+        }
+        let duck_step = 24.0 / (0.02 * sr);
+        let duck_att = 1.0 - (-1.0 / (0.005 * sr)).exp();
+        let duck_rel = 1.0 - (-1.0 / (p.duck_release.value() * 0.001 * sr)).exp();
+        let duck_hold_len = (0.02 * sr) as usize;
+        let duck_smooth = 1.0 - (-1.0 / (0.002 * sr)).exp();
+        let mut duck_most = 0.0f32;
+
         let chans = buffer.as_slice();
         let n_samples = chans[0].len();
         let (l_chan, rest) = chans.split_at_mut(1);
@@ -801,6 +830,18 @@ impl Plugin for Mooltitwap {
         for s in 0..n_samples {
             let mut in_l = l_chan[s];
             let mut in_r = r_chan[s];
+
+            // Ducking's key: the dry input as it arrives, both sides together
+            // (before In and the channel mode), so the image never shifts.
+            let key = in_l.abs().max(in_r.abs());
+            if key >= self.duck_env {
+                self.duck_env += (key - self.duck_env) * duck_att;
+                self.duck_hold = duck_hold_len;
+            } else if self.duck_hold > 0 {
+                self.duck_hold -= 1;
+            } else {
+                self.duck_env += (key - self.duck_env) * duck_rel;
+            }
 
             // Channel mode encode
             match ch_mode {
@@ -1065,6 +1106,23 @@ impl Plugin for Mooltitwap {
                 wet_r = sat(wet_r);
             }
 
+            // Ducking: only the echoes dip, after the output colour and before
+            // Mix; the loop keeps going round untouched. The dip follows how
+            // loud the input is (Tide's envelope curve): about 70 % of the
+            // depth at −12 dBFS, next to nothing for quiet notes.
+            let dip_to = self.duck_depth * (1.0 - (-5.0 * self.duck_env).exp());
+            self.duck_dip += (dip_to - self.duck_dip) * duck_smooth;
+            if self.duck_depth == 0.0 && self.duck_dip < 1e-4 {
+                // off: exactly nothing from here, not a tail of tiny dips
+                self.duck_dip = 0.0;
+            }
+            if self.duck_dip > 0.0 {
+                duck_most = duck_most.max(self.duck_dip);
+                let g = nice_plug::util::db_to_gain(-self.duck_dip);
+                wet_l *= g;
+                wet_r *= g;
+            }
+
             let mut out_l = in_l * (1.0 - dry_wet) + wet_l * dry_wet;
             let mut out_r = in_r * (1.0 - dry_wet) + wet_r * dry_wet;
 
@@ -1092,6 +1150,7 @@ impl Plugin for Mooltitwap {
             self.xf_mix += (mix_target - self.xf_mix).clamp(-xf_step, xf_step);
             self.xf_diffuse += (diffuse_target - self.xf_diffuse).clamp(-xf_step, xf_step);
             self.freeze_w += (freeze_target - self.freeze_w).clamp(-xf_step, xf_step);
+            self.duck_depth += (duck_target - self.duck_depth).clamp(-duck_step, duck_step);
             self.ping_share += (if self.ping_on { 1.0 } else { 0.0 } - self.ping_share).clamp(-xf_step, xf_step);
             self.ping_fresh = self.ping_fresh.saturating_add(1);
             self.ping_valid = self.ping_valid.saturating_add(1);
@@ -1121,6 +1180,9 @@ impl Plugin for Mooltitwap {
                 }
             }
         }
+
+        // the Duck knob shows the most the echoes dipped in this block
+        self.params.duck_dip_db.store(duck_most.to_bits(), Ordering::Relaxed);
 
         ProcessStatus::Normal
     }
@@ -1595,6 +1657,131 @@ mod tests {
         }
         let (a, b) = (energy(&out, 800.0), energy(&out, 820.0));
         assert!((a.0 > a.1) != (b.0 > b.1), "neighbouring repeats on the same side");
+    }
+
+    /// A 220 Hz tone playing from `on` to `off` seconds (5 ms ramps), `l` and
+    /// `r` its level on each side.
+    fn played(secs: f32, on: f32, off: f32, l: f32, r: f32) -> Vec<(f32, f32)> {
+        (0..(secs * SR) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let gate = ((t - on) / 0.005).min((off - t) / 0.005).clamp(0.0, 1.0);
+                let v = gate * (2.0 * PI * 220.0 * t).sin();
+                (l * v, r * v)
+            })
+            .collect()
+    }
+
+    /// How far `ducked` sits below `plain` from `a` to `b` seconds, in dB,
+    /// on each side.
+    fn dip_db(ducked: &[(f32, f32)], plain: &[(f32, f32)], a: f32, b: f32) -> (f32, f32) {
+        let w = (a * SR) as usize..(b * SR) as usize;
+        let e = |o: &[(f32, f32)], left: bool| o[w.clone()].iter().map(|s| if left { s.0 * s.0 } else { s.1 * s.1 }).sum::<f32>();
+        (10.0 * (e(ducked, true) / e(plain, true)).log10(), 10.0 * (e(ducked, false) / e(plain, false)).log10())
+    }
+
+    #[test]
+    fn the_echoes_dip_while_you_play_and_come_back() {
+        // A tone (−6 dBFS left, quieter right) for half a second into one tap
+        // with a long tail, wet only, turned down so the output limiter never
+        // acts. Duck at 12 dB, Release 300 ms, against no ducking: the echoes
+        // dip by about 11 dB (the curve gives 92 % of the depth at −6 dBFS),
+        // both sides alike, stay down through the 20 ms hold, and are back
+        // within 2 dB three release times after the input stops.
+        let run = |duck: f32| {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "feedback", 0.9);
+            set(&plug, "output_gain", -24.0);
+            set(&plug, "duck", duck);
+            set(&plug, "duck_release", 300.0);
+            render(&mut plug, &played(1.6, 0.0, 0.5, 0.5, 0.3), |_, _| {})
+        };
+        let (ducked, plain) = (run(12.0), run(0.0));
+        let (l, r) = dip_db(&ducked, &plain, 0.2, 0.45);
+        assert!((l + 11.0).abs() < 1.0 && (l - r).abs() < 0.01, "while playing: L {l:.2} dB, R {r:.2} dB");
+        let (l, _) = dip_db(&ducked, &plain, 0.53, 0.56);
+        assert!(l < -9.0, "just after: {l:.2} dB");
+        let (l, _) = dip_db(&ducked, &plain, 1.42, 1.5);
+        assert!(l > -2.0 && l < 0.0, "three release times on: {l:.2} dB");
+    }
+
+    #[test]
+    fn ducking_does_not_click() {
+        // The held tone playing half of every second (5 ms ramps) through
+        // three taps, Duck at full depth and the shortest Release, against
+        // no ducking: the dip comes and goes without a click.
+        let input: Vec<(f32, f32)> = held_tone()
+            .into_iter()
+            .enumerate()
+            .map(|(i, (l, r))| {
+                let ph = (i as f32 / SR) % 1.0;
+                let gate = (ph / 0.005).min((0.5 - ph) / 0.005).clamp(0.0, 1.0);
+                (l * gate, r * gate)
+            })
+            .collect();
+        let sharpest = |duck: f32| {
+            let mut plug = plugin(&[-0.5, 0.7, 0.0]);
+            set(&plug, "feedback", 0.6);
+            set(&plug, "duck", duck);
+            set(&plug, "duck_release", 50.0);
+            sharpest_bend(&render(&mut plug, &input, |_, _| {}))
+        };
+        let (plain, (ducked, at)) = (sharpest(0.0).0, sharpest(24.0));
+        assert!(ducked < 1.5 * plain, "{:.1}× the unducked sharpest bend, at {:.3} s", ducked / plain, at as f32 / SR + 0.3);
+    }
+
+    #[test]
+    fn a_sudden_note_ducks_without_a_click() {
+        // Freeze holds a clean sine (225 Hz fits the 40 ms cycle nine times,
+        // so the held loop has no join to speak of). Once the ducking has let
+        // go of the tone that filled it, a note that starts with no ramp at
+        // all (a pluck, a hit) only keys the ducking, since the hold keeps it
+        // out. At full depth the dip must start without a corner. Measured
+        // around the hit.
+        let input: Vec<(f32, f32)> = (0..(2.6 * SR) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let gate = (t / 0.005).min((0.35 - t) / 0.005).clamp(0.0, 1.0);
+                let held = 0.25 * gate * (2.0 * PI * 225.0 * t).sin();
+                let hit = if (2.0..2.2).contains(&t) { 0.8 * (2.0 * PI * 330.0 * (t - 2.0)).sin() } else { 0.0 };
+                (held + hit, held + hit)
+            })
+            .collect();
+        let sharpest = |duck: f32| {
+            let mut plug = plugin(&[0.0, 0.4]);
+            set(&plug, "feedback", 0.5);
+            set(&plug, "output_gain", -24.0);
+            set(&plug, "duck", duck);
+            let out = render(&mut plug, &input, freeze_from(0.3));
+            // sharpest_bend skips its first 0.3 s: this looks at 1.9–2.3 s
+            let (bend, at) = sharpest_bend(&out[(1.6 * SR) as usize..(2.3 * SR) as usize]);
+            (bend, at + (1.6 * SR) as usize)
+        };
+        let (plain, (ducked, at)) = (sharpest(0.0).0, sharpest(24.0));
+        assert!(ducked < 1.5 * plain, "{:.1}× the unducked sharpest bend, at {:.3} s", ducked / plain, at as f32 / SR + 0.3);
+    }
+
+    #[test]
+    fn a_held_loop_ducks_under_your_playing() {
+        // Freeze holds a noise burst going round; a tone played over it from
+        // 0.6 s (kept out of the loop) dips the held loop, which comes back
+        // after it stops.
+        let run = |duck: f32| {
+            let mut plug = plugin(&[0.0, 0.4]);
+            set(&plug, "feedback", 0.5);
+            set(&plug, "output_gain", -24.0);
+            set(&plug, "duck", duck);
+            let mut input = noise_burst(2.5);
+            for (s, t) in input.iter_mut().zip(played(2.5, 0.6, 1.0, 0.5, 0.5)) {
+                s.0 += t.0;
+                s.1 += t.1;
+            }
+            render(&mut plug, &input, freeze_from(0.1))
+        };
+        let (ducked, plain) = (run(12.0), run(0.0));
+        let (during, _) = dip_db(&ducked, &plain, 0.7, 0.95);
+        let (after, _) = dip_db(&ducked, &plain, 2.3, 2.4);
+        assert!(during < -9.0 && after > -1.0, "during {during:.2} dB, after {after:.2} dB");
     }
 
     #[test]

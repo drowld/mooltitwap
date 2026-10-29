@@ -3,6 +3,7 @@ _State & detail live in docs/HANDOFF.md. This is the live todo list (role.md for
 
 ## In Progress
 - **Phase 4, new functions** (order agreed 2026-10-28): Loop tone → Freeze → Ducking → Pattern tools → Euclidean (Swing still to decide) → Motion. See docs/REDESIGN_PLAN.md Phase 4.
+- **Ducking (v2.36.0)** — Duck (Off → 24 dB) and Release (50 ms → 2 s) in the Output card: the echoes dip while you play, keyed from the dry input (linked, before In), only the wet; live dip on the Duck knob. Built, 39 tests pass, off is bit-identical to v2.35.0. Installed on desktop 2026-10-29 (iPad skipped). NEXT: owner's hand test. Linear SOF-68. See DECISIONS.md 2026-10-29.
 - **Freeze (v2.35.0)** — header button holds the current loop at exactly 100 % (input kept out, Feedback/Curve/loop colour bypassed, length latched in whole samples); 20 ms fades; not in presets or A/B; the Echo lane shows the hold. Built, 35 tests pass, off is bit-identical to v2.34.0. Installed on desktop 2026-10-29; iPad skipped for now (it still has v2.34.0). NEXT: owner's hand test. Linear SOF-59. See DECISIONS.md 2026-10-29.
 - **Loop tone (v2.34.0)** — one Tone knob in the lane's Loop row (LP 20 kHz→600 Hz left, HP 20 Hz→1 kHz right, off at centre), in both loops. Committed `8d99907`, installed desktop + iPad 2026-10-28. NEXT: owner's by-ear test. Linear SOF-58. See DECISIONS.md 2026-10-28.
 - **v2.30–v2.33.2 committed** as checkpoint `66cb842` (local, not pushed). v2.33.2 installed on desktop + iPad 2026-10-28 (iPad launch refused while locked: open Afterecho once so hosts see it).

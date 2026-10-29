@@ -185,7 +185,8 @@ Proposed and decided on 2026-10-27.
 **Progress, 2026-10-28:** the order is loop tone, Freeze, ducking, pattern tools, Euclidean, Motion (v2.30–v2.33.2 committed first as a checkpoint).
 - **v2.34.0:** loop tone is built: one Tone knob in the Loop row, a one-pole low-pass left of centre and high-pass right of it, off at the centre (bit-identical to v2.33.2). See DECISIONS.md.
 - **v2.35.0:** Freeze is built: a header button (moved from the Echo lane header, where it would hide behind the Motion and Tap tabs) that holds the current loop at exactly 100 %, input kept out and the loop's colour bypassed. See DECISIONS.md.
-- Next: ducking.
+- **v2.36.0:** ducking is built: Duck and Release in the Output card, the echoes dip with how loud you play, keyed from the dry input; the live dip shows on the Duck knob. See DECISIONS.md.
+- Next: pattern tools.
 - **In:** loop tone, Freeze, ducking, pattern tools, Motion, real Euclidean spacing.
 - **Out:** shift in the loop. You judged it would be messy and sound meh in a multitap.
 - **Later, in an update after release:** 32 taps. Keep 16 for the redesign.

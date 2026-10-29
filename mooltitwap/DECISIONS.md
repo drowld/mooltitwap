@@ -2,6 +2,43 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-29 · Ducking: the echoes dip while you play (v2.36.0)
+
+The third Phase 4 function, built as proposed and approved by the owner
+(Duck and Release knobs in Output, the dip follows playing level, the live
+dip shown on the Duck knob).
+- **Only the echoes dip:** after the taps and the output colour, before Mix.
+  The dry signal is untouched, and the repeats keep going round at full
+  level inside the loop, so the tail comes back as it would have been.
+  Nothing in the loop changes, so self-oscillation is unaffected.
+- **Duck** is the most the echoes can dip, Off to 24 dB. **Release** is how
+  fast they come back, 50 ms to 2 s (default 300 ms, a one-pole time
+  constant).
+- **The dip follows playing level,** with Tide's envelope curve `1 − e^(−5·env)`:
+  about 70 % of the depth at −12 dBFS, 27 % at −24 dBFS, next to nothing
+  for quiet notes. No threshold knob. Rejected: a threshold (one more
+  control for a small feature).
+- **The key is the dry input as it arrives,** both sides together (the
+  larger of the two), before In and the channel mode. The image never shifts,
+  and In (how hard the delay is driven) doesn't change the ducking.
+- **The follower:** 5 ms attack, a 20 ms hold so low notes don't make it
+  flutter, then the Release. The dip is smoothed over 2 ms so it starts and
+  ends without a corner. A test proves the smoother is needed: Freeze
+  holds a clean sine and a note that starts with no ramp keys the ducking;
+  without the smoother the dip's start is a corner 3× sharper than the
+  sine's own bend, with it 1.0×.
+- **The Duck knob shows the live dip** as a thin accent arc inside the dial,
+  on the knob's own scale (the audio thread reports the most dip of each
+  block through `PetalParams::duck_dip_db`, a plain atomic).
+- **In the Output card:** In, Mix, Out, a rule, then Duck and Release, in the
+  same columns as Colour's Route above. Out moved from the card's middle to
+  column 2 so the two groups read apart.
+- **Freeze plus Duck:** a held loop dips under your playing (tested).
+- **Stored in presets** (part of the sound, unlike Freeze). **Off changes
+  nothing:** the 21-case comparison with v2.35.0 is bit-identical.
+- Not built: an external sidechain (no second input today, and AUv3 hosts
+  differ on sidechains).
+
 ## 2026-10-29 · Freeze: hold the loop as it is (v2.35.0)
 
 The second Phase 4 function, built as proposed and approved by the owner

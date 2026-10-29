@@ -527,16 +527,19 @@ fn cell_at(inner: Rect, cols: usize, rows: usize, row: usize, col: usize, span: 
     Rect::from_min_size(Pos2::new(x, y), Vec2::new(cw * span as f32 + gap * (span as f32 - 1.0), ch))
 }
 
+/// Points along a dial's sweep (270°, from 7:30), from `v0` to `v1` of it.
+fn dial_arc(c: Pos2, rad: f32, v0: f32, v1: f32) -> Vec<Pos2> {
+    let (a0, a1) = ((-135.0 + 270.0 * v0).to_radians(), (-135.0 + 270.0 * v1).to_radians());
+    (0..=28)
+        .map(|i| {
+            let t = a0 + (a1 - a0) * i as f32 / 28.0;
+            Pos2::new(c.x + rad * t.sin(), c.y - rad * t.cos())
+        })
+        .collect()
+}
+
 fn paint_dial(p: &egui::Painter, c: Pos2, rad: f32, n: f32, bip: bool, s: f32, alpha: u8) {
-    let arc = |v0: f32, v1: f32| -> Vec<Pos2> {
-        let (a0, a1) = ((-135.0 + 270.0 * v0).to_radians(), (-135.0 + 270.0 * v1).to_radians());
-        (0..=28)
-            .map(|i| {
-                let t = a0 + (a1 - a0) * i as f32 / 28.0;
-                Pos2::new(c.x + rad * t.sin(), c.y - rad * t.cos())
-            })
-            .collect()
-    };
+    let arc = |v0: f32, v1: f32| dial_arc(c, rad, v0, v1);
     let sw = 3.0 * s;
     p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(sw, theme::with_alpha(theme::line2(), alpha))));
     let (v0, v1) = if bip { (n.min(0.5), n.max(0.5)) } else { (0.0, n.max(0.004)) };
@@ -2004,12 +2007,24 @@ fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Peta
 fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, focus: &mut Option<String>) {
     let rect = r(o, s, l.right_x, l.output.0, l.right_w, l.output.1);
     let inner = card(ui, rect, "Output", s);
-    // Spread across the card on the shared grid (columns 0, 2, 4), so it
-    // doesn't sit in the left half.
+    // Levels on the left; ducking after a rule, in the columns Colour's
+    // Route uses above it.
     let c = |col| cell_at(inner, 6, 1, 0, col, 1, s);
     knob_cell(ui, c(0), s, setter, &params.input_gain, "input_gain", "In", true, true, None, focus);
-    knob_cell(ui, c(2), s, setter, &params.dry_wet, "dry_wet", "Mix", false, true, None, focus);
-    knob_cell(ui, c(4), s, setter, &params.output_gain, "output_gain", "Out", true, true, None, focus);
+    knob_cell(ui, c(1), s, setter, &params.dry_wet, "dry_wet", "Mix", false, true, None, focus);
+    knob_cell(ui, c(2), s, setter, &params.output_gain, "output_gain", "Out", true, true, None, focus);
+    let xr = c(4).left() - 4.0 * s;
+    rule(ui.painter(), Pos2::new(xr, inner.top() + 8.0 * s), Pos2::new(xr, inner.bottom() - 4.0 * s), s);
+    knob_cell(ui, c(4), s, setter, &params.duck, "duck", "Duck", false, true, None, focus);
+    knob_cell(ui, c(5), s, setter, &params.duck_release, "duck_release", "Release", false, true, None, focus);
+    // How far the echoes dip right now: a thin arc inside the Duck dial, on
+    // the knob's own scale (its full sweep is 24 dB).
+    let dip = f32::from_bits(params.duck_dip_db.load(std::sync::atomic::Ordering::Relaxed));
+    if dip > 0.05 {
+        let (ctl, _, _) = cell_parts(c(4), s);
+        let arc = dial_arc(ctl.center(), (g::DIAL * 0.5 - 5.5) * s, 0.0, (dip / 24.0).min(1.0));
+        ui.painter().add(egui::Shape::line(arc, Stroke::new(2.0 * s, G())));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

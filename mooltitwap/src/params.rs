@@ -406,6 +406,19 @@ pub struct PetalParams {
     pub dry_wet: FloatParam,
     #[id = "output_gain"]
     pub output_gain: FloatParam,
+
+    // ---- Ducking (v2.36): the echoes dip while the dry input is loud ----
+    /// The most the echoes dip, in dB (0 = off). How far they actually dip
+    /// follows how loud the dry input is.
+    #[id = "duck"]
+    pub duck: FloatParam,
+    /// How fast the echoes come back once the input goes quiet (ms).
+    #[id = "duck_release"]
+    pub duck_release: FloatParam,
+    /// The echoes' dip right now in dB (f32 bits, the most in the last
+    /// block). Written by the audio thread for the Duck knob; not a param,
+    /// not saved.
+    pub duck_dip_db: AtomicU32,
 }
 
 #[derive(Params)]
@@ -693,6 +706,34 @@ impl Default for PetalParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1))
             .with_smoother(SmoothingStyle::Linear(20.0)),
+
+            duck: FloatParam::new("Duck", 0.0, FloatRange::Linear { min: 0.0, max: 24.0 })
+                .with_value_to_string(Arc::new(|v| if v < 0.05 { "Off".into() } else { format!("−{v:.1} dB") }))
+                .with_string_to_value(Arc::new(|s| {
+                    let s = s.trim().to_ascii_lowercase();
+                    if s == "off" {
+                        return Some(0.0);
+                    }
+                    let n = s.trim_end_matches("db").trim().trim_start_matches(['-', '−']).trim();
+                    n.parse::<f32>().ok()
+                })),
+            duck_release: FloatParam::new(
+                "Duck Release",
+                300.0,
+                FloatRange::Skewed { min: 50.0, max: 2000.0, factor: FloatRange::skew_factor(-1.5) },
+            )
+            .with_value_to_string(Arc::new(|v| if v < 1000.0 { format!("{v:.0} ms") } else { format!("{:.2} s", v / 1000.0) }))
+            .with_string_to_value(Arc::new(|s| {
+                let s = s.trim().to_ascii_lowercase();
+                if let Some(ms) = s.strip_suffix("ms") {
+                    ms.trim().parse().ok()
+                } else if let Some(secs) = s.strip_suffix('s') {
+                    secs.trim().parse::<f32>().ok().map(|v| v * 1000.0)
+                } else {
+                    s.parse().ok()
+                }
+            })),
+            duck_dip_db: AtomicU32::new(0),
         }
     }
 }
