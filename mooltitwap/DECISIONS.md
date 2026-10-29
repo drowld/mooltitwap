@@ -2,6 +2,46 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-29 · Motion: one source moves every tap (v2.39.0)
+
+The last Phase 4 function, built as proposed and approved by the owner (it
+fills the lane's Motion tab, empty since v2.29).
+- **One source moves every live tap's Pan, Gain, Cutoff and Reso** around the
+  values set for them, each with its own depth (0 = still). Pan moves up to
+  hard L or R either side, Gain only dips (up to 24 dB, so Motion never
+  boosts or clips), Cutoff ±4 octaves, Q up to ×/÷4 (`motion.rs`, shared by
+  the engine and the page).
+- **Not time.** Moving delay times is the pitch wobble removed in v2.17.5
+  ("not so sensitive for that plugin") and it breaks Fade and Jump. Rejected:
+  a small Time depth in Repitch only.
+- **Sources:** Sine, Tri, Ramp, Square, S&H (a new random value each cycle,
+  each tap its own), Glide (Tide's Glider: random values eased together),
+  and Env, the dry input's level (10 ms up, 200 ms down, Tide's curve), so
+  playing harder moves the taps. Tide's Smooth was left out: it's close to
+  Glide.
+- **Rate follows Time's Sync,** as the feedback cycle does: 0.05–8 Hz in Free,
+  note values from 8 bars to 1/16 (dotted and triplet too) in Sync, where
+  the cycle sits at the song's position while the host plays. Two params
+  (`motion_rate`, `motion_div`) so each reads right in a host; one knob shows
+  whichever runs.
+- **Scatter** spreads the taps' phases round the cycle (0: together, 100 %: a
+  whole cycle across them, so the movement travels through the cluster).
+  Env ignores it.
+- **The engine re-aims the taps every 32 samples** and the per-tap glides
+  (v2.37) smooth the steps. A Square at full depth on Pan, Gain and Cutoff
+  over a held tone: 1.32× the still tone's sharpest bend; with the glides
+  off, 544× at a square edge. Ping's repeats follow the moved pan too.
+- **The field shows it:** each tap's dot is where Motion has it now, its set
+  value (what a drag moves) a ring joined to it; Bars show an ink dot
+  against the bar. The engine reports each tap's motion through
+  `PetalParams::motion_now` (plain atomics). The Motion tab: the source as a
+  vertical list, then Rate, Scatter, a "Taps now" strip and the four depths;
+  in Tall it takes the whole lane, as the Tap tab does.
+- **Off is off:** with every depth at 0, the 21-case comparison with v2.38.0
+  is bit-identical. Presets store Motion.
+- Not measured yet: CPU on the iPad while Cutoff or Reso move (the filters
+  are recomputed then).
+
 ## 2026-10-29 · Euclidean spacing and Swing (v2.38.0)
 
 The fifth Phase 4 function, built as proposed and approved by the owner; it

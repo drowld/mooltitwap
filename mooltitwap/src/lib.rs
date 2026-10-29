@@ -5,6 +5,7 @@ mod filter;
 mod gui;
 mod gui_scope;
 mod gui_v3;
+mod motion;
 mod palette_scope;
 mod palette_v3;
 mod params;
@@ -22,7 +23,7 @@ use crate::delay::{ChannelTaps, DelayLine, SlewedTime};
 use crate::diffusion::Diffusion;
 use crate::filter::{soft_clip, LoopTone, PeakLimiter, Svf, ToneCoefs};
 use crate::params::{
-    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, PetalParams, TapeType, NUM_TAPS,
+    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, MotionShape, PetalParams, TapeType, NUM_TAPS,
 };
 use crate::tape::{TapeDegrade, TapeDegradeParams, TapeKind};
 use crate::topology::TopologyEngine;
@@ -178,6 +179,11 @@ pub struct Mooltitwap {
     duck_hold: usize,
     duck_depth: f32,
     duck_dip: f32,
+    /// Motion (v2.39): where its cycle is (in cycles), the dry input's level
+    /// for Env (10 ms up, 200 ms down), and each tap's motion now (−1…1).
+    motion_phase: f64,
+    motion_env: f32,
+    motion_m: [f32; NUM_TAPS],
     /// Samples since the loop last became the bounce (saturating). A tap
     /// starts swinging once the first bounced repeat has reached it.
     ping_age: usize,
@@ -306,6 +312,9 @@ impl Default for Mooltitwap {
             duck_hold: 0,
             duck_depth: 0.0,
             duck_dip: 0.0,
+            motion_phase: 0.0,
+            motion_env: 0.0,
+            motion_m: [0.0; NUM_TAPS],
             ping_age: usize::MAX,
             ping_live: 0,
             ping_since_off: usize::MAX,
@@ -462,6 +471,7 @@ impl Plugin for Mooltitwap {
         self.duck_env = 0.0;
         self.duck_hold = 0;
         self.duck_dip = 0.0;
+        self.motion_env = 0.0;
         self.ping_live = 0;
         self.ping_since_off = usize::MAX;
         self.ping_age = usize::MAX;
@@ -497,6 +507,7 @@ impl Plugin for Mooltitwap {
         let p = self.params.clone();
 
         let tempo_bpm = ctx.transport().tempo.unwrap_or(120.0) as f32;
+        let (playing, song_beats) = (ctx.transport().playing, ctx.transport().pos_beats());
         // Publish tempo to GUI thread for accurate grid/sync display
         self.tempo_bpm_shared.store(tempo_bpm.to_bits(), Ordering::Relaxed);
         let time_l_norm = p.base_time_l.value();
@@ -789,6 +800,25 @@ impl Plugin for Mooltitwap {
             }
         }
         let tap_glide = 1.0 - (-1.0 / (0.005 * sr)).exp();
+
+        // Motion (v2.39): one source moves every live tap's pan, gain, cutoff
+        // and Q around their set values (kept here); with every depth at 0 it
+        // is off. It re-aims the taps every 32 samples and the glides above
+        // smooth it. In Sync, while the host plays, the cycle sits where the
+        // song is.
+        let mdepth = p.motion_depths();
+        let motion = mdepth.any();
+        let mshape = p.motion_shape.value();
+        let mscatter = p.motion_scatter.value();
+        let mstep = p.motion_hz(tempo_bpm) as f64 / sr as f64;
+        if let (Some(beats), true, Some(pos)) = (p.motion_beats(), playing, song_beats) {
+            self.motion_phase = pos / beats as f64;
+        }
+        let set_db: [f32; NUM_TAPS] = core::array::from_fn(|i| p.taps[i].gain_db.value());
+        let set_pan: [f32; NUM_TAPS] = core::array::from_fn(|i| p.taps[i].pan.value());
+        let (set_cut, set_q) = (tap_cut, tap_q);
+        let menv_up = 1.0 - (-1.0 / (0.01 * sr)).exp();
+        let menv_down = 1.0 - (-1.0 / (0.2 * sr)).exp();
         let cut_up = 1000f32.powf(1.0 / (0.02 * sr));
         let q_up = 120f32.powf(1.0 / (0.02 * sr));
         let type_step = 1.0 / (0.01 * sr);
@@ -819,7 +849,9 @@ impl Plugin for Mooltitwap {
             let reach = self.main_l.readers[i].reach().max(self.main_r.readers[i].reach()) as usize + 4;
             // a tap swings once the first bounced repeat has reached it
             let w = if swinging && self.ping_age >= reach { width } else { 0.0 };
-            ping_target[i] = bounce::placement(ch_mode, p.taps[i].pan.value(), w);
+            // (Motion's pan as of the last block: the placement glides anyway)
+            let pan = motion::pan(p.taps[i].pan.value(), self.motion_m[i], mdepth.pan);
+            ping_target[i] = bounce::placement(ch_mode, pan, w);
             if !ping_was_live {
                 self.ping_gain[i] = ping_target[i];
                 self.ping_gain_mid[i] = ping_target[i];
@@ -913,6 +945,33 @@ impl Plugin for Mooltitwap {
             } else {
                 self.duck_env += (key - self.duck_env) * duck_rel;
             }
+            self.motion_env += (key - self.motion_env) * if key > self.motion_env { menv_up } else { menv_down };
+
+            // Motion: re-aim the live taps (the glides smooth the steps).
+            if motion && s % 32 == 0 {
+                let env_m = motion::env_value(self.motion_env);
+                for i in 0..n_active {
+                    let m = if mshape == MotionShape::Env {
+                        env_m
+                    } else {
+                        motion::shape_at(mshape, motion::tap_phase(self.motion_phase, mscatter, i, n_active), i)
+                    };
+                    self.motion_m[i] = m;
+                    if mdepth.pan > 0.0 {
+                        (tap_pan_l[i], tap_pan_r[i]) = bounce::pan_gains(motion::pan(set_pan[i], m, mdepth.pan));
+                    }
+                    if mdepth.gain > 0.0 && tap_gain[i] > 0.0 {
+                        tap_gain[i] = nice_plug::util::db_to_gain(motion::gain_db(set_db[i], m, mdepth.gain));
+                    }
+                    if mdepth.cutoff > 0.0 {
+                        tap_cut[i] = motion::cutoff(set_cut[i], m, mdepth.cutoff);
+                    }
+                    if mdepth.reso > 0.0 {
+                        tap_q[i] = motion::reso(set_q[i], m, mdepth.reso);
+                    }
+                }
+            }
+            self.motion_phase += mstep;
 
             // Channel mode encode
             match ch_mode {
@@ -1292,6 +1351,11 @@ impl Plugin for Mooltitwap {
 
         // the Duck knob shows the most the echoes dipped in this block
         self.params.duck_dip_db.store(duck_most.to_bits(), Ordering::Relaxed);
+        // and the field each tap's motion
+        for (i, now) in self.params.motion_now.iter().enumerate() {
+            let m = if motion && i < n_active { self.motion_m[i] } else { 0.0 };
+            now.store(m.to_bits(), Ordering::Relaxed);
+        }
 
         ProcessStatus::Normal
     }
@@ -1976,6 +2040,100 @@ mod tests {
         assert!((viz.fb_cycle_norm * viz.grid_range_secs - 0.16).abs() < 1e-4);
         set(&plug, "num_taps_active", 12.0);
         assert_eq!(plug.params.taps_heard(), 8);
+    }
+
+    /// The stereo balance of 20 ms windows: −1 all left … 1 all right.
+    fn balances(out: &[(f32, f32)]) -> Vec<f32> {
+        out.chunks((0.02 * SR) as usize)
+            .map(|w| {
+                let (l, r) = w.iter().fold((0.0, 0.0), |(l, r), s| (l + s.0 * s.0, r + s.1 * s.1));
+                (r - l) / (r + l).max(1e-12)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn motion_swings_the_taps_from_side_to_side() {
+        // noise through one centred tap; Motion's sine at 2 Hz on Pan, full depth
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "motion_rate", 2.0);
+        set(&plug, "motion_pan", 1.0);
+        let input: Vec<(f32, f32)> = noise_burst(1.0).iter().enumerate().map(|(i, _)| {
+            let v = ((i as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0 - 0.5;
+            (0.3 * v, 0.3 * v)
+        }).collect();
+        let b = balances(&render(&mut plug, &input, |_, _| {}));
+        let (lo, hi) = b[3..].iter().fold((1.0f32, -1.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        assert!(hi > 0.8 && lo < -0.8, "balance {lo:.2} … {hi:.2}");
+    }
+
+    #[test]
+    fn motion_on_gain_only_dips() {
+        // the same tone with and without Gain motion: never louder, sometimes much softer
+        let run = |depth: f32| {
+            let mut plug = plugin(&[0.0, 0.0, 0.0]);
+            set(&plug, "motion_rate", 3.0);
+            set(&plug, "motion_gain", depth);
+            render(&mut plug, &held_tone(), |_, _| {})
+        };
+        let (still, moving) = (run(0.0), run(1.0));
+        let peak = |o: &[(f32, f32)], a: f32, b: f32| o[(a * SR) as usize..(b * SR) as usize].iter().fold(0.0f32, |m, s| m.max(s.0.abs()));
+        assert!(peak(&moving, 0.5, 4.5) <= peak(&still, 0.5, 4.5) * 1.001);
+        assert!(rms(&moving, 0.5, 4.5) < 0.7 * rms(&still, 0.5, 4.5));
+    }
+
+    #[test]
+    fn env_motion_opens_the_filter_while_you_play() {
+        // Env on Cutoff, full depth, a tap set to 1 kHz: up while the tone
+        // plays, down again in the silence after it
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "motion_shape", 6.0);
+        set(&plug, "motion_cutoff", 1.0);
+        set(&plug, "tap_filter_cutoff_1", 1000.0);
+        render(&mut plug, &played(0.5, 0.0, 0.5, 0.5, 0.5), |_, _| {});
+        let playing = plug.tap_cut_now[0];
+        render(&mut plug, &vec![(0.0, 0.0); (1.5 * SR) as usize], |_, _| {});
+        let quiet = plug.tap_cut_now[0];
+        assert!(playing > 4000.0 && quiet < 200.0, "playing {playing:.0} Hz, quiet {quiet:.0} Hz");
+    }
+
+    #[test]
+    fn synced_motion_sits_where_the_song_is() {
+        // Sync, a cycle of one bar, the host playing at beat 1 (a quarter of
+        // the bar in): the sine is at its top
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "sync_mode", 1.0);
+        set(&plug, "motion_div", 3.0);
+        set(&plug, "motion_pan", 1.0);
+        let mut t = Transport::new(SR);
+        (t.playing, t.tempo, t.pos_beats) = (true, Some(120.0), Some(1.0));
+        let mut host = Host(t);
+        let (mut l, mut r) = (vec![0.0f32; 32], vec![0.0f32; 32]);
+        let mut buffer = Buffer::default();
+        // SAFETY: l and r outlive the buffer.
+        unsafe { buffer.set_slices(32, |b| *b = vec![&mut l[..], &mut r[..]]) };
+        plug.process(&mut buffer, &mut AuxiliaryBuffers { inputs: &mut [], outputs: &mut [] }, &mut host);
+        assert!(plug.motion_m[0] > 0.999, "{}", plug.motion_m[0]);
+    }
+
+    #[test]
+    fn square_motion_does_not_click() {
+        // a Square at full depth on Pan, Gain and Cutoff, over the held tone
+        // through three taps, against it still: the glides round every edge
+        let input = held_tone();
+        let sharpest = |depth: f32| {
+            let mut plug = plugin(&[-0.5, 0.7, 0.0]);
+            set(&plug, "feedback", 0.6);
+            set(&plug, "motion_shape", 3.0);
+            set(&plug, "motion_rate", 2.0);
+            for id in ["motion_pan", "motion_gain", "motion_cutoff"] {
+                set(&plug, id, depth);
+            }
+            set(&plug, "tap_filter_cutoff_1", 2000.0);
+            sharpest_bend(&render(&mut plug, &input, |_, _| {}))
+        };
+        let (still, (moving, at)) = (sharpest(0.0).0, sharpest(1.0));
+        assert!(moving < 1.5 * still, "{:.1}× the still tone's sharpest bend, at {:.3} s", moving / still, at as f32 / SR + 0.3);
     }
 }
 

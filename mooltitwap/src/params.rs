@@ -64,6 +64,45 @@ pub fn fb_div(norm: f32) -> (f32, &'static str) {
     }
 }
 
+/// Motion's source (v2.39): an LFO shape, or the dry input's level.
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum MotionShape {
+    #[id = "sine"]
+    Sine,
+    #[id = "tri"]
+    #[name = "Tri"]
+    Triangle,
+    #[id = "ramp"]
+    Ramp,
+    #[id = "square"]
+    Square,
+    #[id = "sample_hold"]
+    #[name = "S&H"]
+    SampleHold,
+    #[id = "glide"]
+    Glide,
+    #[id = "env"]
+    Env,
+}
+
+/// Motion's cycle in Sync, slow to fast: (beats per cycle, label).
+pub const MOTION_DIVS: &[(f32, &str)] = &[
+    (32.0, "8 bars"),
+    (16.0, "4 bars"),
+    (8.0, "2 bars"),
+    (4.0, "1 bar"),
+    (3.0, "1/2."),
+    (2.0, "1/2"),
+    (4.0 / 3.0, "1/2T"),
+    (1.5, "1/4."),
+    (1.0, "1/4"),
+    (2.0 / 3.0, "1/4T"),
+    (0.75, "1/8."),
+    (0.5, "1/8"),
+    (1.0 / 3.0, "1/8T"),
+    (0.25, "1/16"),
+];
+
 /// The loop tone as its filter: "Off", "LP 3.5 kHz", "HP 140 Hz".
 pub fn tone_text(t: f32) -> String {
     let (kind, hz) = match t {
@@ -430,6 +469,32 @@ pub struct PetalParams {
     /// block). Written by the audio thread for the Duck knob; not a param,
     /// not saved.
     pub duck_dip_db: AtomicU32,
+
+    // ---- Motion (v2.39): one source moves every tap's pan, gain, cutoff and Q ----
+    #[id = "motion_shape"]
+    pub motion_shape: EnumParam<MotionShape>,
+    /// The rate in Free (Hz) and the cycle in Sync (an index into
+    /// MOTION_DIVS); which runs follows Time's Sync, as the feedback cycle does.
+    #[id = "motion_rate"]
+    pub motion_rate: FloatParam,
+    #[id = "motion_div"]
+    pub motion_div: IntParam,
+    /// 0: the taps move together … 1: their phases spread evenly round the
+    /// cycle, so the movement travels through them.
+    #[id = "motion_scatter"]
+    pub motion_scatter: FloatParam,
+    /// How far each one moves (0 = still); see `motion.rs`.
+    #[id = "motion_pan"]
+    pub motion_pan: FloatParam,
+    #[id = "motion_gain"]
+    pub motion_gain: FloatParam,
+    #[id = "motion_cutoff"]
+    pub motion_cutoff: FloatParam,
+    #[id = "motion_reso"]
+    pub motion_reso: FloatParam,
+    /// Each tap's motion right now, −1…1 (f32 bits), for the page to draw.
+    /// Written by the audio thread; not params, not saved.
+    pub motion_now: [AtomicU32; NUM_TAPS],
 }
 
 #[derive(Params)]
@@ -756,6 +821,26 @@ impl Default for PetalParams {
                 }
             })),
             duck_dip_db: AtomicU32::new(0),
+
+            motion_shape: EnumParam::new("Motion Shape", MotionShape::Sine),
+            motion_rate: FloatParam::new(
+                "Motion Rate",
+                0.5,
+                FloatRange::Skewed { min: 0.05, max: 8.0, factor: FloatRange::skew_factor(-2.0) },
+            )
+            .with_value_to_string(Arc::new(|v| if v < 1.0 { format!("{v:.2} Hz") } else { format!("{v:.1} Hz") }))
+            .with_string_to_value(Arc::new(|s| s.trim().to_ascii_lowercase().trim_end_matches("hz").trim().parse().ok())),
+            motion_div: IntParam::new("Motion Cycle", 3, IntRange::Linear { min: 0, max: MOTION_DIVS.len() as i32 - 1 })
+                .with_value_to_string(Arc::new(|v| MOTION_DIVS[(v.max(0) as usize).min(MOTION_DIVS.len() - 1)].1.to_string())),
+            motion_scatter: FloatParam::new("Motion Scatter", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            motion_pan: motion_depth("Motion Pan"),
+            motion_gain: motion_depth("Motion Gain"),
+            motion_cutoff: motion_depth("Motion Cutoff"),
+            motion_reso: motion_depth("Motion Reso"),
+            motion_now: core::array::from_fn(|_| AtomicU32::new(0)),
         }
     }
 }
@@ -778,6 +863,27 @@ impl PetalParams {
             rotate: self.euclid_rotate.value() as usize,
             swing: self.swing.value(),
         }
+    }
+
+    /// Motion's depths (v2.39); all 0 means Motion is off.
+    pub fn motion_depths(&self) -> crate::motion::Depths {
+        crate::motion::Depths {
+            pan: self.motion_pan.value(),
+            gain: self.motion_gain.value(),
+            cutoff: self.motion_cutoff.value(),
+            reso: self.motion_reso.value(),
+        }
+    }
+
+    /// Motion's beats per cycle when Time is synced, else None (it runs in Hz).
+    pub fn motion_beats(&self) -> Option<f32> {
+        (self.sync_mode.value() == SyncMode::Sync)
+            .then(|| MOTION_DIVS[(self.motion_div.value().max(0) as usize).min(MOTION_DIVS.len() - 1)].0)
+    }
+
+    /// Motion's cycles per second at `tempo` (BPM).
+    pub fn motion_hz(&self, tempo: f32) -> f32 {
+        self.motion_beats().map_or_else(|| self.motion_rate.value(), |beats| tempo / 60.0 / beats)
     }
 
     /// The taps heard: Euclid places at most one per step, and any more stay
@@ -939,4 +1045,12 @@ mod tests {
         assert_eq!(fb_div(FEEDBACK_TIME_MAX).1, "8/1");
         assert_eq!(PetalParams::default().feedback_time.value(), 8.0 / 17.0);
     }
+}
+
+/// A Motion depth knob: 0 (still) … 100 %.
+fn motion_depth(name: &str) -> FloatParam {
+    FloatParam::new(name, 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+        .with_unit(" %")
+        .with_value_to_string(formatters::v2s_f32_percentage(0))
+        .with_string_to_value(formatters::s2v_f32_percentage())
 }

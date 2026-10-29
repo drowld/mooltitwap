@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use crate::gui::{gain_db_to_pos, pos_to_gain_db, EditorState, VizData};
 use crate::bounce;
+use crate::motion;
 use crate::params::{ChannelMode, CrossfeedMode, FilterType, PetalParams, SpacingMode, SyncMode, TapParams, NUM_TAPS};
 use crate::topology;
 use crate::ui::epo;
@@ -354,9 +355,9 @@ pub fn frame(
             sc.look = Appearance::load();
             sc.look_saved = Some(sc.look);
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap,lock,presets,light,tape,pattern
+            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern
             // (the iPad page, the Bars view, the Y axis, a selected tap, the Tap
-            // tab, Lock time, the preset browser, the light page, Colour's Tape
+            // or Motion tab, Lock time, the preset browser, the light page, Colour's Tape
             // tab, the Taps menu with Ramp down applied). A preview never saves
             // the look it shows.
             if let (false, Ok(v)) = (ios, std::env::var("AFTERECHO_PREVIEW")) {
@@ -370,6 +371,7 @@ pub fn frame(
                         "type" => sc.y_axis = 4,
                         "pattern" => (sc.pat_open, sc.pat_demo) = (true, true),
                         "tap" => sc.lane_tab = 2,
+                        "motion" => sc.lane_tab = 1,
                         "lock" => sc.lock_time = true,
                         "presets" => open_presets = true,
                         "light" => sc.look.dark = false,
@@ -1453,14 +1455,21 @@ fn field(
         } else {
             5.0 * s
         };
+        // Motion: the dot is where Motion has the tap now; its set value
+        // (what a drag moves) stays as a ring.
+        let cm = Pos2::new(c.x, plot.top() + axis.norm(moved_value(params, axis, i, v)) * plot.height());
+        if (cm.y - c.y).abs() > 0.5 * s {
+            p.circle_stroke(c, rad + 1.5 * s, Stroke::new(1.0 * s, theme::with_alpha(col, 120)));
+            p.line_segment([c, cm], Stroke::new(1.5 * s, theme::with_alpha(col, 90)));
+        }
         if axis == Axis::Gain {
             let stem = theme::with_alpha(col, if active { 160 } else { 70 });
-            p.line_segment([Pos2::new(c.x, c.y + rad), Pos2::new(c.x, plot.bottom())], Stroke::new(1.5 * s, stem));
+            p.line_segment([Pos2::new(cm.x, cm.y + rad), Pos2::new(cm.x, plot.bottom())], Stroke::new(1.5 * s, stem));
         }
         if active {
-            p.circle_filled(c, rad, col);
+            p.circle_filled(cm, rad, col);
         } else {
-            p.circle_stroke(c, rad, Stroke::new(1.5 * s, col));
+            p.circle_stroke(cm, rad, Stroke::new(1.5 * s, col));
         }
         if sc.sel == Some(i) {
             selected = Some((i, c, rad));
@@ -1561,6 +1570,11 @@ fn bars(
             [Pos2::new(cx - bw * 0.5 + 2.0 * s, yv), Pos2::new(cx + bw * 0.5 - 2.0 * s, yv)],
             Stroke::new(if wide { 3.0 } else { 2.0 } * s, INK()),
         );
+        // Motion: where the tap is now, against the bar's set value
+        let ym = plot.top() + axis.norm(moved_value(params, axis, i, axis.get(tap))) * plot.height();
+        if (ym - yv).abs() > 0.5 * s {
+            p.circle_filled(Pos2::new(cx, ym), 3.5 * s, INK());
+        }
         if show_all || sel {
             mono(&p, Pos2::new(cx, plot.top() - 10.0 * s), Align2::CENTER_CENTER, &axis.short(tap, ch), 11.0, s, if sel { INK() } else { INK2() });
         }
@@ -1645,9 +1659,9 @@ fn lane(
     } else {
         (r(o, s, x, y + 40.0, 470.0, h - 40.0), r(o, s, x + 490.0, y + 44.0, w - 504.0, h - 48.0), 3)
     };
-    // On the tall page the Tap tab takes the whole lane: its eight controls
-    // need two full rows, and the loop's own come back with Echo.
-    let tap_whole = l.lane_stacked && sc.lane_tab >= 2;
+    // On the tall page the Motion and Tap tabs take the whole lane: their
+    // controls need two full rows, and the loop's own come back with Echo.
+    let whole = l.lane_stacked && sc.lane_tab >= 1;
     // The loop's controls stand apart from the tab above or beside them.
     let div = if l.lane_stacked {
         [Pos2::new(ctl.left(), curves.bottom()), Pos2::new(ctl.right(), curves.bottom())]
@@ -1655,7 +1669,7 @@ fn lane(
         let xm = curves.right() + 6.0 * s;
         [Pos2::new(xm, curves.top() + 10.0 * s), Pos2::new(xm, curves.bottom() - 10.0 * s)]
     };
-    if !tap_whole {
+    if !whole {
         p.line_segment(div, Stroke::new(1.0 * s, theme::line()));
     }
 
@@ -1675,9 +1689,7 @@ fn lane(
             text(&p, o + Vec2::new(x + w - 14.0, y + 20.0) * s, Align2::RIGHT_CENTER, &echo_readout(&viz, l.lane_stacked), 12.0, s, INK2());
             echo(ui, curves, s, params, setter, &mut sc.focus, &viz, tempo);
         }
-        1 => {
-            text(&p, curves.center(), Align2::CENTER_CENTER, "Motion — next pass", 12.0, s, SOFT());
-        }
+        1 => motion_panel(ui, if whole { curves.union(ctl) } else { curves }, s, params, setter, &mut sc.focus),
         _ => {
             let mut t = sc.sel.unwrap_or(shown).min(n - 1);
             // ‹ Tap 3 of 8 › steps through the live taps, wrapping.
@@ -1693,11 +1705,11 @@ fn lane(
             }
             sc.sel = Some(t);
             let viz = crate::gui::compute_viz_data_ex(params, tempo, 1);
-            let area = if tap_whole { curves.union(ctl) } else { curves };
+            let area = if whole { curves.union(ctl) } else { curves };
             tap_panel(ui, area, s, params, setter, &mut sc.focus, &viz, t);
         }
     }
-    if tap_whole {
+    if whole {
         return;
     }
 
@@ -1728,6 +1740,75 @@ fn lane(
     enum_cell(ui, c_curve, s, setter, &params.fb_curve, "fb_curve", "Curve", &["Natural", "Bloom", "Gate"], true, &mut sc.focus);
     // Left darkens each repeat, right thins it, the centre is off.
     knob_cell(ui, c_tone, s, setter, &params.loop_tone, "loop_tone", "Tone", true, true, None, &mut sc.focus);
+}
+
+/// The Motion tab (v2.39): the source as a list (an LFO shape, or Env, the
+/// input's level), then Rate (Hz in Free, a note value in Sync, as Time),
+/// Scatter, where every tap's motion is now, and how far each target moves.
+/// The field shows the taps moving.
+fn motion_panel(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, focus: &mut Option<String>) {
+    let p = ui.painter().clone();
+    let inner = area.shrink2(Vec2::new(14.0, 6.0) * s);
+    let shapes = ["Sine", "Tri", "Ramp", "Square", "S&H", "Glide", "Env"];
+    let list = Rect::from_min_size(inner.min + Vec2::new(0.0, 4.0 * s), Vec2::new(70.0 * s, (inner.height() - 4.0 * s).min(7.0 * 22.0 * s)));
+    let cur = enum_index(&params.motion_shape, shapes.len());
+    if let Some(i) = seg_v(ui, list, &shapes, cur, "sc_motion_shape", s, 12.0, &[]) {
+        set_norm(setter, &params.motion_shape, i as f32 / (shapes.len() - 1) as f32);
+        *focus = Some("motion_shape".into());
+    }
+    let env = cur == shapes.len() - 1;
+    let grid = Rect::from_min_max(Pos2::new(list.right() + 12.0 * s, inner.top()), inner.max);
+    let c = |row, col| cell_at(grid, 4, 2, row, col, 1, s);
+    if params.motion_beats().is_some() {
+        knob_cell(ui, c(0, 0), s, setter, &params.motion_div, "motion_div", "Rate", false, !env, None, focus);
+    } else {
+        knob_cell(ui, c(0, 0), s, setter, &params.motion_rate, "motion_rate", "Rate", false, !env, None, focus);
+    }
+    knob_cell(ui, c(0, 1), s, setter, &params.motion_scatter, "motion_scatter", "Scatter", false, !env, None, focus);
+    motion_strip(&p, cell_at(grid, 4, 2, 0, 2, 2, s), s, params);
+    let mono = params.channel_mode.value() == ChannelMode::Mono;
+    for (col, prm, id, name, on) in [
+        (0, &params.motion_pan, "motion_pan", "Pan", !mono),
+        (1, &params.motion_gain, "motion_gain", "Gain", true),
+        (2, &params.motion_cutoff, "motion_cutoff", "Cutoff", true),
+        (3, &params.motion_reso, "motion_reso", "Reso", true),
+    ] {
+        knob_cell(ui, c(1, col), s, setter, prm, id, name, false, on, None, focus);
+    }
+}
+
+/// Every live tap's motion now, a dot each (−1 at the bottom … 1 at the
+/// top), the taps in order: with Scatter the wave runs through them.
+fn motion_strip(p: &egui::Painter, cell: Rect, s: f32, params: &PetalParams) {
+    let (ctl, lab, _) = cell_parts(cell, s);
+    text(p, lab, Align2::CENTER_CENTER, "Taps now", 11.0, s, INK2());
+    let bx = Rect::from_min_max(
+        Pos2::new(ctl.left() + 6.0 * s, ctl.top()),
+        Pos2::new(ctl.right() - 6.0 * s, ctl.bottom() + g::LBL_H * s),
+    );
+    p.rect_filled(bx, g::R_CTL * s, INSET());
+    let mid = bx.center().y;
+    p.line_segment([Pos2::new(bx.left() + 6.0 * s, mid), Pos2::new(bx.right() - 6.0 * s, mid)], Stroke::new(1.0 * s, theme::line()));
+    let n = n_active(params);
+    for i in 0..n {
+        let m = f32::from_bits(params.motion_now[i].load(std::sync::atomic::Ordering::Relaxed));
+        let x = bx.left() + (i as f32 + 0.5) / n as f32 * bx.width();
+        p.circle_filled(Pos2::new(x, mid - m * (bx.height() * 0.5 - 5.0 * s)), 3.0 * s, tap_col(i, n));
+    }
+}
+
+/// Where Motion has tap `i` right now on `axis` (v2.39): its set value `v`
+/// moved by the tap's motion at that target's depth. Type doesn't move.
+fn moved_value(params: &PetalParams, axis: Axis, i: usize, v: f32) -> f32 {
+    let m = f32::from_bits(params.motion_now[i].load(std::sync::atomic::Ordering::Relaxed));
+    let d = params.motion_depths();
+    match axis {
+        Axis::Pan => motion::pan(v, m, d.pan),
+        Axis::Gain => motion::gain_db(v, m, d.gain),
+        Axis::Cutoff => motion::cutoff(v, m, d.cutoff),
+        Axis::Reso => motion::reso(v, m, d.reso),
+        Axis::Type => v,
+    }
 }
 
 /// The Tap tab: one tap's time, place, level and filter at once (v3's tap

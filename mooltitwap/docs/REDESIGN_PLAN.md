@@ -188,7 +188,8 @@ Proposed and decided on 2026-10-27.
 - **v2.36.0:** ducking is built: Duck and Release in the Output card, the echoes dip with how loud you play, keyed from the dry input; the live dip shows on the Duck knob. See DECISIONS.md.
 - **v2.37.0:** pattern tools are built: a "Taps" menu (Alternate, Ramp down, Ramp up, Random, a two-pin Range, Reset, Undo), Reso and Type as Y axes in a list down the field's left edge, and per-tap glides in the engine so a pattern doesn't click. See DECISIONS.md.
 - **v2.38.0:** Euclidean spacing and Swing are built: Steps and Rotate with a ring in the Shape pad's place, the Auto cycle as the whole pattern, Swing in the Time group (Lin and Euclid). See DECISIONS.md.
-- Next: Motion, the last Phase 4 function.
+- **v2.39.0:** Motion is built: one source moves every tap's pan, gain, cutoff and Q (not time), Rate following Time's Sync, Scatter spreading the phases, the field showing the taps moving. See DECISIONS.md.
+- **Phase 4's functions are all built** (loop tone, Freeze, ducking, pattern tools, Euclidean with Swing, Motion), waiting for the owner's hand test of the lot. Also open: the fractional delay read fix (SOF-60).
 - **In:** loop tone, Freeze, ducking, pattern tools, Motion, real Euclidean spacing.
 - **Out:** shift in the loop. You judged it would be messy and sound meh in a multitap.
 - **Later, in an update after release:** 32 taps. Keep 16 for the redesign.
