@@ -5,38 +5,46 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.42.0 · 2026-10-31 · branch `ui/scope-first`
+## ⭐ CURRENT STATE — v2.45.0 · 2026-11-01 · branch `ui/scope-first`
 
-**Worked on (2026-10-31):** the owner's notes on v2.41: a font comparison (Hanken
-Grotesk picked), a mockup ("Afterecho Next Layout"), then v2.42 built as mocked:
-Repeats (1–16 or ∞) + a Feedback knob, the Motion matrix, Field/Bars pinned right,
-Slope Y axis, last-touched card removed, Hanken Grotesk default. A side session made
-the per-tap detune listening test (`spikes/detune/`): the owner liked both WSOLA and
-the phase vocoder. DECISIONS.md has the why.
+**Worked on (2026-10-31 → 11-01):** the owner's notes on v2.42 → v2.43 (Time view,
+Lock time removed, Snap Grid, field/lane aligned, LFO 1–3 + Step 1–2 with Glide,
+smooth cutoff/Q glide, ear safety: Ear guard, Feedback stop at 100 %, NaN guard, loop
+DC blockers, Clear); v2.44 fixed SOF-60 (fractional delay reads, loops a sample
+late); v2.45 built per-tap detune from the listening spike (Light = WSOLA, Clean =
+phase vocoder). DECISIONS.md has each.
 
-**Current state:** v2.42.0 committed (`358f65f`, docs `1a30dd0`, nothing pushed) and
-installed on desktop (CLAP + VST3). 95 unit tests pass (exact counts, count↔∞ switch
-without clicks, whole-echo Motion, old sessions/presets migrated). Checked on screen
-(Wide, Tall, light, Motion, Step, Tap tab, presets). **Nothing heard or clicked by hand
-yet** (v2.34–v2.42). iPad still on v2.34.0.
+**Current state:** v2.45.0 committed (`e3331af`, nothing pushed) and installed on
+desktop (CLAP + VST3). 107 unit tests pass (+3 ignored render/CPU tests). Checked on
+screen (Wide, Tall, light). **Nothing heard or clicked by hand yet** (v2.34–v2.45).
+iPad still on v2.34.0.
 
 **Problems / open:**
-- SOF-60 fractional delay reads: still not fixed; it blocks detune (SOF-156).
-- `spikes/detune/` is uncommitted (renders git-ignored, 132 MB).
-- Repeats adds a second pair of 32 s lines: memory on iPad not measured.
-- On a count the loop colour shapes the copies once (no build-up): owner to judge.
-- Follow tab is text only (no live meter); `ScopeState.focus` is written but no longer
-  read (cells still record it).
-- The factory presets are untuned (SOF-147).
+- Step clicks: no test can tell a click from the resonant sweep; Glide 10 % default
+  and a smooth cutoff glide should fix it — owner to judge by ear.
+- Detune not measured on iPad (CPU, Clean with small host buffers; Clean's FFTs are
+  staggered per tap, not scheduled). Clean uses ~6.5 MB at 48 kHz.
+- Clear empties ~36 MB of lines on the audio thread (a dropout is possible then).
+- `spikes/` is uncommitted: `detune/` (listening test, renders ignored),
+  `sof60-ab/` and `detune-plugin/` (WAV renders).
+- `ScopeState.focus` is written but no longer read. Factory presets untuned (SOF-147).
 
-**Next session:** fold in the owner's hand-test notes (v2.34–v2.42) and tune the factory
-set by ear, then SOF-60, then detune (SOF-156). **Estimated next task:** hand-test notes /
-SOF-147.
+**Next session:** fold in the owner's hand-test notes (v2.34–v2.45, SOF-84) and tune
+the factory set by ear (SOF-147); then the iPad install with CPU/memory checks
+(SOF-85). **Estimated next task:** hand-test notes / SOF-147.
 
-**How things were checked (reuse):** unit tests with controls; previews:
-`AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type|slope,sel3,tap|motion,mxdemo,step|follow,lock,presets,light,tape,pattern,saveas|trying|deleting`
+**How things were checked (reuse):** unit tests with controls; before/after renders via
+ignored tests (`SOF60_WAV=…`, `DETUNE_WAV=… cargo test … -- --ignored`), `detune_cpu`
+for CPU; previews:
+`AFTERECHO_PREVIEW=tall,bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,saveas|trying|deleting`
 with `AFTERECHO_PRESET_DIR=<scratch folder>` so a preview never touches the real
-presets (`mxdemo` sets a few matrix cells in the preview instance only).
+presets. Old-build comparisons: a sibling worktree (`../afterecho-oldtree`, removed
+after) — a worktree in the scratchpad breaks the `../../Dev` path deps.
+
+## PRIOR STATE — v2.42.0 · 2026-10-31
+
+Repeats (1–16 or ∞) + Feedback knob, the Motion matrix, Slope Y axis, Hanken Grotesk.
+See DECISIONS.md.
 
 ## PRIOR STATE — v2.41.0 · 2026-10-31
 
