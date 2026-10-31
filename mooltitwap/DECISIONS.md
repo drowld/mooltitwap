@@ -2,6 +2,38 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-01 · Per-tap detune, Light and Clean (v2.45.0, SOF-156)
+
+Owner: "Build detune", after liking both WSOLA and the phase vocoder in the
+listening test (`spikes/detune/`). Ported into `detune.rs`.
+- **Detune per tap, ±100 cents**: a knob in the Tap tab and an axis on the
+  Y list (so the pattern tools spread it). The shift is inside the tap's
+  read: the repeats keep that tap's detune, they don't stack (tested).
+- **Settings → Sound → Detune: Light (default) or Clean** (saved with the
+  sound). Light is WSOLA; Clean the phase vocoder. A tap shorter than
+  Clean's ~90 ms look-back uses Light; switching either way crossfades over
+  20 ms, and each shifter starts at full level (no dip).
+- **Changes from the spike**:
+  - A tap's sides splice at the same moments (one search, on the left line,
+    for both, and for Ping's bounce lines): the image holds (tested: a
+    centred tap keeps L/R exactly). The spike left this untested.
+  - The search runs at full rate on the line itself (no low-passed copy of
+    each line): no memory, a little more CPU.
+  - The ratio glides (5 ms), and Clean places each frame from the tap time
+    as it moves, so turning Detune or Time while it plays doesn't jump.
+  - A tap at 0 cents reads plainly and costs nothing (tested bit-exact); it
+    leaves the shifter only after 300 ms at 0, since fading between the
+    shifted read (whose timing wanders up to ±10 ms on Light) and the plain
+    one bends the sound (a knob sweeping through 0 measured 2.3×).
+- **Measured** (tests): pitch within 3 cents (±100, ±50, +25; Light, Clean,
+  and a 40 ms tap falling back to Light); a knob sweep 1.02× (Light) and
+  1.07× (Clean) a steady tone's sharpest bend. CPU for 16 detuned taps at
+  48 kHz on this Mac: the plug-in at 2.1 % (none) / 4.7 % (Light) / 6.6 %
+  (Clean) of a core. Not measured: the iPad, worst-block time with small
+  host buffers (Clean's FFTs are staggered by tap, not scheduled).
+- **Memory**: Clean's vocoders take ~6.5 MB at 48 kHz (32 of them).
+- Renders: `spikes/detune-plugin/` (six taps at −25…+100 ct; not committed).
+
 ## 2026-11-01 · Fractional delay reads fixed (v2.44.0, SOF-60)
 
 Owner: "ok fix it" (it blocked per-tap detune, SOF-156).

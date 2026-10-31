@@ -1,6 +1,6 @@
 # mooltitwap (Afterecho) — Architecture
 
-_As of v2.44.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
+_As of v2.45.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
 
 ## Overview
 16-tap multitap delay (VST3 + CLAP + standalone on desktop, AUv3 on iPad) on **nice-plug**
@@ -39,6 +39,9 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
   and the tap targets' maths. `matrix.rs` — the Motion matrix (LFO 1–3, Follow, Step 1–2 × targets, sums,
   whole-echo conversions, Step). `migrate.rs` — old sessions (`filter_state`) and presets
   into v2.42's params (Repeats ∞, v2.39 Motion → the matrix). `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
+- `detune.rs` — per-tap detune (v2.45): `Wsola` (Light: grains, a tap's sides spliced
+  together) and `Pv` (Clean: phase vocoder, frames from the tap's lines); the engine
+  crossfades plain ↔ shifted and Light ↔ Clean per tap (`TapLines`).
 - `delay.rs` — `DelayLine` (Lagrange read; `read_before_write` for the loops' and Repeats' reads, v2.44),
   `TapReader` (Repitch / Fade / Jump), `SlewedTime`. `diffusion.rs`, `tape.rs` (RE-DEEMER port).
 - `presets.rs` — the Soft Systems preset library (Vortex's port): the file (format 2,

@@ -83,6 +83,16 @@ impl DelayLine {
         lagrange4(self.buffer[i2], self.buffer[i1], self.buffer[i0], self.buffer[i_older2], frac)
     }
 
+    /// Raw samples for a detuned tap's splice search: `out[k]` is the sample
+    /// `start − k` back (whole samples, after this sample's write).
+    pub fn copy_back(&self, start: usize, out: &mut [f32]) {
+        let mask = self.capacity - 1;
+        let i0 = (self.write_idx + self.capacity - 1 - start.min(self.capacity - 1)) & mask;
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = self.buffer[(i0 + k) & mask];
+        }
+    }
+
     /// A read made before this sample's write (the feedback loops' and
     /// Repeats' reads): the newest sample is already one old, so `delay`
     /// lands exactly `delay` samples before the sample about to be written.
@@ -327,6 +337,18 @@ impl TapReader {
     }
 }
 
+/// What a tap reads its lines through: its heads, or a detuned tap's grains.
+pub trait ReadLine {
+    fn read_line(&self, line: &DelayLine) -> f32;
+}
+
+impl ReadLine for Heads {
+    #[inline]
+    fn read_line(&self, line: &DelayLine) -> f32 {
+        self.read(line)
+    }
+}
+
 /// Where a tap reads this sample: one head, or two while Fade crossfades.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Heads {
@@ -339,6 +361,11 @@ pub struct Heads {
 impl Heads {
     fn one(delay: f32) -> Self {
         Self { a: delay, wa: 1.0, b: delay, wb: 0.0 }
+    }
+
+    /// The head that weighs most: a detuned tap's time.
+    pub fn centre(&self) -> f32 {
+        if self.wa >= self.wb { self.a } else { self.b }
     }
 
     #[inline]

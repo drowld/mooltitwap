@@ -280,9 +280,9 @@ pub struct ScopeState {
     /// Each axis's range on the menu's slider (0 left … 1 right; unset =
     /// the axis's default), the pin being dragged, and each axis's undo
     /// history (every tap's value before a pattern).
-    pat_range: [Option<[f32; 2]>; 6],
+    pat_range: [Option<[f32; 2]>; 7],
     pat_pin: Option<usize>,
-    pat_undo: [Vec<[f32; NUM_TAPS]>; 6],
+    pat_undo: [Vec<[f32; NUM_TAPS]>; 7],
     /// Preview: apply a shape on the first frame, to see it without clicking.
     pat_demo: bool,
     /// The preset browser's state (the loaded preset, Try, the sheet's view).
@@ -369,7 +369,7 @@ pub fn frame(
             sc.look = Appearance::load();
             sc.look_saved = Some(sc.look);
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=tall,bars,time|gain|cutoff|reso|type|slope,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
+            // AFTERECHO_PREVIEW=tall,bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
             // saveas|trying|deleting (with AFTERECHO_PRESET_DIR, a folder of presets to show)
             // (the iPad page, the Bars view, the Time view or a Y axis, a selected
             // tap, the Tap or Motion tab and its source, the preset browser, the light page, Colour's Tape
@@ -385,6 +385,8 @@ pub fn frame(
                         "reso" => sc.y_axis = 3,
                         "type" => sc.y_axis = 4,
                         "slope" => sc.y_axis = 5,
+                        "detune" => sc.y_axis = 6,
+                        "menu" => sc.show_menu = true,
                         "pattern" => (sc.pat_open, sc.pat_demo) = (true, true),
                         "tap" => sc.lane_tab = 2,
                         "motion" => sc.lane_tab = 1,
@@ -501,7 +503,7 @@ fn page(
     time_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
     colour_card(ui, o, s, l, params, setter, &mut st.scope);
     output_card(ui, o, s, l, params, setter, &mut st.scope.focus);
-    settings_menu(ui, o, s, l, &mut st.scope);
+    settings_menu(ui, o, s, l, params, setter, &mut st.scope);
     if !presets_open {
         taps_menu(ui, s, params, setter, &mut st.scope);
     }
@@ -867,10 +869,11 @@ enum Axis {
     Reso,
     Type,
     Slope,
+    Detune,
 }
 
 impl Axis {
-    const ALL: [Axis; 6] = [Axis::Pan, Axis::Gain, Axis::Cutoff, Axis::Reso, Axis::Type, Axis::Slope];
+    const ALL: [Axis; 7] = [Axis::Pan, Axis::Gain, Axis::Cutoff, Axis::Reso, Axis::Type, Axis::Slope, Axis::Detune];
 
     fn name(self) -> &'static str {
         match self {
@@ -880,6 +883,7 @@ impl Axis {
             Axis::Reso => "Reso",
             Axis::Type => "Type",
             Axis::Slope => "Slope",
+            Axis::Detune => "Detune",
         }
     }
 
@@ -890,6 +894,7 @@ impl Axis {
             Axis::Gain => Some(&tap.gain_db),
             Axis::Cutoff => Some(&tap.filter_cutoff),
             Axis::Reso => Some(&tap.filter_q),
+            Axis::Detune => Some(&tap.detune),
             Axis::Type | Axis::Slope => None,
         }
     }
@@ -951,7 +956,7 @@ impl Axis {
             Axis::Gain => 0.0,
             Axis::Cutoff => 20_000.0,
             Axis::Reso => 0.707,
-            Axis::Type | Axis::Slope => 0.0,
+            Axis::Type | Axis::Slope | Axis::Detune => 0.0,
         }
     }
 
@@ -964,6 +969,7 @@ impl Axis {
             Axis::Reso => "tap_filter_q",
             Axis::Type => "tap_filter_type",
             Axis::Slope => "tap_filter_slope",
+            Axis::Detune => "tap_detune",
         };
         format!("{base}_{}", i + 1)
     }
@@ -978,6 +984,7 @@ impl Axis {
             Axis::Cutoff => 1.0 - (v / 20.0).max(1.0).ln() / 1000f32.ln(),
             Axis::Reso => 1.0 - (v / 0.1).max(1.0).ln() / 120f32.ln(),
             Axis::Type | Axis::Slope => 1.0 - v / 2.0,
+            Axis::Detune => 0.5 - v / (2.0 * crate::detune::MAX_CENTS),
         };
         n.clamp(0.0, 1.0)
     }
@@ -990,6 +997,7 @@ impl Axis {
             Axis::Cutoff => 20.0 * 1000f32.powf(1.0 - n),
             Axis::Reso => 0.1 * 120f32.powf(1.0 - n),
             Axis::Type | Axis::Slope => ((1.0 - n) * 2.0).round(),
+            Axis::Detune => ((0.5 - n) * 2.0 * crate::detune::MAX_CENTS).round(),
         }
     }
 
@@ -1009,6 +1017,7 @@ impl Axis {
             Axis::Cutoff => [u(500.0), u(20_000.0)],
             Axis::Reso => [u(0.7), u(6.0)],
             Axis::Type | Axis::Slope => [0.0, 1.0],
+            Axis::Detune => [u(-50.0), u(50.0)],
         }
     }
 
@@ -1020,6 +1029,7 @@ impl Axis {
             Axis::Reso => format!("Q {v:.1}"),
             Axis::Type => type_name(v).to_string(),
             Axis::Slope => format!("{} dB/oct", slope_name(v)),
+            Axis::Detune => cents_text(v),
         }
     }
 
@@ -1036,6 +1046,7 @@ impl Axis {
             Axis::Reso => format!("{v:.1}"),
             Axis::Type => type_name(v).to_string(),
             Axis::Slope => slope_name(v).to_string(),
+            Axis::Detune => cents_text(v).trim_end_matches(" ct").to_string(),
         }
     }
 
@@ -1052,6 +1063,7 @@ impl Axis {
             Axis::Reso => at(&[(12.0, "Q 12"), (4.0, "4"), (1.2, "1.2"), (0.4, "0.4"), (0.1, "0.1")]),
             Axis::Type => at(&[(2.0, "HP"), (1.0, "BP"), (0.0, "LP")]),
             Axis::Slope => at(&[(2.0, "48 dB"), (1.0, "24"), (0.0, "12")]),
+            Axis::Detune => at(&[(100.0, "+100 ct"), (50.0, "+50"), (0.0, "0"), (-50.0, "−50"), (-100.0, "−100")]),
         }
     }
 }
@@ -1068,6 +1080,16 @@ fn type_name(v: f32) -> &'static str {
 /// The filter slope for a Slope value (0 12 dB · 1 24 dB · 2 48 dB).
 fn slope_of(v: f32) -> FilterSlope {
     FilterSlope::from_index(v.round().clamp(0.0, 2.0) as usize)
+}
+
+/// Detune in cents: "+25 ct", "0 ct", "−50 ct".
+fn cents_text(v: f32) -> String {
+    let c = v.round() as i32;
+    match c {
+        0 => "0 ct".into(),
+        c if c > 0 => format!("+{c} ct"),
+        c => format!("−{} ct", -c),
+    }
 }
 
 fn slope_name(v: f32) -> &'static str {
@@ -1338,7 +1360,7 @@ fn picture(
     names.extend(Axis::ALL.map(Axis::name));
     let list = r(o, s, x + 14.0, y + 56.0, 64.0, 26.0 * names.len() as f32);
     let cur = if sc.time_view { 0 } else { axis_i + 1 };
-    if let Some(i) = seg_v(ui, list, &names, cur, "sc_y", s, 12.0, &[true, !mono, true, true, true, true, true]) {
+    if let Some(i) = seg_v(ui, list, &names, cur, "sc_y", s, 12.0, &[true, !mono, true, true, true, true, true, true]) {
         sc.time_view = i == 0;
         if i > 0 {
             sc.y_axis = i - 1;
@@ -2201,7 +2223,7 @@ fn moved_value(params: &PetalParams, axis: Axis, i: usize, v: f32) -> f32 {
         Axis::Gain => matrix::gain_db(v, m(1)),
         Axis::Cutoff => motion::cutoff(v, m(2), 1.0),
         Axis::Reso => motion::reso(v, m(3), 1.0),
-        Axis::Type | Axis::Slope => v,
+        Axis::Type | Axis::Slope | Axis::Detune => v,
     }
 }
 
@@ -2215,13 +2237,14 @@ fn tap_panel(
     let tap = &params.taps[i];
     let ch = params.channel_mode.value();
     let inner = area.shrink2(Vec2::new(14.0, 4.0) * s);
-    let c = |row, col| cell_at(inner, 4, 2, row, col, 1, s);
+    let c = |row, col| cell_at(inner, 5, 2, row, col, 1, s);
     let id = |base: &str| format!("{base}_{}", i + 1);
     let time = secs_text(viz.times_l_grid[i] * viz.grid_range_secs_taps_only);
     knob_cell(ui, c(0, 0), s, setter, &tap.time_offset, &id("time_offset"), "Time", true, true, Some(time), focus);
     knob_cell(ui, c(0, 1), s, setter, &tap.pan, &id("pan"), "Pan", true, ch != ChannelMode::Mono, Some(pan_text(tap.pan.value(), ch)), focus);
     knob_cell(ui, c(0, 2), s, setter, &tap.gain_db, &id("gain_db"), "Gain", false, true, Some(db_text(tap.gain_db.value())), focus);
-    toggle_cell(ui, c(0, 3), s, setter, &tap.active, &id("active"), "Tap", "On", "Muted", focus);
+    knob_cell(ui, c(0, 3), s, setter, &tap.detune, &id("tap_detune"), "Detune", true, true, Some(cents_text(tap.detune.value())), focus);
+    toggle_cell(ui, c(0, 4), s, setter, &tap.active, &id("active"), "Tap", "On", "Muted", focus);
     enum_cell(ui, c(1, 0), s, setter, &tap.filter_type, &id("tap_filter_type"), "Filter", &["LP", "BP", "HP"], true, focus);
     knob_cell(ui, c(1, 1), s, setter, &tap.filter_cutoff, &id("tap_filter_cutoff"), "Cutoff", false, true, Some(hz_text(tap.filter_cutoff.value())), focus);
     knob_cell(ui, c(1, 2), s, setter, &tap.filter_q, &id("tap_filter_q"), "Reso", false, true, Some(format!("Q {:.1}", tap.filter_q.value())), focus);
@@ -2898,7 +2921,7 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
 // radius, fixed 8 px row gaps)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn settings_menu(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, sc: &mut ScopeState) {
+fn settings_menu(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState) {
     if !sc.show_menu {
         return;
     }
@@ -2977,6 +3000,23 @@ fn settings_menu(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, sc: &mut ScopeS
                                 Step::Reset => sc.look.font_steps = FONT_STEPS_DEFAULT,
                                 Step::None => {}
                             }
+                        });
+                    });
+
+                    menu_section(ui, "Sound", s);
+                    menu_rows(ui, s, |ui| {
+                        // how detuned taps are shifted (v2.45): saved with the sound
+                        menu_row(ui, "Detune", s, |ui| {
+                            ui.horizontal(|ui| {
+                                let clean = params.detune_quality.value() == crate::params::DetuneQuality::Clean;
+                                for (name, want) in [("Light", false), ("Clean · 3× CPU", true)] {
+                                    if epo::chip(ui, name, clean == want) && clean != want {
+                                        setter.begin_set_parameter(&params.detune_quality);
+                                        setter.set_parameter_normalized(&params.detune_quality, if want { 1.0 } else { 0.0 });
+                                        setter.end_set_parameter(&params.detune_quality);
+                                    }
+                                }
+                            });
                         });
                     });
 

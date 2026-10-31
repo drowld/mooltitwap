@@ -2,20 +2,19 @@
 _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDESIGN_PLAN.md. Branch `ui/scope-first`, local commits only (push on major milestones, owner's call)._
 
 ## In Progress
-- [ ] **Owner hand test (v2.34–v2.44)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), v2.42 (Repeats, the Motion matrix, Hanken Grotesk) and v2.43 (Time view, Grid, two Steps with Glide, ear safety), v2.44 (fractional delay reads: Repitch glides, cycles a sample tighter). v2.44.0 installed 2026-11-01 (`81de0a8`). Step clicks: judge by ear (not provable by test). Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
+- [ ] **Owner hand test (v2.34–v2.45)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), v2.42 (Repeats, the Motion matrix, Hanken Grotesk) and v2.43 (Time view, Grid, two Steps with Glide, ear safety), v2.44 (fractional delay reads: Repitch glides, cycles a sample tighter), v2.45 (per-tap detune, Light/Clean). v2.44.0 installed 2026-11-01 (`81de0a8`); v2.45.0 built, not installed. Step clicks: judge by ear (not provable by test). Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
 - [ ] **Factory presets: tune by ear** — the 18 approved presets (v2.41.0, `factory.rs`) are written and tested against their descriptions; none heard yet. Linear SOF-147.
 
 ## Next
-1. [ ] **Per-tap detune ±1 semitone** (SOF-60 fixed in v2.44, so unblocked): owner liked both WSOLA and the phase vocoder in the listening test (`spikes/detune/`, uncommitted) → a Detune knob in the Tap tab, Settings "Detune quality" Light (WSOLA) / Clean (phase vocoder, 3× CPU, taps under ~88 ms fall back to Light). Linear SOF-156.
-2. [ ] Fold in the hand-test feedback. Linear SOF-84.
-3. [ ] iPad: install v2.44.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving. Linear SOF-85.
-4. [ ] Second spacing pass (owner: "spacing still not perfect"; Tall Time group loose). Linear SOF-86.
-5. [ ] Restyle the Settings menu to the new look (still old epo chips). Linear SOF-87.
-6. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
-7. [ ] Retire the old editors: `gui.rs` v2 drawing, `gui_v3.rs`, `palette_v3.rs` glue, `V3_PREVIEW` (Phase 3). Linear SOF-89.
-8. [ ] Phase 5: hosts (AUM, Drambo, Logic iPad, Cubasis; Ableton, Reaper, Bitwig, FL; pluginval), release list (bundle IDs, App Group, 60 fps cap), licences (RE-DEEMER notice, GPL vs Soft Systems plan). Linear SOF-90.
-9. [ ] Verify Fade mode thoroughly with feedback interaction. Linear SOF-91.
-10. [ ] Coordinated rename to Afterecho (struct, crate/folder, bundler key, docs; IDs stay unless owner accepts broken sessions). Linear SOF-92.
+1. [ ] Fold in the hand-test feedback. Linear SOF-84.
+2. [ ] iPad: install v2.45.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving and with detune (Light and Clean, 16 taps). Linear SOF-85.
+3. [ ] Second spacing pass (owner: "spacing still not perfect"; Tall Time group loose). Linear SOF-86.
+4. [ ] Restyle the Settings menu to the new look (still old epo chips). Linear SOF-87.
+5. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
+6. [ ] Retire the old editors: `gui.rs` v2 drawing, `gui_v3.rs`, `palette_v3.rs` glue, `V3_PREVIEW` (Phase 3). Linear SOF-89.
+7. [ ] Phase 5: hosts (AUM, Drambo, Logic iPad, Cubasis; Ableton, Reaper, Bitwig, FL; pluginval), release list (bundle IDs, App Group, 60 fps cap), licences (RE-DEEMER notice, GPL vs Soft Systems plan). Linear SOF-90.
+8. [ ] Verify Fade mode thoroughly with feedback interaction. Linear SOF-91.
+9. [ ] Coordinated rename to Afterecho (struct, crate/folder, bundler key, docs; IDs stay unless owner accepts broken sessions). Linear SOF-92.
 - Later (after release): 32 taps. Linear SOF-93 (Backlog).
 
 ## Open questions (owner)
@@ -27,6 +26,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 - iPad installs: devicectl refuses while the iPad is locked or "not unlocked recently" — unlock first.
 
 ## Done (recent)
+- [x] v2.45.0 Per-tap detune ±100 ct (Tap tab knob, Y axis), Settings → Sound → Detune Light (WSOLA) / Clean (phase vocoder) (SOF-156)
 - [x] v2.44.0 Fractional delay reads fixed (Repitch glides no longer step; loops come round on time); count→∞ handover dip fixed (SOF-60)
 - [x] v2.43.0 Time view (Lock time removed) + Snap Grid; field/lane aligned with the cards; LFO 1–3 + Step 1–2 with Glide; smooth cutoff/Q glide; Ear guard, Feedback stop at 100 %, NaN guard, loop DC blockers, Clear (SOF-157)
 - [x] v2.42.0 Repeats (1–16 or ∞, new default 4; old sessions/presets load as ∞) + Feedback knob; Motion matrix (LFO 1–4, Follow, Step × 10 targets, Amount/Polarity); Field/Bars pinned right; Slope Y axis; last-touched card gone; Hanken Grotesk default. (SOF-155)

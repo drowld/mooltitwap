@@ -385,6 +385,15 @@ pub enum FilterType {
     HighPass,
 }
 
+/// How detuned taps are shifted (v2.45).
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum DetuneQuality {
+    #[id = "light"]
+    Light,
+    #[id = "clean"]
+    Clean,
+}
+
 /// Per-tap filter slope. Each step roughly doubles the roll-off rate by
 /// cascading more SVF stages: 12 dB = 1×, 24 dB = 2×, 48 dB = 4×.
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
@@ -529,6 +538,10 @@ pub struct PetalParams {
     /// on halves, thirds or quarters of it.
     #[id = "tap_grid"]
     pub tap_grid: IntParam,
+    /// How detuned taps are shifted (v2.45): Light (WSOLA) or Clean (phase
+    /// vocoder, about 3× the CPU; taps under ~90 ms use Light).
+    #[id = "detune_quality"]
+    pub detune_quality: EnumParam<DetuneQuality>,
 
     #[id = "channel_mode"]
     pub channel_mode: EnumParam<ChannelMode>,
@@ -757,6 +770,9 @@ pub struct TapParams {
     pub filter_q: FloatParam,
     #[id = "tap_filter_slope"]
     pub filter_slope: EnumParam<FilterSlope>,
+    /// Detune (v2.45): the tap's pitch, ±100 cents (`detune.rs`).
+    #[id = "tap_detune"]
+    pub detune: FloatParam,
 }
 
 impl Default for TapParams {
@@ -811,6 +827,11 @@ impl Default for TapParams {
             .with_value_to_string(Arc::new(|v| format!("{:.1}", v)))
             .with_smoother(SmoothingStyle::Logarithmic(30.0)),
             filter_slope: EnumParam::new("Tap Slope", FilterSlope::Db12),
+            detune: FloatParam::new("Tap Detune", 0.0, FloatRange::Linear { min: -crate::detune::MAX_CENTS, max: crate::detune::MAX_CENTS })
+                .with_unit(" ct")
+                .with_step_size(1.0)
+                .with_value_to_string(Arc::new(|v| if v.abs() < 0.5 { "0".into() } else { format!("{v:+.0}") }))
+                .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches("ct").trim().parse().ok())),
         }
     }
 }
@@ -866,6 +887,7 @@ impl Default for PetalParams {
             sync_mode_r: EnumParam::new("Sync Mode R", SyncMode::Free),
             delay_mode: EnumParam::new("Delay Mode", DelayMode::Repitch),
             tap_snap: BoolParam::new("Snap", true),
+            detune_quality: EnumParam::new("Detune Quality", DetuneQuality::Light),
             tap_grid: IntParam::new("Snap Grid", 1, IntRange::Linear { min: 1, max: 4 })
                 .with_value_to_string(Arc::new(|v| if v <= 1 { "1".into() } else { format!("1/{v}") })),
 

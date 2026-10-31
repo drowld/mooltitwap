@@ -1,5 +1,6 @@
 mod bounce;
 mod delay;
+mod detune;
 mod diffusion;
 mod factory;
 mod filter;
@@ -21,7 +22,8 @@ use nice_plug::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::delay::{ChannelTaps, DelayLine, SlewedTime};
+use crate::delay::{ChannelTaps, DelayLine, ReadLine, SlewedTime};
+use crate::detune::{Pv, Wsola};
 use crate::diffusion::Diffusion;
 use crate::filter::{soft_clip, DcBlock, LoopTone, PeakLimiter, Svf, ToneCoefs};
 use crate::matrix::{SOURCES, TAP_TARGETS};
@@ -246,6 +248,25 @@ pub struct Mooltitwap {
     /// repeats read as silence). Both saturate.
     ping_since_off: usize,
     ping_fresh: usize,
+    /// Detune (v2.45): each tap's shifters (left, right; a linked tap uses
+    /// the left one for both, so its sides splice together), its ratio
+    /// gliding (5 ms) to the knob, and its share against the plain read,
+    /// 0..1 over 20 ms (a tap at 0 cents reads plainly and costs nothing).
+    det: Vec<[Wsola; 2]>,
+    det_ratio: [f32; NUM_TAPS],
+    det_w: [f32; NUM_TAPS],
+    /// Clean (phase vocoders, L and R) and its share against Light, 0..1
+    /// over 20 ms: a tap moves to Light while its time is too short for
+    /// Clean. `*_live`: that shifter is running (it restarts when it's
+    /// needed again).
+    pv: Vec<[Pv; 2]>,
+    /// Samples a detuned tap has sat at 0 cents: it goes back to the plain
+    /// read only after 300 ms, so a knob passing through 0 doesn't fade
+    /// between the shifted read and the plain one (their timing differs).
+    det_zero: [usize; NUM_TAPS],
+    clean_w: [f32; NUM_TAPS],
+    light_live: [bool; NUM_TAPS],
+    clean_live: [bool; NUM_TAPS],
     /// Per tap, the gains placing the repeats ([odd→L, odd→R, even→L,
     /// even→R]), gliding toward the targets set each block through two
     /// one-poles, so a glide starts and ends without a corner.
@@ -384,6 +405,14 @@ impl Default for Mooltitwap {
             ping_live: 0,
             ping_since_off: usize::MAX,
             ping_fresh: usize::MAX,
+            det: (0..NUM_TAPS).map(|_| [Wsola::new(48_000.0), Wsola::new(48_000.0)]).collect(),
+            det_ratio: [1.0; NUM_TAPS],
+            det_w: [0.0; NUM_TAPS],
+            pv: Vec::new(),
+            det_zero: [0; NUM_TAPS],
+            clean_w: [0.0; NUM_TAPS],
+            light_live: [false; NUM_TAPS],
+            clean_live: [false; NUM_TAPS],
             ping_gain: [[0.0; 4]; NUM_TAPS],
             ping_gain_mid: [[0.0; 4]; NUM_TAPS],
             xf_mix: 0.0,
@@ -429,6 +458,8 @@ impl Mooltitwap {
         self.ping_even = DelayLine::new(max_samples);
         self.dry_l = DelayLine::new(max_samples);
         self.dry_r = DelayLine::new(max_samples);
+        self.det = (0..NUM_TAPS).map(|_| [Wsola::new(sample_rate), Wsola::new(sample_rate)]).collect();
+        self.pv = (0..NUM_TAPS).map(|_| [Pv::new(sample_rate), Pv::new(sample_rate)]).collect();
         self.lim_l = PeakLimiter::new(self.sample_rate);
         self.lim_r = PeakLimiter::new(self.sample_rate);
         self.diff_l.prepare(self.sample_rate);
@@ -471,6 +502,48 @@ impl Mooltitwap {
             b * (bounce::mono_of(ch_mode, raw_l, raw_r) + even),
             b * odd,
         ]
+    }
+}
+
+/// A tap's lines, as it pans and (in Ping) places them: read through its
+/// heads or a detuned tap's grains, L and R (`same`: one reader for both).
+struct TapLines<'a> {
+    main: [&'a DelayLine; 2],
+    ping: [&'a DelayLine; 2],
+    pan: (f32, f32),
+    ping_g: Option<[f32; 4]>,
+}
+
+impl TapLines<'_> {
+    /// Side `ch`'s input as the tap hears it, `out[k]` being `back − k`
+    /// samples back (for Clean's frames; `aux` is scratch).
+    fn fill(&self, ch: usize, back: usize, out: &mut [f32], aux: &mut [f32]) {
+        let pan = if ch == 0 { self.pan.0 } else { self.pan.1 };
+        self.main[ch].copy_back(back, out);
+        for x in out.iter_mut() {
+            *x *= pan;
+        }
+        if let Some(g) = self.ping_g {
+            for (line, gain) in [(self.ping[0], g[ch]), (self.ping[1], g[2 + ch])] {
+                line.copy_back(back, aux);
+                for (x, a) in out.iter_mut().zip(aux.iter()) {
+                    *x += a * gain;
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn read(&self, rl: &impl ReadLine, rr: &impl ReadLine, same: bool) -> (f32, f32) {
+        let mut l = rl.read_line(self.main[0]) * self.pan.0;
+        let mut r = rr.read_line(self.main[1]) * self.pan.1;
+        if let Some(g) = self.ping_g {
+            let (odd_l, even_l) = (rl.read_line(self.ping[0]), rl.read_line(self.ping[1]));
+            let (odd_r, even_r) = if same { (odd_l, even_l) } else { (rr.read_line(self.ping[0]), rr.read_line(self.ping[1])) };
+            l += odd_l * g[0] + even_l * g[2];
+            r += odd_r * g[1] + even_r * g[3];
+        }
+        (l, r)
     }
 }
 
@@ -531,6 +604,7 @@ impl Plugin for Mooltitwap {
         self.dry_l.reset();
         self.dry_r.reset();
         self.rep_gain = [0.0; 16];
+        self.det_w = [0.0; NUM_TAPS];
         self.dc = [DcBlock::default(); 4];
         (self.guard_pow, self.guard_g) = (0.0, 1.0);
         self.lim_l = PeakLimiter::new(self.sample_rate);
@@ -912,6 +986,9 @@ impl Plugin for Mooltitwap {
             }
         }
         let tap_glide = 1.0 - (-1.0 / (0.005 * sr)).exp();
+        let tap_det: [f32; NUM_TAPS] = core::array::from_fn(|i| p.taps[i].detune.value());
+        let det_hold = (0.3 * sr) as usize;
+        let clean_on = p.detune_quality.value() == crate::params::DetuneQuality::Clean && !self.pv.is_empty();
 
         // Motion (v2.42, the matrix): its sources move the taps' pan, gain,
         // cutoff and Q around their set values (kept here) and the whole
@@ -1438,25 +1515,101 @@ impl Plugin for Mooltitwap {
                         (*mid, *now) = (to, to);
                     }
                 }
-                // Panned ahead of the filter (the same sound: the filter is
-                // linear), so Ping's repeats can join each side before it.
-                let mut sl = hl.read(&self.main_l.delay) * self.tap_pan_now[i].0;
-                let mut sr_s = hr.read(&self.main_r.delay) * self.tap_pan_now[i].1;
-                if ping_read && ping_tap_fresh[i] {
+                let ping_g = if ping_read && ping_tap_fresh[i] {
                     let g = &mut self.ping_gain[i];
                     for ((g, m), t) in g.iter_mut().zip(&mut self.ping_gain_mid[i]).zip(ping_target[i]) {
                         *m += (t - *m) * ping_glide;
                         *g += (*m - *g) * ping_glide;
                     }
-                    let (odd_l, even_l) = (hl.read(&self.ping_odd), hl.read(&self.ping_even));
-                    let (odd_r, even_r) = if hr == hl {
-                        (odd_l, even_l)
-                    } else {
-                        (hr.read(&self.ping_odd), hr.read(&self.ping_even))
-                    };
-                    sl += odd_l * g[0] + even_l * g[2];
-                    sr_s += odd_r * g[1] + even_r * g[3];
+                    Some(*g)
+                } else {
+                    None
+                };
+                let lines = TapLines {
+                    main: [&self.main_l.delay, &self.main_r.delay],
+                    ping: [&self.ping_odd, &self.ping_even],
+                    pan: self.tap_pan_now[i],
+                    ping_g,
+                };
+                let linked = hr == hl;
+                // Detune: the tap read through its shifter's grains,
+                // crossfading with the plain read as it starts and stops.
+                if tap_det[i] != 0.0 || self.det_w[i] == 0.0 {
+                    self.det_zero[i] = 0;
+                } else {
+                    self.det_zero[i] += 1;
                 }
+                let det_to = if tap_det[i] != 0.0 || (self.det_w[i] > 0.0 && self.det_zero[i] < det_hold) { 1.0 } else { 0.0 };
+                let shifted = if det_to > 0.0 || self.det_w[i] > 0.0 {
+                    let starting = self.det_w[i] == 0.0;
+                    if starting {
+                        self.det_ratio[i] = detune::ratio(tap_det[i]);
+                        (self.light_live[i], self.clean_live[i]) = (false, false);
+                    }
+                    self.det_ratio[i] += (detune::ratio(tap_det[i]) - self.det_ratio[i]) * tap_glide;
+                    let r = self.det_ratio[i];
+                    let (nl, nr) = (hl.centre(), hr.centre());
+                    // Clean while the tap is long enough for it, else Light
+                    let clean_to = if clean_on && nl.min(nr) >= self.pv[i][0].min_delay(r) { 1.0 } else { 0.0 };
+                    if starting {
+                        self.clean_w[i] = clean_to;
+                    }
+                    let cw = self.clean_w[i];
+                    // taps start their grain cycles and frame grids apart
+                    let phase = |ch: usize| (i as f32 + 0.5 * ch as f32) / NUM_TAPS as f32;
+                    let light = if cw < 1.0 {
+                        if !self.light_live[i] {
+                            self.det[i][0].restart(phase(0));
+                            self.det[i][1].restart(phase(1));
+                            self.light_live[i] = true;
+                        }
+                        let (ml, mr) = (&self.main_l.delay, &self.main_r.delay);
+                        // the splices match on the left line (Mid in M/S)
+                        let gl = self.det[i][0].step(nl, r, &|at, out: &mut [f32]| ml.copy_back(at, out));
+                        let gr = if linked { gl } else { self.det[i][1].step(nr, r, &|at, out: &mut [f32]| mr.copy_back(at, out)) };
+                        Some(lines.read(&gl, &gr, linked))
+                    } else {
+                        self.light_live[i] = false;
+                        None
+                    };
+                    let clean = if cw > 0.0 {
+                        if !self.clean_live[i] {
+                            self.pv[i][0].restart(phase(0));
+                            self.pv[i][1].restart(phase(1));
+                            self.clean_live[i] = true;
+                        }
+                        let yl = self.pv[i][0].step(nl, r, &|back, out: &mut [f32], aux: &mut [f32]| lines.fill(0, back, out, aux));
+                        let yr = self.pv[i][1].step(nr, r, &|back, out: &mut [f32], aux: &mut [f32]| lines.fill(1, back, out, aux));
+                        Some((yl, yr))
+                    } else {
+                        self.clean_live[i] = false;
+                        None
+                    };
+                    self.clean_w[i] = (cw + (clean_to - cw).clamp(-xf_step, xf_step)).clamp(0.0, 1.0);
+                    let out = match (light, clean) {
+                        (Some(a), Some(b)) => {
+                            let w = s_curve(cw);
+                            (a.0 + (b.0 - a.0) * w, a.1 + (b.1 - a.1) * w)
+                        }
+                        (Some(a), None) => a,
+                        (None, Some(b)) => b,
+                        (None, None) => (0.0, 0.0),
+                    };
+                    self.det_w[i] = (self.det_w[i] + (det_to - self.det_w[i]).clamp(-xf_step, xf_step)).clamp(0.0, 1.0);
+                    Some((out, s_curve(self.det_w[i])))
+                } else {
+                    None
+                };
+                // Panned ahead of the filter (the same sound: the filter is
+                // linear), so Ping's repeats can join each side before it.
+                let (mut sl, mut sr_s) = match shifted {
+                    Some((d, 1.0)) => d,
+                    Some((d, w)) => {
+                        let (pl, pr) = lines.read(&hl, &hr, linked);
+                        (pl + (d.0 - pl) * w, pr + (d.1 - pr) * w)
+                    }
+                    None => lines.read(&hl, &hr, linked),
+                };
 
                 let stages = tap_filter_stages[i];
                 let moved = self.tap_cut[i].step(tap_cut[i], tap_glide) | self.tap_q[i].step(tap_q[i], tap_glide);
@@ -2445,6 +2598,83 @@ mod tests {
         }
     }
 
+/// A stereo 32-bit float WAV at SR (for renders to listen to).
+    fn write_wav(path: &std::path::Path, out: &[(f32, f32)]) {
+        let mut b = Vec::new();
+        let data = (out.len() * 8) as u32;
+        b.extend(b"RIFF");
+        b.extend((36 + data).to_le_bytes());
+        b.extend(b"WAVEfmt ");
+        b.extend(16u32.to_le_bytes());
+        b.extend(3u16.to_le_bytes()); // float
+        b.extend(2u16.to_le_bytes());
+        b.extend((SR as u32).to_le_bytes());
+        b.extend((SR as u32 * 8).to_le_bytes());
+        b.extend(8u16.to_le_bytes());
+        b.extend(32u16.to_le_bytes());
+        b.extend(b"data");
+        b.extend(data.to_le_bytes());
+        for (l, r) in out {
+            b.extend(l.to_le_bytes());
+            b.extend(r.to_le_bytes());
+        }
+        std::fs::write(path, b).unwrap();
+    }
+
+    /// Detune through the plug-in, to hear (not a check):
+    /// `DETUNE_WAV=<folder> cargo test … detune_renders -- --ignored`.
+    #[test]
+    #[ignore]
+    fn detune_renders() {
+        let Some(dir) = std::env::var_os("DETUNE_WAV") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // a plucked phrase, then a held chord
+        let notes = [220.0f32, 277.2, 329.6, 440.0, 329.6, 277.2, 246.9, 220.0];
+        let pluck: Vec<(f32, f32)> = (0..(SR * 6.0) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let k = (t / 0.5) as usize;
+                let ph = t - k as f32 * 0.5;
+                let v = if k < notes.len() {
+                    let f = notes[k];
+                    0.3 * (-ph * 6.0).exp() * ((2.0 * PI * f * t).sin() + 0.4 * (4.0 * PI * f * t).sin() + 0.2 * (6.0 * PI * f * t).sin())
+                } else {
+                    0.0
+                };
+                (v, v)
+            })
+            .collect();
+        let chord: Vec<(f32, f32)> = (0..(SR * 5.0) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let v = 0.1 * (t / 0.05).min(1.0) * [130.8f32, 196.0, 329.6, 493.9, 587.3].iter().map(|f| (2.0 * PI * f * t).sin()).sum::<f32>();
+                (v, v)
+            })
+            .collect();
+        for (q, name) in [(0.0, "light"), (1.0, "clean")] {
+            for (input, what) in [(&pluck, "pluck"), (&chord, "chord")] {
+                // six taps at −25 … +100 ct, alternating sides, 40 % feedback
+                let mut plug = plugin(&[-0.7, 0.7, -0.5, 0.5, -0.3, 0.3]);
+                set(&plug, "base_time_l", 110f32.ln() / 2000f32.ln());
+                set(&plug, "feedback", 0.4);
+                set(&plug, "dry_wet", 0.5);
+                set(&plug, "detune_quality", q);
+                for (i, c) in [-25.0, 25.0, -50.0, 50.0, -100.0, 100.0].into_iter().enumerate() {
+                    set(&plug, &format!("tap_detune_{}", i + 1), c);
+                }
+                write_wav(&dir.join(format!("{what}-{name}.wav")), &render(&mut plug, input, |_, _| {}));
+            }
+        }
+        for (input, what) in [(&pluck, "pluck"), (&chord, "chord")] {
+            let mut plug = plugin(&[-0.7, 0.7, -0.5, 0.5, -0.3, 0.3]);
+            set(&plug, "base_time_l", 110f32.ln() / 2000f32.ln());
+            set(&plug, "feedback", 0.4);
+            set(&plug, "dry_wet", 0.5);
+            write_wav(&dir.join(format!("{what}-0-nodetune.wav")), &render(&mut plug, input, |_, _| {}));
+        }
+    }
+
     /// Before/after renders for the SOF-60 fix, to hear (not a check):
     /// `SOF60_WAV=<folder> cargo test … sof60_renders -- --ignored --test-threads=1`.
     #[test]
@@ -2453,27 +2683,7 @@ mod tests {
         let Some(dir) = std::env::var_os("SOF60_WAV") else { return };
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let wav = |name: &str, out: &[(f32, f32)]| {
-            let mut b = Vec::new();
-            let data = (out.len() * 8) as u32;
-            b.extend(b"RIFF");
-            b.extend((36 + data).to_le_bytes());
-            b.extend(b"WAVEfmt ");
-            b.extend(16u32.to_le_bytes());
-            b.extend(3u16.to_le_bytes()); // float
-            b.extend(2u16.to_le_bytes());
-            b.extend((SR as u32).to_le_bytes());
-            b.extend((SR as u32 * 8).to_le_bytes());
-            b.extend(8u16.to_le_bytes());
-            b.extend(32u16.to_le_bytes());
-            b.extend(b"data");
-            b.extend(data.to_le_bytes());
-            for (l, r) in out {
-                b.extend(l.to_le_bytes());
-                b.extend(r.to_le_bytes());
-            }
-            std::fs::write(dir.join(name), b).unwrap();
-        };
+        let wav = |name: &str, out: &[(f32, f32)]| write_wav(&dir.join(name), out);
         let ms = |v: f32| v.ln() / 2000f32.ln();
         // 1. a held chord through four taps while Time glides 100 → 160 ms
         //    and back (Repitch): the glide itself, no repeats
@@ -2531,6 +2741,154 @@ mod tests {
         assert!(step < 0.01, "across a whole sample it moves {step}");
         // before the write, the newest is a sample old already
         assert!((line.read_before_write(10.25) - (newest + 1.0 - 10.25)).abs() < 1e-4);
+    }
+
+    /// The pitch of `out` (left) between `from` and `to` seconds, from its
+    /// upward zero crossings (interpolated).
+    fn pitch(out: &[(f32, f32)], from: f32, to: f32) -> f32 {
+        let w = &out[(from * SR) as usize..(to * SR) as usize];
+        let ups: Vec<f32> = w
+            .windows(2)
+            .enumerate()
+            .filter(|(_, p)| p[0].0 <= 0.0 && p[1].0 > 0.0)
+            .map(|(i, p)| i as f32 + p[0].0 / (p[0].0 - p[1].0))
+            .collect();
+        (ups.len() - 1) as f32 * SR / (ups[ups.len() - 1] - ups[0])
+    }
+
+    fn sine(hz: f32, secs: f32) -> Vec<(f32, f32)> {
+        (0..(secs * SR) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let v = 0.3 * (t / 0.02).min(1.0) * (2.0 * PI * hz * t).sin();
+                (v, v)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn detune_moves_a_tap_by_its_cents() {
+        for cents in [100.0f32, -100.0, 25.0, -50.0] {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "feedback", 0.0);
+            set(&plug, "base_time_l", 150f32.ln() / 2000f32.ln());
+            set(&plug, "tap_detune_1", cents);
+            let out = render(&mut plug, &sine(440.0, 3.0), |_, _| {});
+            let want = 440.0 * 2f32.powf(cents / 1200.0);
+            let got = pitch(&out, 1.0, 2.8);
+            let off = 1200.0 * (got / want).log2();
+            assert!(off.abs() < 3.0, "{cents} ct: {got:.2} Hz, {off:.1} cents from {want:.2}");
+        }
+    }
+
+    #[test]
+    fn clean_moves_a_tap_by_its_cents_and_short_taps_use_light() {
+        // Clean on a 150 ms tap; a 40 ms tap (too short for Clean) on Light
+        for (ms, cents) in [(150.0f32, 100.0f32), (150.0, -50.0), (40.0, 100.0)] {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "feedback", 0.0);
+            set(&plug, "detune_quality", 1.0);
+            set(&plug, "base_time_l", ms.ln() / 2000f32.ln());
+            set(&plug, "tap_detune_1", cents);
+            let out = render(&mut plug, &sine(440.0, 3.0), |_, _| {});
+            let want = 440.0 * 2f32.powf(cents / 1200.0);
+            let got = pitch(&out, 1.0, 2.8);
+            let off = 1200.0 * (got / want).log2();
+            assert!(off.abs() < 3.0, "{ms} ms, {cents} ct: {got:.2} Hz, {off:.1} cents off");
+            assert_eq!(plug.clean_w[0] > 0.5, ms > 100.0, "{ms} ms on the wrong quality");
+        }
+    }
+
+    #[test]
+    fn changing_detune_while_it_plays_does_not_click() {
+        // Light and Clean: the knob swept across its range over the held
+        // tone, against the tone at a steady detune
+        let input = held_tone();
+        for quality in [0.0, 1.0] {
+            let sharpest = |sweep: bool| {
+                let mut plug = plugin(&[0.0]);
+                set(&plug, "detune_quality", quality);
+                set(&plug, "base_time_l", 150f32.ln() / 2000f32.ln());
+                set(&plug, "tap_detune_1", 50.0);
+                let n = input.len();
+                sharpest_bend(&render(&mut plug, &input, |at, plug| {
+                    if sweep {
+                        set(plug, "tap_detune_1", (100.0 * (at as f32 / n as f32 * 6.0).sin()).round());
+                    }
+                }))
+            };
+            let (still, (moving, at)) = (sharpest(false).0, sharpest(true));
+            assert!(moving < 1.5 * still, "quality {quality}: {:.2}× at {:.3} s", moving / still, at as f32 / SR + 0.3);
+        }
+    }
+
+    /// CPU of 16 detuned taps (not a check): `cargo test … detune_cpu -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn detune_cpu() {
+        let input: Vec<(f32, f32)> = held_tone()[..(4.0 * SR) as usize].to_vec();
+        for (name, quality, cents) in [("plain", 0.0, 0.0), ("light", 0.0, 1.0), ("clean", 1.0, 1.0)] {
+            let mut plug = plugin(&[0.0; 16]);
+            set(&plug, "base_time_l", 200f32.ln() / 2000f32.ln());
+            set(&plug, "feedback", 0.5);
+            set(&plug, "detune_quality", quality);
+            for i in 0..16 {
+                set(&plug, &format!("tap_detune_{}", i + 1), cents * (i as f32 * 13.0 - 100.0).clamp(-100.0, 100.0));
+            }
+            let t = std::time::Instant::now();
+            render(&mut plug, &input, |_, _| {});
+            let secs = t.elapsed().as_secs_f64();
+            eprintln!("CPU {name}: {:.1} % of one core ({:.0} ns/sample)", 100.0 * secs / 4.0, secs * 1e9 / input.len() as f64);
+        }
+    }
+
+    #[test]
+    fn a_tap_at_zero_cents_is_untouched() {
+        // detune set and back to 0 well before the sound: exactly the plain tap
+        let run = |touch: bool| {
+            let mut plug = plugin(&[-0.3, 0.4]);
+            set(&plug, "feedback", 0.6);
+            if touch {
+                set(&plug, "tap_detune_2", 40.0);
+                render(&mut plug, &vec![(0.0, 0.0); 4800], |_, _| {});
+                set(&plug, "tap_detune_2", 0.0);
+                render(&mut plug, &vec![(0.0, 0.0); 24000], |_, _| {});
+            } else {
+                render(&mut plug, &vec![(0.0, 0.0); 28800], |_, _| {});
+            }
+            render(&mut plug, &held_tone()[..SR as usize], |_, _| {})
+        };
+        assert!(run(false) == run(true));
+    }
+
+    #[test]
+    fn the_repeats_keep_the_taps_detune_without_stacking() {
+        // a 440 Hz burst, one tap at +100 ct, the loop at 80 %: the second
+        // and third passes sound at +100 ct too, not +200 and +300
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "base_time_l", 300f32.ln() / 2000f32.ln());
+        set(&plug, "feedback", 0.8);
+        set(&plug, "tap_detune_1", 100.0);
+        let mut input = sine(440.0, 0.25);
+        input.resize((1.5 * SR) as usize, (0.0, 0.0));
+        let out = render(&mut plug, &input, |_, _| {});
+        let want = 440.0 * 2f32.powf(100.0 / 1200.0);
+        for (k, at) in [(1, 0.3), (2, 0.6), (3, 0.9)] {
+            let got = pitch(&out, at + 0.08, at + 0.2);
+            assert!((1200.0 * (got / want).log2()).abs() < 5.0, "pass {k}: {got:.1} Hz");
+        }
+    }
+
+    #[test]
+    fn a_detuned_taps_sides_splice_together() {
+        // the held tone's right side is 0.6 of its left; through a centred,
+        // detuned tap it stays exactly that (one splice for both sides)
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "base_time_l", 150f32.ln() / 2000f32.ln());
+        set(&plug, "tap_detune_1", -60.0);
+        let out = render(&mut plug, &held_tone()[..(2.0 * SR) as usize], |_, _| {});
+        let worst = out.iter().map(|s| (s.0 * 0.6 - s.1).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "the sides part by {worst}");
     }
 
     #[test]
