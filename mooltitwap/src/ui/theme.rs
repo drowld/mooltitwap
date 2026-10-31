@@ -431,10 +431,13 @@ pub const VU_BAR_H: f32 = 26.0;
 pub const VU_BAR_GAP: f32 = 4.0;
 pub const VU_RADIUS: f32 = 3.0;
 
-/// Font pairings. Karla is Tide's type; Plex is on trial (owner, 2026-10-26)
-/// to compare in the plugin before deciding.
+/// Font pairings. Hanken Grotesk is Afterecho's (owner, 2026-10-31); Karla
+/// (Tide's) and Plex stay in Settings to compare.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum FontChoice {
+    /// Hanken Grotesk Medium for everything — its digits are fixed-width —
+    /// with the wordmark in its SemiBold.
+    Hanken,
     /// Karla for text + Inconsolata for numbers (Karla's digits aren't
     /// fixed-width, so readouts would jitter in it); the Greek wordmark falls
     /// back to egui's built-in font — Karla has no Greek.
@@ -457,10 +460,13 @@ pub fn apply_fonts(ctx: &egui::Context, choice: FontChoice) {
         ("inconsolata", &include_bytes!("../../assets/fonts/Inconsolata-Regular.ttf")[..]),
         ("plex", &include_bytes!("../../assets/fonts/IBMPlexSans-Medium.ttf")[..]),
         ("didot", &include_bytes!("../../assets/fonts/GFSDidot-Regular.ttf")[..]),
+        ("hanken", &include_bytes!("../../assets/fonts/HankenGrotesk-Medium.ttf")[..]),
+        ("hanken_semibold", &include_bytes!("../../assets/fonts/HankenGrotesk-SemiBold.ttf")[..]),
     ] {
         fonts.font_data.insert(name.into(), FontData::from_static(bytes).into());
     }
     let (prop, mono, mark) = match choice {
+        FontChoice::Hanken => ("hanken", "hanken", Some("hanken_semibold")),
         FontChoice::KarlaInconsolata => ("karla", "inconsolata", None),
         FontChoice::PlexDidot => ("plex", "plex", Some("didot")),
     };
@@ -474,10 +480,10 @@ pub fn apply_fonts(ctx: &egui::Context, choice: FontChoice) {
     ctx.set_fonts(fonts);
 }
 
-/// Install the default font pairing (Karla) at editor creation, so the first
+/// Install the default font pairing (Hanken) at editor creation, so the first
 /// frame doesn't flash another face.
 pub fn install_fonts(ctx: &egui::Context) {
-    apply_fonts(ctx, FontChoice::KarlaInconsolata);
+    apply_fonts(ctx, FontChoice::Hanken);
 }
 
 // ---- global font-size scale (live-tunable from the menu; fonts only, NOT

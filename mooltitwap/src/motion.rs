@@ -1,29 +1,13 @@
-//! Motion (v2.39): one source moves every tap's pan, gain, cutoff and Q
-//! around the values set for them. The source is an LFO shape (the taps'
-//! phases spread by Scatter) or the dry input's level. Pure maths, shared by
-//! the engine and the page, so the field draws each tap where it is.
+//! Motion's shapes and tap targets (v2.39). Since v2.42 the matrix
+//! (`matrix.rs`) routes its sources to these targets; an LFO's taps have
+//! their phases spread by Scatter. Pure maths, shared by the engine and the
+//! page, so the field draws each tap where it is.
 //!
 //! Time isn't a target: moving delay times is pitch wobble (removed in
 //! v2.17.5) and breaks Fade and Jump. Pan, gain and the filters move in every
 //! mode, smoothed by the per-tap glides (v2.37).
 
 use crate::params::MotionShape;
-
-/// How far each target moves, 0 (still) … 1.
-#[derive(Clone, Copy, Default, Debug)]
-pub struct Depths {
-    pub pan: f32,
-    pub gain: f32,
-    pub cutoff: f32,
-    pub reso: f32,
-}
-
-impl Depths {
-    /// Motion is off when nothing moves.
-    pub fn any(&self) -> bool {
-        self.pan > 0.0 || self.gain > 0.0 || self.cutoff > 0.0 || self.reso > 0.0
-    }
-}
 
 /// A tap's random value for one cycle, −1…1: S&H and Glide draw each tap
 /// its own, a new one each cycle, the same every time for that cycle.
@@ -36,7 +20,7 @@ fn rand(tap: usize, cycle: i64) -> f32 {
 }
 
 /// An LFO shape's value for tap `tap` at `phase` (in cycles), −1…1. Env isn't
-/// an LFO: see [`env_value`].
+/// an LFO (v2.39's input source, now the matrix's Follow row): see [`env_value`].
 pub fn shape_at(shape: MotionShape, phase: f64, tap: usize) -> f32 {
     let cycle = phase.floor();
     let f = (phase - cycle) as f32;
@@ -65,12 +49,6 @@ pub fn env_value(level: f32) -> f32 {
 /// Pan moved by `m` at depth `d`: up to hard L or R either side of `base`.
 pub fn pan(base: f32, m: f32, d: f32) -> f32 {
     (base + d * m).clamp(-1.0, 1.0)
-}
-
-/// Gain (dB) moved by `m` at depth `d`: it only dips, up to 24 dB at m = −1,
-/// so Motion never boosts or clips.
-pub fn gain_db(base: f32, m: f32, d: f32) -> f32 {
-    base - 24.0 * d * (1.0 - m) * 0.5
 }
 
 /// Cutoff moved by `m` at depth `d`: ±4 octaves.
@@ -139,13 +117,11 @@ mod tests {
     fn the_targets_move_as_far_as_their_depth() {
         assert_eq!(pan(0.2, 1.0, 0.5), 0.7);
         assert_eq!(pan(0.8, 1.0, 1.0), 1.0);
-        assert_eq!(gain_db(-3.0, 1.0, 1.0), -3.0);
-        assert_eq!(gain_db(-3.0, -1.0, 1.0), -27.0);
         assert!((cutoff(1000.0, 1.0, 0.5) - 4000.0).abs() < 0.1);
         assert!((reso(1.0, -1.0, 1.0) - 0.25).abs() < 1e-6);
         // depth 0 leaves every value exactly as set
         for m in [-1.0, -0.3, 0.6, 1.0] {
-            assert_eq!((pan(0.3, m, 0.0), gain_db(-6.0, m, 0.0), cutoff(2500.0, m, 0.0), reso(0.707, m, 0.0)), (0.3, -6.0, 2500.0, 0.707));
+            assert_eq!((pan(0.3, m, 0.0), cutoff(2500.0, m, 0.0), reso(0.707, m, 0.0)), (0.3, 2500.0, 0.707));
         }
         assert!((env_value(0.0) + 1.0).abs() < 1e-6 && env_value(1.0) > 0.98);
     }

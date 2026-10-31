@@ -103,6 +103,191 @@ pub const MOTION_DIVS: &[(f32, &str)] = &[
     (0.25, "1/16"),
 ];
 
+/// Repeats: a count up to 16, then the feedback loop (∞).
+pub const REPEATS_LOOP: i32 = 17;
+pub const REPEATS_DEFAULT: i32 = 4;
+
+/// Beats per cycle for a synced source, from an index into MOTION_DIVS.
+pub fn motion_div_beats(div: i32) -> f32 {
+    MOTION_DIVS[(div.max(0) as usize).min(MOTION_DIVS.len() - 1)].0
+}
+
+fn hz_text(v: f32) -> String {
+    if v < 1.0 { format!("{v:.2} Hz") } else { format!("{v:.1} Hz") }
+}
+
+fn div_text(v: i32) -> String {
+    MOTION_DIVS[(v.max(0) as usize).min(MOTION_DIVS.len() - 1)].1.to_string()
+}
+
+/// One LFO (v2.42; LFO 1 is v2.39's Motion source). Its rate runs in Hz, or
+/// locked to the song as a cycle from MOTION_DIVS.
+#[derive(Params)]
+pub struct LfoParams {
+    #[id = "shape"]
+    pub shape: EnumParam<MotionShape>,
+    #[id = "rate"]
+    pub rate: FloatParam,
+    #[id = "div"]
+    pub div: IntParam,
+    /// Locked to the song (v2.42; before, LFO 1 followed Time's Sync, and
+    /// `migrate` carries that over).
+    #[id = "sync"]
+    pub sync: BoolParam,
+    /// 0: the taps move together … 1: their phases spread evenly round the
+    /// cycle, so the movement travels through them.
+    #[id = "scatter"]
+    pub scatter: FloatParam,
+}
+
+impl LfoParams {
+    fn new(n: usize, shape: MotionShape, hz: f32) -> Self {
+        // LFO 1 keeps v2.39's names as well as its ids
+        let name = |what: &str| if n == 1 { format!("Motion {what}") } else { format!("LFO {n} {what}") };
+        Self {
+            shape: EnumParam::new(name("Shape"), shape),
+            rate: FloatParam::new(name("Rate"), hz, FloatRange::Skewed { min: 0.05, max: 8.0, factor: FloatRange::skew_factor(-2.0) })
+                .with_value_to_string(Arc::new(hz_text))
+                .with_string_to_value(Arc::new(|s| s.trim().to_ascii_lowercase().trim_end_matches("hz").trim().parse().ok())),
+            div: IntParam::new(name(if n == 1 { "Cycle" } else { "Div" }), 3, IntRange::Linear { min: 0, max: MOTION_DIVS.len() as i32 - 1 })
+                .with_value_to_string(Arc::new(div_text)),
+            sync: BoolParam::new(name("Sync"), false),
+            scatter: FloatParam::new(name("Scatter"), 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+        }
+    }
+
+    /// Beats per cycle when synced, else None (it runs in Hz).
+    pub fn beats(&self) -> Option<f32> {
+        self.sync.value().then(|| motion_div_beats(self.div.value()))
+    }
+
+    /// Cycles per second at `tempo` (BPM).
+    pub fn hz(&self, tempo: f32) -> f32 {
+        self.beats().map_or_else(|| self.rate.value(), |beats| tempo / 60.0 / beats)
+    }
+}
+
+/// Step (v2.42): up to 16 values played in turn, one per step of its rate.
+/// Scatter starts each tap further along the steps.
+#[derive(Params)]
+pub struct StepParams {
+    #[id = "rate"]
+    pub rate: FloatParam,
+    #[id = "div"]
+    pub div: IntParam,
+    #[id = "sync"]
+    pub sync: BoolParam,
+    #[id = "len"]
+    pub len: IntParam,
+    #[id = "scatter"]
+    pub scatter: FloatParam,
+    /// The steps, −1…1 (hidden from hosts; drawn on the Step tab).
+    #[nested(array)]
+    pub steps: [StepValue; 16],
+}
+
+#[derive(Params)]
+pub struct StepValue {
+    #[id = "v"]
+    pub v: FloatParam,
+}
+
+impl Default for StepParams {
+    fn default() -> Self {
+        Self {
+            rate: FloatParam::new("Step Rate", 4.0, FloatRange::Skewed { min: 0.05, max: 16.0, factor: FloatRange::skew_factor(-2.0) })
+                .with_value_to_string(Arc::new(hz_text))
+                .with_string_to_value(Arc::new(|s| s.trim().to_ascii_lowercase().trim_end_matches("hz").trim().parse().ok())),
+            // a step per 1/16
+            div: IntParam::new("Step Div", MOTION_DIVS.len() as i32 - 1, IntRange::Linear { min: 0, max: MOTION_DIVS.len() as i32 - 1 })
+                .with_value_to_string(Arc::new(div_text)),
+            sync: BoolParam::new("Step Sync", true),
+            len: IntParam::new("Step Length", 8, IntRange::Linear { min: 1, max: 16 }),
+            scatter: FloatParam::new("Step Scatter", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            steps: core::array::from_fn(|i| StepValue {
+                v: FloatParam::new(format!("Step {}", i + 1), 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
+                    .with_step_size(0.01)
+                    .hide(),
+            }),
+        }
+    }
+}
+
+impl StepParams {
+    /// Beats per step when synced, else None (it runs in Hz).
+    pub fn beats(&self) -> Option<f32> {
+        self.sync.value().then(|| motion_div_beats(self.div.value()))
+    }
+
+    /// Steps per second at `tempo` (BPM).
+    pub fn hz(&self, tempo: f32) -> f32 {
+        self.beats().map_or_else(|| self.rate.value(), |beats| tempo / 60.0 / beats)
+    }
+
+    pub fn values(&self) -> [f32; 16] {
+        core::array::from_fn(|i| self.steps[i].v.value())
+    }
+}
+
+/// One source's row of the matrix: a depth per target, −1…1 (0 = no route),
+/// in `matrix::TGT_NAMES` order.
+#[derive(Params)]
+pub struct MxRow {
+    #[id = "pan"]
+    pub pan: FloatParam,
+    #[id = "gain"]
+    pub gain: FloatParam,
+    #[id = "cutoff"]
+    pub cutoff: FloatParam,
+    #[id = "reso"]
+    pub reso: FloatParam,
+    #[id = "colour"]
+    pub colour: FloatParam,
+    #[id = "fdbk"]
+    pub fdbk: FloatParam,
+    #[id = "cross"]
+    pub cross: FloatParam,
+    #[id = "tone"]
+    pub tone: FloatParam,
+    #[id = "mix"]
+    pub mix: FloatParam,
+    #[id = "duck"]
+    pub duck: FloatParam,
+}
+
+impl MxRow {
+    fn new(src: &str) -> Self {
+        let cell = |t: &str| {
+            FloatParam::new(format!("{src} → {t}"), 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
+                .with_step_size(0.01)
+                .with_value_to_string(Arc::new(|v| format!("{:+.0}", v * 100.0)))
+                .hide()
+        };
+        Self {
+            pan: cell("Pan"),
+            gain: cell("Gain"),
+            cutoff: cell("Cutoff"),
+            reso: cell("Reso"),
+            colour: cell("Colour"),
+            fdbk: cell("Feedback"),
+            cross: cell("Cross"),
+            tone: cell("Tone"),
+            mix: cell("Mix"),
+            duck: cell("Duck"),
+        }
+    }
+
+    pub fn cells(&self) -> [&FloatParam; crate::matrix::TARGETS] {
+        [&self.pan, &self.gain, &self.cutoff, &self.reso, &self.colour, &self.fdbk, &self.cross, &self.tone, &self.mix, &self.duck]
+    }
+}
+
 /// The loop tone as its filter: "Off", "LP 3.5 kHz", "HP 140 Hz".
 pub fn tone_text(t: f32) -> String {
     let (kind, hz) = match t {
@@ -346,8 +531,14 @@ pub struct PetalParams {
     pub taps: [TapParams; NUM_TAPS],
 
     // ---- Feedback ----
+    /// How much each repeat keeps (0 … 105 %).
     #[id = "feedback"]
     pub feedback: FloatParam,
+    /// How many times the pattern repeats (v2.42): 1…16 copies, then a clean
+    /// stop; `REPEATS_LOOP` (∞) is the feedback loop. New instances start on
+    /// a count; sessions and presets from before load as ∞ (see `migrate`).
+    #[id = "repeats"]
+    pub repeats: IntParam,
     /// Feedback time, 0..FEEDBACK_TIME_MAX. In Free mode maps to 10 ms..20 s
     /// (exponential). In Sync mode snaps to the nearest division (`fb_div`).
     /// Independent of the tap layout — you can space the echo cluster
@@ -475,31 +666,42 @@ pub struct PetalParams {
     /// not saved.
     pub duck_dip_db: AtomicU32,
 
-    // ---- Motion (v2.39): one source moves every tap's pan, gain, cutoff and Q ----
-    #[id = "motion_shape"]
-    pub motion_shape: EnumParam<MotionShape>,
-    /// The rate in Free (Hz) and the cycle in Sync (an index into
-    /// MOTION_DIVS); which runs follows Time's Sync, as the feedback cycle does.
-    #[id = "motion_rate"]
-    pub motion_rate: FloatParam,
-    #[id = "motion_div"]
-    pub motion_div: IntParam,
-    /// 0: the taps move together … 1: their phases spread evenly round the
-    /// cycle, so the movement travels through them.
-    #[id = "motion_scatter"]
-    pub motion_scatter: FloatParam,
-    /// How far each one moves (0 = still); see `motion.rs`.
-    #[id = "motion_pan"]
-    pub motion_pan: FloatParam,
-    #[id = "motion_gain"]
-    pub motion_gain: FloatParam,
-    #[id = "motion_cutoff"]
-    pub motion_cutoff: FloatParam,
-    #[id = "motion_reso"]
-    pub motion_reso: FloatParam,
-    /// Each tap's motion right now, −1…1 (f32 bits), for the page to draw.
-    /// Written by the audio thread; not params, not saved.
-    pub motion_now: [AtomicU32; NUM_TAPS],
+    // ---- Motion (v2.42): a matrix of sources and targets ----
+    /// LFO 1 keeps v2.39's Motion ids (`motion_shape` …), so its sessions load.
+    #[nested(id_prefix = "motion", group = "LFO 1")]
+    pub lfo1: LfoParams,
+    #[nested(id_prefix = "lfo2", group = "LFO 2")]
+    pub lfo2: LfoParams,
+    #[nested(id_prefix = "lfo3", group = "LFO 3")]
+    pub lfo3: LfoParams,
+    #[nested(id_prefix = "lfo4", group = "LFO 4")]
+    pub lfo4: LfoParams,
+    #[nested(id_prefix = "step", group = "Step")]
+    pub step: StepParams,
+    /// The grid: one row per source, a cell per target (hidden from hosts;
+    /// saved with the session and in presets).
+    #[nested(id_prefix = "mx_lfo1", group = "Matrix")]
+    pub mx_lfo1: MxRow,
+    #[nested(id_prefix = "mx_lfo2", group = "Matrix")]
+    pub mx_lfo2: MxRow,
+    #[nested(id_prefix = "mx_lfo3", group = "Matrix")]
+    pub mx_lfo3: MxRow,
+    #[nested(id_prefix = "mx_lfo4", group = "Matrix")]
+    pub mx_lfo4: MxRow,
+    #[nested(id_prefix = "mx_follow", group = "Matrix")]
+    pub mx_follow: MxRow,
+    #[nested(id_prefix = "mx_step", group = "Matrix")]
+    pub mx_step: MxRow,
+    /// Scales every route; Polarity (−100 … 100 %) after it, so −100 % turns
+    /// the whole grid upside down (Vortex's MATRIX_POLARITY.md).
+    #[id = "mx_amount"]
+    pub mx_amount: FloatParam,
+    #[id = "mx_pol"]
+    pub mx_pol: FloatParam,
+    /// Where Motion has each tap right now, per tap target (Pan, Gain, Cutoff,
+    /// Reso; f32 bits, see `matrix::TapMods`), for the page to draw. Written
+    /// by the audio thread; not params, not saved.
+    pub motion_now: [[AtomicU32; NUM_TAPS]; 4],
 }
 
 #[derive(Params)]
@@ -661,6 +863,12 @@ impl Default for PetalParams {
             .with_value_to_string(formatters::v2s_f32_percentage(0))
             .with_string_to_value(formatters::s2v_f32_percentage())
             .with_smoother(SmoothingStyle::Linear(20.0)),
+            repeats: IntParam::new("Repeats", REPEATS_DEFAULT, IntRange::Linear { min: 1, max: REPEATS_LOOP })
+                .with_value_to_string(Arc::new(|v| if v >= REPEATS_LOOP { "∞".into() } else { v.to_string() }))
+                .with_string_to_value(Arc::new(|s| {
+                    let s = s.trim();
+                    if s == "∞" || s.eq_ignore_ascii_case("inf") { Some(REPEATS_LOOP) } else { s.parse().ok() }
+                })),
             // Default: Sync mode, 1/4 note (index 8 of 17 divs → 8/17 ≈ 0.47)
             feedback_time: FloatParam::new(
                 "Feedback Time",
@@ -828,25 +1036,26 @@ impl Default for PetalParams {
             })),
             duck_dip_db: AtomicU32::new(0),
 
-            motion_shape: EnumParam::new("Motion Shape", MotionShape::Sine),
-            motion_rate: FloatParam::new(
-                "Motion Rate",
-                0.5,
-                FloatRange::Skewed { min: 0.05, max: 8.0, factor: FloatRange::skew_factor(-2.0) },
-            )
-            .with_value_to_string(Arc::new(|v| if v < 1.0 { format!("{v:.2} Hz") } else { format!("{v:.1} Hz") }))
-            .with_string_to_value(Arc::new(|s| s.trim().to_ascii_lowercase().trim_end_matches("hz").trim().parse().ok())),
-            motion_div: IntParam::new("Motion Cycle", 3, IntRange::Linear { min: 0, max: MOTION_DIVS.len() as i32 - 1 })
-                .with_value_to_string(Arc::new(|v| MOTION_DIVS[(v.max(0) as usize).min(MOTION_DIVS.len() - 1)].1.to_string())),
-            motion_scatter: FloatParam::new("Motion Scatter", 0.5, FloatRange::Linear { min: 0.0, max: 1.0 })
+            lfo1: LfoParams::new(1, MotionShape::Sine, 0.5),
+            lfo2: LfoParams::new(2, MotionShape::Triangle, 0.25),
+            lfo3: LfoParams::new(3, MotionShape::Glide, 1.0),
+            lfo4: LfoParams::new(4, MotionShape::SampleHold, 2.0),
+            step: StepParams::default(),
+            mx_lfo1: MxRow::new("LFO 1"),
+            mx_lfo2: MxRow::new("LFO 2"),
+            mx_lfo3: MxRow::new("LFO 3"),
+            mx_lfo4: MxRow::new("LFO 4"),
+            mx_follow: MxRow::new("Follow"),
+            mx_step: MxRow::new("Step"),
+            mx_amount: FloatParam::new("Matrix Amount", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
-            motion_pan: motion_depth("Motion Pan"),
-            motion_gain: motion_depth("Motion Gain"),
-            motion_cutoff: motion_depth("Motion Cutoff"),
-            motion_reso: motion_depth("Motion Reso"),
-            motion_now: core::array::from_fn(|_| AtomicU32::new(0)),
+            mx_pol: FloatParam::new("Matrix Polarity", 1.0, FloatRange::Linear { min: -1.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(Arc::new(|v| format!("{:+.0}", v * 100.0)))
+                .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0))),
+            motion_now: core::array::from_fn(|_| core::array::from_fn(|_| AtomicU32::new(0))),
         }
     }
 }
@@ -871,25 +1080,21 @@ impl PetalParams {
         }
     }
 
-    /// Motion's depths (v2.39); all 0 means Motion is off.
-    pub fn motion_depths(&self) -> crate::motion::Depths {
-        crate::motion::Depths {
-            pan: self.motion_pan.value(),
-            gain: self.motion_gain.value(),
-            cutoff: self.motion_cutoff.value(),
-            reso: self.motion_reso.value(),
-        }
+    /// The four LFOs, in order.
+    pub fn lfos(&self) -> [&LfoParams; 4] {
+        [&self.lfo1, &self.lfo2, &self.lfo3, &self.lfo4]
     }
 
-    /// Motion's beats per cycle when Time is synced, else None (it runs in Hz).
-    pub fn motion_beats(&self) -> Option<f32> {
-        (self.sync_mode.value() == SyncMode::Sync)
-            .then(|| MOTION_DIVS[(self.motion_div.value().max(0) as usize).min(MOTION_DIVS.len() - 1)].0)
+    /// The matrix rows, in source order (`matrix::SRC_NAMES`).
+    pub fn mx_rows(&self) -> [&MxRow; crate::matrix::SOURCES] {
+        [&self.mx_lfo1, &self.mx_lfo2, &self.mx_lfo3, &self.mx_lfo4, &self.mx_follow, &self.mx_step]
     }
 
-    /// Motion's cycles per second at `tempo` (BPM).
-    pub fn motion_hz(&self, tempo: f32) -> f32 {
-        self.motion_beats().map_or_else(|| self.motion_rate.value(), |beats| tempo / 60.0 / beats)
+    /// Every cell's depth now, Amount and Polarity applied.
+    pub fn mx_grid(&self) -> crate::matrix::Grid {
+        let k = self.mx_amount.value() * self.mx_pol.value();
+        let rows = self.mx_rows();
+        core::array::from_fn(|r| core::array::from_fn(|t| rows[r].cells()[t].value() * k))
     }
 
     /// The taps heard: Euclid places at most one per step, and any more stay
@@ -1051,12 +1256,14 @@ mod tests {
         assert_eq!(fb_div(FEEDBACK_TIME_MAX).1, "8/1");
         assert_eq!(PetalParams::default().feedback_time.value(), 8.0 / 17.0);
     }
+
+    #[test]
+    fn repeats_read_as_a_count_or_the_loop() {
+        let r = &PetalParams::default().repeats;
+        assert_eq!(r.value(), REPEATS_DEFAULT);
+        assert_eq!(r.normalized_value_to_string(1.0, false), "∞");
+        assert_eq!(r.normalized_value_to_string(r.preview_normalized(4), false), "4");
+        assert_eq!(r.string_to_normalized_value("∞"), Some(1.0));
+    }
 }
 
-/// A Motion depth knob: 0 (still) … 100 %.
-fn motion_depth(name: &str) -> FloatParam {
-    FloatParam::new(name, 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-        .with_unit(" %")
-        .with_value_to_string(formatters::v2s_f32_percentage(0))
-        .with_string_to_value(formatters::s2v_f32_percentage())
-}

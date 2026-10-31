@@ -97,6 +97,7 @@ unsafe fn to_normalized(id: &str, ptr: ParamPtr, stored: f32, fmt: u32) -> f32 {
 /// default instead of keeping whatever was set. Unknown ids are skipped. An
 /// empty map is Init.
 pub fn apply(params: &PetalParams, setter: &ParamSetter, snap: &BTreeMap<String, f32>, fmt: u32) {
+    let snap = &*crate::migrate::preset(snap, fmt);
     for (id, ptr, _group) in params.param_map() {
         if NOT_STORED.contains(&id.as_str()) {
             continue;
@@ -117,6 +118,7 @@ pub fn apply(params: &PetalParams, setter: &ParamSetter, snap: &BTreeMap<String,
 /// Set a stand-alone params instance (the browser's "In this preset" probe,
 /// the factory builder) to a stored sound, without gestures: no host sees it.
 pub(crate) fn load_into(params: &PetalParams, snap: &BTreeMap<String, f32>, fmt: u32) {
+    let snap = &*crate::migrate::preset(snap, fmt);
     for (id, ptr, _group) in params.param_map() {
         // SAFETY: ptr belongs to params, which no host or audio thread reads.
         unsafe {
@@ -135,6 +137,7 @@ pub(crate) fn load_into(params: &PetalParams, snap: &BTreeMap<String, f32>, fmt:
 /// param whose default is off the grid (the taps' Q, 0.707) lands on the
 /// grid once set, and that's still the same sound.
 pub fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>, fmt: u32) -> bool {
+    let snap = &*crate::migrate::preset(snap, fmt);
     params.param_map().into_iter().filter(|(id, _, _)| !NOT_STORED.contains(&id.as_str())).all(|(id, ptr, _group)| {
         // SAFETY: ptr comes from these params and outlives the call.
         let (live, want) = unsafe {

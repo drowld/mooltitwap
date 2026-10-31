@@ -1,6 +1,6 @@
 # mooltitwap (Afterecho) — Architecture
 
-_As of v2.41.0 (2026-10-31), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
+_As of v2.42.0 (2026-10-31), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
 
 ## Overview
 16-tap multitap delay (VST3 + CLAP + standalone on desktop, AUv3 on iPad) on **nice-plug**
@@ -14,24 +14,29 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
 3. Feedback: read the main lines at the cycle (Auto = cluster span, floored at Euclid's
    whole pattern; Manual = its own time). Two loops share it by Ping's share: the main
    loop (L/R) and the bounce (`ping_odd`/`ping_even`, mono, odd/even repeats), crossfaded.
+   Repeats as a count (v2.42) replaces the loop's read with N copies read from `dry_l/r`
+   (the input as written) at k × the cycle, crossfading with the loop on a switch.
 4. Each loop's colour: crossfeed Diffuse → Diffuse/Tape/Saturate on FB → Loop tone →
    safety soft clip (the only bound; no gain compensation). Freeze crossfades to the held
    loop (unity, latched whole-sample length) and keeps new input out.
-5. Write input + feedback. Taps read the main and bounce lines: per-tap pan, SVF cascade
-   (type crossfade on change), gain — all gliding (two 5 ms one-poles; cutoff/Q in log
-   steps). Motion re-aims pan/gain/cutoff/Q every 32 samples.
+5. Write input + feedback (and the input alone to `dry_l/r`). Taps read the main and
+   bounce lines: per-tap pan, SVF cascade (type crossfade on change), gain — all gliding
+   (two 5 ms one-poles; cutoff/Q in log steps). Every 32 samples Motion's matrix re-aims
+   each tap's pan/gain/cutoff/Q and the whole echo's Colour/Feedback/Cross/Tone/Mix/Duck.
 6. Crossfeed Mix → output colour → Ducking (wet only) → dry/wet → decode → Out → limiter.
 
 ## Key modules (src/)
 - `lib.rs` — plugin impls, `process`, engine state, tests (incl. click and A/B-style checks).
-- `params.rs` — `PetalParams` (+ `TapParams[16]`), enums (`MotionShape`, `MOTION_DIVS`…),
+- `params.rs` — `PetalParams` (+ `TapParams[16]`, `LfoParams` ×4, `StepParams`, `MxRow` ×6), enums (`MotionShape`, `MOTION_DIVS`…),
   helpers shared by engine and page (`spacing`, `taps_heard`, `pattern_secs`,
   `motion_depths`, `motion_hz`), and plain atomics the engine writes for the page:
-  `held_cycle_secs`, `duck_dip_db`, `motion_now[16]` (tempo is a separate `Arc<AtomicU32>`).
+  `held_cycle_secs`, `duck_dip_db`, `motion_now[4][16]` (per tap target; tempo is a separate `Arc<AtomicU32>`).
 - `topology.rs` — tap positions (`Spacing`, `compute_positions`, `euclid_steps`, swing),
   `tap_delay_secs`, `cluster_span_secs`: one copy for engine and page.
-- `bounce.rs` — Ping placement (width, swing of panned taps). `motion.rs` — Motion shapes
-  and target maths. `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
+- `bounce.rs` — Ping placement (width, swing of panned taps). `motion.rs` — LFO shapes
+  and the tap targets' maths. `matrix.rs` — the Motion matrix (sources × targets, sums,
+  whole-echo conversions, Step). `migrate.rs` — old sessions (`filter_state`) and presets
+  into v2.42's params (Repeats ∞, v2.39 Motion → the matrix). `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
 - `delay.rs` — `DelayLine` (Lagrange read; fractional reads are backwards, SOF-60),
   `TapReader` (Repitch / Fade / Jump), `SlewedTime`. `diffusion.rs`, `tape.rs` (RE-DEEMER port).
 - `presets.rs` — the Soft Systems preset library (Vortex's port): the file (format 2,
@@ -43,8 +48,9 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
 - `gui.rs` — `create_editor` (routes to the scope page when `SCOPE_PAGE`),
   `compute_viz_data_ex` (shared viz maths), the old v2 editor. `gui_v3.rs`, `palette_v3.rs` — old v3.
 - `gui_scope.rs` — the page: header (Freeze, A/B), the field/Bars with the Y list and the
-  Taps menu (pattern tools), the lane (Echo / Motion / Tap tabs, Cross and Loop rows),
-  the Time card (Time | Pattern, Euclid ring, Swing), Colour, Output (Duck), Settings.
+  Taps menu (pattern tools), the lane (Echo with Repeats and Loop rows; Motion, the
+  matrix, across the whole lane; Tap), the Time card (Time | Pattern, Euclid ring,
+  Swing), Colour, Output (Duck), Settings.
   `gui_scope/preset_sheet.rs` — the header's preset box and the preset sheet, drawn in
   place of the field and the lane while open (state in `PresetUi`: Try, edited, session).
 

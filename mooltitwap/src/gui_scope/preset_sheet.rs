@@ -891,17 +891,25 @@ fn summary_lines(q: &PetalParams) -> Vec<String> {
     }
     let tone = crate::params::tone_text(q.loop_tone.value());
     let colour = if colour.is_empty() { format!("Tone {tone} · no colour") } else { format!("Tone {tone} · {}", colour.join(", ")) };
-    let d = q.motion_depths();
-    let moved: Vec<&str> = [("Pan", d.pan), ("Gain", d.gain), ("Cutoff", d.cutoff), ("Reso", d.reso)]
-        .into_iter()
-        .filter(|(_, v)| *v > 0.001)
-        .map(|(n, _)| n)
+    // Motion: each routed source and what it moves, the first two in full
+    let routes: Vec<String> = q
+        .mx_rows()
+        .iter()
+        .enumerate()
+        .filter_map(|(r, row)| {
+            let to: Vec<&str> = row.cells().iter().enumerate().filter(|(_, c)| c.value().abs() > 1e-4).map(|(t, _)| crate::matrix::TGT_NAMES[t]).collect();
+            (!to.is_empty()).then(|| format!("{} → {}", crate::matrix::SRC_NAMES[r], to.join(", ")))
+        })
         .collect();
-    let motion = if moved.is_empty() { "No motion".to_string() } else { format!("Motion {} · {}", q.motion_shape, moved.join(", ")) };
+    let motion = match routes.len() {
+        0 => "No motion".to_string(),
+        1 | 2 => format!("Motion · {}", routes.join(" · ")),
+        n => format!("Motion · {} · +{} more", routes[..2].join(" · "), n - 2),
+    };
     vec![
         format!("{taps} taps · {spacing}{swing}"),
         format!("{time} · {sync_word} · {mode}{split}"),
-        format!("{cross} · Feedback {}", q.feedback),
+        format!("{cross} · {} · Feedback {}", repeats_word(q.repeats.value()), q.feedback),
         colour,
         motion,
         format!("Duck {} · Mix {}", q.duck, q.dry_wet),
@@ -1944,6 +1952,15 @@ fn footer(ui: &mut egui::Ui, cx: &Cx, geo: &Geo, pu: &mut PresetUi) {
     x -= 8.0 + 86.0;
     if btn(ui, cx.r(x, fy, 86.0, 32.0), "Duplicate", "duplicate", s, Btn::Plain) {
         pu.duplicate();
+    }
+}
+
+/// Repeats in a word: "4 repeats", or "Loops" for ∞.
+fn repeats_word(n: i32) -> String {
+    match n {
+        n if n >= crate::params::REPEATS_LOOP => "Loops".into(),
+        1 => "1 repeat".into(),
+        n => format!("{n} repeats"),
     }
 }
 

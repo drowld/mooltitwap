@@ -923,6 +923,8 @@ pub struct VizData {
     /// has one fb read head shared by both channels).
     pub fb_cycle_norm: f32,
     pub n_echo_cycles: usize,
+    /// Repeats as a count (v2.42), or None for ∞ (the loop).
+    pub repeats: Option<usize>,
     pub feedback: f32,
     /// Cumulative echo level after k cycles ([0] = 1.0), following the FB
     /// CURVE law (Natural = feedbackᵏ; Bloom/Gate mirror lib.rs's
@@ -1026,9 +1028,23 @@ pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_ca
     let mut cycle_gains = [0.0f32; MAX_ECHO_CYCLES + 1];
     cycle_gains[0] = 1.0;
     let mut n_echo_cycles = 0usize;
+    // a count of repeats (v2.42): that many, each `feedback` times the last,
+    // then nothing (not capped at 0 dB: above 100 % they grow)
+    let n_rep = params.repeats.value();
+    let repeats = (n_rep < crate::params::REPEATS_LOOP).then_some(n_rep as usize);
     if frozen {
         cycle_gains = [1.0; MAX_ECHO_CYCLES + 1];
         n_echo_cycles = MAX_ECHO_CYCLES;
+    } else if let Some(n) = repeats {
+        if feedback >= 1e-3 && fb_cycle_secs >= 1e-6 {
+            for k in 1..=n {
+                cycle_gains[k] = feedback.powi(k as i32);
+                if cycle_gains[k] < ECHO_THRESHOLD {
+                    break;
+                }
+                n_echo_cycles = k;
+            }
+        }
     } else if feedback >= 1e-3 && fb_cycle_secs >= 1e-6 {
         let mut level = 1.0f32;
         for k in 1..=MAX_ECHO_CYCLES {
@@ -1080,7 +1096,7 @@ pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_ca
         times_l, times_r, grid_range_secs, times_l_grid, grid_range_secs_taps_only,
         span_l_secs: span_l,
         fb_cycle_norm: fb_cycle_secs / grid_range_secs,
-        n_echo_cycles, feedback, cycle_gains, ping_pong,
+        n_echo_cycles, repeats, feedback, cycle_gains, ping_pong,
         pp_own_d: 1.0 - 2.0 * crossfeed,
         frozen,
     }

@@ -109,7 +109,7 @@ const RECIPES: &[Recipe] = &[
             ("tap_filter_cutoff_4", 1200.0), ("tap_filter_cutoff_5", 1200.0), ("tap_filter_cutoff_6", 1200.0),
             ("tap_filter_q_1", 2.0), ("tap_filter_q_2", 2.0), ("tap_filter_q_3", 2.0),
             ("tap_filter_q_4", 2.0), ("tap_filter_q_5", 2.0), ("tap_filter_q_6", 2.0),
-            ("motion_shape", GLIDE), ("motion_div", 2.0), ("motion_cutoff", 0.60),
+            ("motion_shape", GLIDE), ("motion_sync", 1.0), ("motion_div", 2.0), ("mx_lfo1_cutoff", 0.60),
         ],
     },
     Recipe {
@@ -138,7 +138,7 @@ const RECIPES: &[Recipe] = &[
         changes: &[
             ("num_taps_active", 5.0), ("spacing_mode", EUCLID), ("euclid_steps", 16.0),
             ("sync_mode", SYNC), ("base_time_l", T_1_16), ("feedback", 0.60),
-            ("crossfeed_mode", PING), ("crossfeed", 1.0), ("motion_pan", 0.60), ("duck", 6.0), ("dry_wet", 0.35),
+            ("crossfeed_mode", PING), ("crossfeed", 1.0), ("motion_sync", 1.0), ("mx_lfo1_pan", 0.60), ("duck", 6.0), ("dry_wet", 0.35),
         ],
     },
     Recipe {
@@ -222,7 +222,7 @@ const RECIPES: &[Recipe] = &[
         notes: "A slow wave of pan through the taps.",
         changes: &[
             ("num_taps_active", 6.0), ("base_time_l", T_150MS), ("feedback", 0.40),
-            ("motion_shape", TRI), ("motion_rate", 0.7), ("motion_scatter", 1.0), ("motion_pan", 0.80),
+            ("motion_shape", TRI), ("motion_rate", 0.7), ("motion_scatter", 1.0), ("mx_lfo1_pan", 0.80),
         ],
     },
 ];
@@ -235,7 +235,9 @@ pub fn factory_presets() -> Vec<Preset> {
 fn build(r: &Recipe) -> Preset {
     let p = PetalParams::default();
     let map = p.param_map();
-    for (id, plain) in r.changes {
+    // the set was made on the feedback loop (Repeats ∞), before counts (v2.42)
+    let base = [("repeats", crate::params::REPEATS_LOOP as f32)];
+    for (id, plain) in base.iter().chain(r.changes) {
         if let Some((_, ptr, _)) = map.iter().find(|(pid, _, _)| pid == id) {
             // SAFETY: ptr belongs to `p`, alive for this call; nothing else
             // reads these params.
@@ -332,7 +334,7 @@ mod tests {
         assert_eq!((read("Haas Wide").taps[0].pan.value(), read("Haas Wide").taps[1].pan.value()), (-1.0, 1.0));
         assert!((read("Swing Shuffle").swing.value() - 0.66).abs() < 1e-4);
         assert_eq!(read("Swell Duck").duck.value(), 12.0);
-        assert!(read("Wobble Pan").motion_depths().pan > 0.79);
+        assert!(read("Wobble Pan").mx_lfo1.pan.value() > 0.79);
         let drift = read("Filter Drift");
         assert_eq!(drift.taps[5].filter_type.value(), crate::params::FilterType::BandPass);
         assert!((drift.taps[5].filter_q.value() - 2.0).abs() < 0.01);

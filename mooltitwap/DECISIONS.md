@@ -2,6 +2,47 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-31 · Repeats, the Motion matrix, Hanken Grotesk (v2.42.0)
+
+From the owner's notes on v2.41; built as mocked (artifact "Afterecho Next
+Layout").
+- **Repeats, beside Feedback, in one control: 1…16, then ∞.** A count
+  plays that many copies of the pattern, each Feedback times the last, then
+  stops dead; ∞ is the loop as before. A loop can't count (it doesn't know
+  how often a sound has gone round), so a count is built feed-forward: a
+  second line holds the dry input as written, and the copies are read from
+  it at k × the cycle (16 reads a sample at most, not per tap) into the
+  main line, so taps, Ping and Freeze work unchanged. The loop's colour
+  shapes the copies once (a count has no passes to build up over); Curve
+  only applies at ∞ (dimmed on a count). Switching crossfades over 20 ms.
+  Costs a second pair of 32 s lines (memory). **New instances start on 4**
+  (owner: "repeat mode standard"); sessions, presets and the factory set
+  from before load as ∞ (`migrate.rs`, `filter_state`), so they sound as
+  they did. Rejected: gating the loop by input silence (the first notes of
+  a long phrase would repeat more than N times).
+- **A Feedback knob** in the lane (owner: the drag alone isn't precise).
+- **Motion becomes a matrix**: LFO 1–4, Follow (v2.39's Env) and Step (16
+  steps) × Pan, Gain, Cutoff, Reso (each tap) and Colour, Feedback, Cross,
+  Tone, Mix, Duck (the whole echo), with Amount and Polarity (Vortex's
+  MATRIX_POLARITY.md). One route converts exactly as v2.39 did, so old
+  Motion migrates to LFO 1's row (Follow's when its source was Env); LFO 1
+  keeps v2.39's ids. Whole-echo conversions: Colour scales every colour's
+  amount by 1 + m (an off colour stays off), Feedback/Cross/Mix ±50 points,
+  Tone the whole way, Duck ±12 dB. Still not delay time.
+  - **Deviation from Vortex: cells are hidden params, not a blob.** Same
+    behaviour for the owner (saved with the session and in presets, not
+    automatable), and the preset code needs nothing new.
+  - **Each LFO has its own Free / Sync** (v2.39's followed Time's Sync;
+    migrated from it).
+  - The Motion tab takes the whole lane on both page shapes; the Tap tab
+    keeps Cross and Loop beside it on Wide (owner asked; recommended).
+- **Page**: Field / Bars pinned right of Lock time · Snap (nothing moves
+  when they go); Slope as a sixth Y axis; the last-touched card removed, its
+  room given to the Time card's rows.
+- **Hanken Grotesk** is the default font (wordmark SemiBold; digits are
+  fixed-width, so no mono partner). Karla and Plex stay in Settings. Saved
+  looks move to it once (LOOK_VERSION 3).
+
 ## 2026-10-31 · The first factory set: 18 presets (v2.41.0)
 
 The owner approved the proposed list; written in `factory.rs` as changes
