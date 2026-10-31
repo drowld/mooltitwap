@@ -2,6 +2,26 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-31 · The first factory set: 18 presets (v2.41.0)
+
+The owner approved the proposed list; written in `factory.rs` as changes
+from Init in plain values (times as SYNC_DIVS index / 17 or ln(ms)/ln(2000),
+Tone from its LP/HP formulas).
+- **Basics**: Slapback 80, Quarter Repeats, Dotted Eighth, Haas Wide.
+  **Dub and tape**: Dub Station, Tape Ghosts, Dark Repeats, Runaway.
+  **Rhythm**: Tresillo, Five over Sixteen, Swing Shuffle, Ping Garden.
+  **Space**: Bloom Hall, Thin Air, Swell Duck. **Motion**: Wobble Pan,
+  Filter Drift, Vocal Throw.
+- **Runaway runs Feedback at 105 %**: it self-oscillates, held by
+  Saturate in the loop — never tamed below unity (the DSP rule).
+- **Freeze has no preset** (it isn't stored); Bloom Hall's and Swell Duck's
+  notes point to it.
+- **Ping presets set Crossfeed to 100 %, Diffuse ones to 60 %**: the mode
+  alone does nothing at Crossfeed 0.
+- A test checks each against its description (facets, named times and
+  tones, taps, pans, swing, duck, motion) and that no two are one sound.
+  None is tuned by ear yet: that's the owner's pass.
+
 ## 2026-10-31 · The Soft Systems preset system (v2.40.0)
 
 Vortex's preset system (`Vortex/docs/PRESET_SYSTEM.md`) is the new design

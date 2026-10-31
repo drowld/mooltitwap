@@ -3,10 +3,10 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 
 ## In Progress
 - [ ] **Owner hand test of Phase 4 (v2.34–v2.39)** on desktop, all at once: Loop tone, Freeze, Ducking, Pattern tools (+ Reso/Type axes), Euclid + Swing, Motion; plus Ping (v2.32) and the new look (v2.33) by ear/hand. Installed 2026-10-29, committed `b88320d`. Built + unit/A-B tested; nothing heard by ear yet. Linear SOF-57.
-- [ ] **Preset system (Soft Systems spec, v2.40.0)**: built as mocked 2026-10-31 (sheet over field + lane, Time/Cross facets, Try/Keep/Back, "In this preset", folder move from `Mooltitwap/presets`, session name). 84 tests + screenshots; not committed, not installed, not tried by hand. Linear SOF-146.
+- [ ] **Preset system (Soft Systems spec, v2.40.0)**: built as mocked 2026-10-31 (sheet over field + lane, Time/Cross facets, Try/Keep/Back, "In this preset", folder move from `Mooltitwap/presets`, session name). 84 tests + screenshots; committed `dfe4f24`, installed on desktop 2026-10-31; not tried by hand yet. Linear SOF-146.
 
 ## Next
-0. [ ] **Factory presets**: approve a list (names + sounds) → write them in `factory.rs` → tune by ear. Linear SOF-147.
+0. [ ] **Factory presets: tune by ear.** The 18 approved presets are written (v2.41.0, `factory.rs`, tested against their descriptions); none heard yet. Linear SOF-147.
 1. [ ] **Fix fractional delay reads** (found 2026-10-29): `DelayLine::read` interpolates backwards (2-sample jump at each whole sample) → small jumps in Repitch glides; feedback cycle runs 1 sample long. Changes glide sound: own version + A/B. Linear SOF-60.
 2. [ ] Fold in the hand-test feedback. Linear SOF-84.
 3. [ ] iPad: install v2.39.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving. Linear SOF-85.
