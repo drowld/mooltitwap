@@ -5,35 +5,43 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.41.0 · 2026-10-31 · branch `ui/scope-first`
+## ⭐ CURRENT STATE — v2.42.0 · 2026-10-31 · branch `ui/scope-first`
 
-**Worked on (2026-10-29 → 31):** wrapup docs for Phase 4; then Vortex's Soft Systems
-preset system (`Vortex/docs/PRESET_SYSTEM.md`): mocked, approved, built (v2.40); then
-the first factory set, 18 presets (v2.41). DECISIONS.md has both.
+**Worked on (2026-10-31):** the owner's notes on v2.41: a font comparison (Hanken
+Grotesk picked), a mockup ("Afterecho Next Layout"), then v2.42 built as mocked:
+Repeats (1–16 or ∞) + a Feedback knob, the Motion matrix, Field/Bars pinned right,
+Slope Y axis, last-touched card removed, Hanken Grotesk default. A side session made
+the per-tap detune listening test (`spikes/detune/`): the owner liked both WSOLA and
+the phase vocoder. DECISIONS.md has the why.
 
-**Current state:** v2.41.0 committed locally (`b2930f2`, nothing pushed) and installed
-on desktop (CLAP + VST3). 85 unit tests pass. The preset sheet covers the field and
-the lane; library in `presets.rs`, factory set in `factory.rs`, sheet in
-`gui_scope/preset_sheet.rs`. Checked on screen (Wide, Tall, light; browse, Save as,
-trying, delete confirm). **Nothing heard or clicked by hand yet**: Phase 4, the
-browser and the 18 presets all wait for the owner's test. iPad still on v2.34.0.
+**Current state:** v2.42.0 committed (`358f65f`, docs `1a30dd0`, nothing pushed) and
+installed on desktop (CLAP + VST3). 95 unit tests pass (exact counts, count↔∞ switch
+without clicks, whole-echo Motion, old sessions/presets migrated). Checked on screen
+(Wide, Tall, light, Motion, Step, Tap tab, presets). **Nothing heard or clicked by hand
+yet** (v2.34–v2.42). iPad still on v2.34.0.
 
 **Problems / open:**
-- SOF-60 fractional delay reads: still not fixed.
-- On first open of the sheet, `~/Library/Application Support/Mooltitwap/presets/test.json`
-  is copied to `Soft Systems/Afterecho/Presets` (old folder left alone); not yet seen
-  happen for real (tests only).
-- Long-press on a row (select without Try) not built: the touch layer has no long-press.
-- The factory presets are untuned (written from descriptions, checked by a test).
+- SOF-60 fractional delay reads: still not fixed; it blocks detune (SOF-156).
+- `spikes/detune/` is uncommitted (renders git-ignored, 132 MB).
+- Repeats adds a second pair of 32 s lines: memory on iPad not measured.
+- On a count the loop colour shapes the copies once (no build-up): owner to judge.
+- Follow tab is text only (no live meter); `ScopeState.focus` is written but no longer
+  read (cells still record it).
+- The factory presets are untuned (SOF-147).
 
-**Next session:** fold in the owner's hand-test notes (Phase 4 + presets) and tune the
-factory set by ear, then SOF-60. **Estimated next task:** hand-test notes / SOF-147.
+**Next session:** fold in the owner's hand-test notes (v2.34–v2.42) and tune the factory
+set by ear, then SOF-60, then detune (SOF-156). **Estimated next task:** hand-test notes /
+SOF-147.
 
-**How things were checked (reuse):** A/B renders (21 cases, worktree of HEAD vs working
-tree, byte for byte); click tests with a control each. Previews:
-`AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern,saveas|trying|deleting`
+**How things were checked (reuse):** unit tests with controls; previews:
+`AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type|slope,sel3,tap|motion,mxdemo,step|follow,lock,presets,light,tape,pattern,saveas|trying|deleting`
 with `AFTERECHO_PRESET_DIR=<scratch folder>` so a preview never touches the real
-presets (params can't be set by token: flip a default, build, shoot, restore).
+presets (`mxdemo` sets a few matrix cells in the preview instance only).
+
+## PRIOR STATE — v2.41.0 · 2026-10-31
+
+The Soft Systems preset system (v2.40) and the first factory set, 18 presets (v2.41).
+See DECISIONS.md.
 
 ## PRIOR STATE — v2.39.0 · 2026-10-29
 

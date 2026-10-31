@@ -9,7 +9,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 1. [ ] **Fix fractional delay reads** (found 2026-10-29): `DelayLine::read` interpolates backwards (2-sample jump at each whole sample) → small jumps in Repitch glides; feedback cycle runs 1 sample long. Changes glide sound: own version + A/B. Linear SOF-60.
 2. [ ] **Per-tap detune ±1 semitone** (after SOF-60): owner liked both WSOLA and the phase vocoder in the listening test (`spikes/detune/`, uncommitted) → a Detune knob in the Tap tab, Settings "Detune quality" Light (WSOLA) / Clean (phase vocoder, 3× CPU, taps under ~88 ms fall back to Light). Linear SOF-156.
 3. [ ] Fold in the hand-test feedback. Linear SOF-84.
-4. [ ] iPad: install v2.41.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving. Linear SOF-85.
+4. [ ] iPad: install v2.42.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving. Linear SOF-85.
 5. [ ] Second spacing pass (owner: "spacing still not perfect"; Tall Time group loose). Linear SOF-86.
 6. [ ] Restyle the Settings menu to the new look (still old epo chips). Linear SOF-87.
 7. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
