@@ -1,6 +1,6 @@
 # mooltitwap (Afterecho) — Architecture
 
-_As of v2.39.0 (2026-10-29), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
+_As of v2.41.0 (2026-10-31), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
 
 ## Overview
 16-tap multitap delay (VST3 + CLAP + standalone on desktop, AUv3 on iPad) on **nice-plug**
@@ -34,14 +34,19 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
   and target maths. `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
 - `delay.rs` — `DelayLine` (Lagrange read; fractional reads are backwards, SOF-60),
   `TapReader` (Repitch / Fade / Jump), `SlewedTime`. `diffusion.rs`, `tape.rs` (RE-DEEMER port).
-- `presets.rs` — named presets via `param_map()`; `NOT_STORED` (Freeze) stays out of
-  presets and A/B.
+- `presets.rs` — the Soft Systems preset library (Vortex's port): the file (format 2,
+  plain discrete values, Time/Cross facets), `Library` (factory from the binary + user
+  files in `Soft Systems/Afterecho/Presets`, `library.json`, one-time copy from
+  `Mooltitwap/presets`), `PresetSession` (persisted with the host). `NOT_STORED`
+  (Freeze) stays out of presets and A/B. `factory.rs` — the factory set as changes
+  from Init.
 - `gui.rs` — `create_editor` (routes to the scope page when `SCOPE_PAGE`),
   `compute_viz_data_ex` (shared viz maths), the old v2 editor. `gui_v3.rs`, `palette_v3.rs` — old v3.
 - `gui_scope.rs` — the page: header (Freeze, A/B), the field/Bars with the Y list and the
   Taps menu (pattern tools), the lane (Echo / Motion / Tap tabs, Cross and Loop rows),
   the Time card (Time | Pattern, Euclid ring, Swing), Colour, Output (Duck), Settings.
-  `palette_scope.rs` — the preset browser.
+  `gui_scope/preset_sheet.rs` — the header's preset box and the preset sheet, drawn in
+  place of the field and the lane while open (state in `PresetUi`: Try, edited, session).
 
 ## Layout and scaling
 Two page shapes, absolute layouts in logical px: Wide 1366×660 and Tall 1050×780

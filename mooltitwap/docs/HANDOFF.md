@@ -5,35 +5,40 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.39.0 · 2026-10-29 · branch `ui/scope-first`
+## ⭐ CURRENT STATE — v2.41.0 · 2026-10-31 · branch `ui/scope-first`
 
-**Worked on (2026-10-28 → 29):** the scope-first page (new look, spacing, Bars
-tap/double-tap mute, preset browser restyle), Ping as a mono bounce (v2.32), then all
-six Phase 4 functions: Loop tone (v2.34), Freeze (v2.35), Ducking (v2.36), Pattern
-tools + Reso/Type axes + per-tap glides (v2.37), Euclid + Swing (v2.38), Motion
-(v2.39). Each has a DECISIONS.md entry.
+**Worked on (2026-10-29 → 31):** wrapup docs for Phase 4; then Vortex's Soft Systems
+preset system (`Vortex/docs/PRESET_SYSTEM.md`): mocked, approved, built (v2.40); then
+the first factory set, 18 presets (v2.41). DECISIONS.md has both.
 
-**Current state:** v2.39.0 committed locally (`b88320d`, nothing pushed) and installed
-on desktop (CLAP + VST3). 56 unit tests pass; every feature, when off, is bit-identical
-to the version before it (21-render A/B). **Nothing heard by ear yet** — the owner is
-testing it all at once. The iPad is still on v2.34.0.
+**Current state:** v2.41.0 committed locally (`b2930f2`, nothing pushed) and installed
+on desktop (CLAP + VST3). 85 unit tests pass. The preset sheet covers the field and
+the lane; library in `presets.rs`, factory set in `factory.rs`, sheet in
+`gui_scope/preset_sheet.rs`. Checked on screen (Wide, Tall, light; browse, Save as,
+trying, delete confirm). **Nothing heard or clicked by hand yet**: Phase 4, the
+browser and the 18 presets all wait for the owner's test. iPad still on v2.34.0.
 
 **Problems / open:**
-- `DelayLine::read` interpolates fractional delays backwards (SOF-60): small jumps in
-  Repitch glides; the feedback cycle runs one sample long. Not fixed.
-- Motion's CPU on the iPad not measured (filters recomputed while Cutoff/Reso move).
-- iPad installs refuse while the iPad is locked; screenshots need the Mac unlocked, and
-  the standalone's window can open off-screen (find it with CGWindowList `.optionAll`).
+- SOF-60 fractional delay reads: still not fixed.
+- On first open of the sheet, `~/Library/Application Support/Mooltitwap/presets/test.json`
+  is copied to `Soft Systems/Afterecho/Presets` (old folder left alone); not yet seen
+  happen for real (tests only).
+- Long-press on a row (select without Try) not built: the touch layer has no long-press.
+- The factory presets are untuned (written from descriptions, checked by a test).
 
-**Next session:** fold in the owner's hand-test notes, then fix SOF-60 (own version +
-A/B). **Estimated next task:** SOF-60.
+**Next session:** fold in the owner's hand-test notes (Phase 4 + presets) and tune the
+factory set by ear, then SOF-60. **Estimated next task:** hand-test notes / SOF-147.
 
-**How things were checked (reuse):** an A/B test renders 21 cases (every mode, colour
-routing, channel mode, curve, self-oscillation, mode switching) on a worktree of HEAD
-and on the working tree, compared byte for byte; click tests compare the sharpest
-second difference against held baselines, each with a control that disables the fix.
-Previews: `AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern`
-(params can't be set by token: flip a default, build, shoot, restore).
+**How things were checked (reuse):** A/B renders (21 cases, worktree of HEAD vs working
+tree, byte for byte); click tests with a control each. Previews:
+`AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern,saveas|trying|deleting`
+with `AFTERECHO_PRESET_DIR=<scratch folder>` so a preview never touches the real
+presets (params can't be set by token: flip a default, build, shoot, restore).
+
+## PRIOR STATE — v2.39.0 · 2026-10-29
+
+Phase 4 built (v2.34–v2.39: Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing,
+Motion), each off = bit-identical to the version before (21-render A/B). See DECISIONS.md.
 
 ## PRIOR STATE — v2.27.0 · 2026-07-14 · branch `nice-plug-port`
 
