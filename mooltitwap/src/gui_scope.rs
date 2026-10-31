@@ -25,6 +25,8 @@ use crate::ui::epo;
 use crate::ui::theme::{self, G, INK, INK2, INSET, PANEL, PAPER, SOFT};
 use crate::ui::tokens as tk;
 
+mod preset_sheet;
+
 /// Element sizes (logical px), the same on every page shape — Tide's, so the
 /// plug-ins match.
 pub(crate) mod g {
@@ -193,8 +195,7 @@ impl Default for Appearance {
 impl Appearance {
     /// Next to the presets folder, not inside it.
     fn file() -> PathBuf {
-        let dir = crate::presets::data_dir();
-        dir.parent().map(|p| p.to_path_buf()).unwrap_or(dir).join("appearance.json")
+        crate::presets::legacy_root().join("appearance.json")
     }
 
     /// The saved choices, or the defaults when there's no (readable) file.
@@ -273,6 +274,8 @@ pub struct ScopeState {
     pat_undo: [Vec<[f32; NUM_TAPS]>; 5],
     /// Preview: apply a shape on the first frame, to see it without clicking.
     pat_demo: bool,
+    /// The preset browser's state (the loaded preset, Try, the sheet's view).
+    pub(crate) presets: preset_sheet::PresetUi,
 }
 
 /// The pattern menu's shapes: where each tap sits between the range's ends.
@@ -355,7 +358,8 @@ pub fn frame(
             sc.look = Appearance::load();
             sc.look_saved = Some(sc.look);
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern
+            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern,
+            // saveas|trying|deleting (with AFTERECHO_PRESET_DIR, a folder of presets to show)
             // (the iPad page, the Bars view, the Y axis, a selected tap, the Tap
             // or Motion tab, Lock time, the preset browser, the light page, Colour's Tape
             // tab, the Taps menu with Ramp down applied). A preview never saves
@@ -374,6 +378,9 @@ pub fn frame(
                         "motion" => sc.lane_tab = 1,
                         "lock" => sc.lock_time = true,
                         "presets" => open_presets = true,
+                        "saveas" => (open_presets, sc.presets.preview) = (true, 1),
+                        "trying" => (open_presets, sc.presets.preview) = (true, 2),
+                        "deleting" => (open_presets, sc.presets.preview) = (true, 3),
                         "light" => sc.look.dark = false,
                         "tape" => sc.colour_tab = 1,
                         _ => {
@@ -384,6 +391,10 @@ pub fn frame(
                     }
                 }
                 sc.look_saved = Some(sc.look);
+                // a preview's presets live in their own folder, never the user's
+                if let Some(d) = std::env::var_os("AFTERECHO_PRESET_DIR") {
+                    sc.presets.dir = Some((PathBuf::from(d), None));
+                }
             }
         }
         if sc.look_saved != Some(sc.look) {
@@ -444,10 +455,6 @@ pub fn frame(
         vp.min
     };
     page(ui, o, s, lay, params, setter, st, tempo);
-    // The preset browser drops over the page, as on Tide.
-    if st.preset_open {
-        crate::palette_scope::draw(ui, params, setter, st);
-    }
     ui.ctx().request_repaint();
 }
 
@@ -464,14 +471,25 @@ fn page(
 ) {
     header(ui, o, s, l, params, setter, st);
     st.palette_top = o.y + (g::HEAD_Y + g::HEAD_H + 6.0) * s;
-    picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
-    lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
+    // The preset browser takes the field's and the lane's place, so the
+    // cards on the right stay in view and move while you try presets.
+    st.scope.presets.track(st.preset_open);
+    let presets_open = st.preset_open;
+    if presets_open {
+        let tall = st.scope.shape == Shape::Tall;
+        preset_sheet::sheet(ui, o, s, l, tall, params, setter, st);
+    } else {
+        picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
+        lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
+    }
     focus_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
     time_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
     colour_card(ui, o, s, l, params, setter, &mut st.scope);
     output_card(ui, o, s, l, params, setter, &mut st.scope.focus);
     settings_menu(ui, o, s, l, &mut st.scope);
-    taps_menu(ui, s, params, setter, &mut st.scope);
+    if !presets_open {
+        taps_menu(ui, s, params, setter, &mut st.scope);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -792,41 +810,7 @@ fn header(
     }
 
     // preset box, centred on the page: ‹ name ›
-    let pb = r(o, s, (l.w - l.preset_w) * 0.5, y, l.preset_w, h);
-    outline(ui.painter(), pb, false, s);
-    let prev = Rect::from_min_size(pb.min, Vec2::new(38.0 * s, pb.height()));
-    let next = Rect::from_min_size(Pos2::new(pb.right() - 38.0 * s, pb.top()), Vec2::new(38.0 * s, pb.height()));
-    let mid = Rect::from_min_max(Pos2::new(prev.right(), pb.top()), Pos2::new(next.left(), pb.bottom()));
-    let rp = ui.interact(prev, ui.id().with("sc_prev"), Sense::click());
-    let rn = ui.interact(next, ui.id().with("sc_next"), Sense::click());
-    let rm = ui.interact(mid, ui.id().with("sc_preset"), Sense::click());
-    for (rect, glyph, resp) in [(prev, "‹", &rp), (next, "›", &rn)] {
-        text(ui.painter(), rect.center(), Align2::CENTER_CENTER, glyph, 18.0, s, if resp.hovered() { INK() } else { INK2() });
-    }
-    let name = st.current_preset.clone().unwrap_or_else(|| "Init".into());
-    let sub = match (st.current_preset.is_some(), crate::palette_v3::is_dirty(st, params)) {
-        (false, _) => "Default",
-        (true, false) => "User",
-        (true, true) => "User · edited",
-    };
-    text(ui.painter(), mid.center() - Vec2::new(0.0, 7.0 * s), Align2::CENTER_CENTER, &name, 14.0, s, INK());
-    text(ui.painter(), mid.center() + Vec2::new(0.0, 9.0 * s), Align2::CENTER_CENTER, sub, 11.0, s, INK2());
-    if epo::tap_or_click(ui, &rp) {
-        crate::palette_v3::preset_step(st, params, setter, -1);
-    }
-    if epo::tap_or_click(ui, &rn) {
-        crate::palette_v3::preset_step(st, params, setter, 1);
-    }
-    // The name opens the browser (search, favourites, save-as).
-    if epo::tap_or_click(ui, &rm) {
-        st.preset_open = !st.preset_open;
-        if st.preset_open {
-            st.preset_search.clear();
-            st.palette_sel = 0;
-            st.palette_focus = true;
-            st.preset_guard = 2;
-        }
-    }
+    preset_sheet::preset_box(ui, o, s, l, params, setter, st);
 
     // A / B
     let ab_x = l.w - l.pad - 38.0 - 10.0 - 80.0;
@@ -2646,7 +2630,7 @@ fn settings_menu(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, sc: &mut ScopeS
 }
 
 fn reveal_presets() {
-    let dir = crate::presets::data_dir();
+    let dir = crate::presets::default_dir();
     let _ = std::fs::create_dir_all(&dir);
     #[cfg(target_os = "macos")]
     {

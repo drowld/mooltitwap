@@ -396,7 +396,7 @@ fn preset_step(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSe
 fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) {
     ensure_library(st);
     if let Some(lib) = st.library.as_mut() {
-        if lib.save_as(name, params, env!("CARGO_PKG_VERSION")) {
+        if lib.save_named(name, crate::presets::capture(params)) {
             st.current_preset = Some(name.to_string());
         }
     }

@@ -1,12 +1,12 @@
 mod bounce;
 mod delay;
 mod diffusion;
+mod factory;
 mod filter;
 mod gui;
 mod gui_scope;
 mod gui_v3;
 mod motion;
-mod palette_scope;
 mod palette_v3;
 mod params;
 mod presets;

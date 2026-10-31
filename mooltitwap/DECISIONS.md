@@ -2,6 +2,40 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-10-31 · The Soft Systems preset system (v2.40.0)
+
+Vortex's preset system (`Vortex/docs/PRESET_SYSTEM.md`) is the new design
+language for presets; the owner approved the mockup of it in Afterecho and
+asked for it built as mocked.
+- **The library and file format are Vortex's** (`presets.rs`, ported): format
+  2 with plugin id, kind, tags, facets, notes; atomic writes; nothing
+  overwritten silently; `library.json` for favourites, recent, the view and
+  Try. Factory presets are served from the binary, read-only (`factory.rs`).
+- **No blobs**: everything an Afterecho preset holds is a parameter. Freeze
+  stays out of presets (unchanged since v2.35).
+- **Facets: Time (Sync | Free, from `sync_mode`) and Cross (Mix | Ping |
+  Diffuse, from `crossfeed_mode`).** The mock said "Loop"; the page calls
+  that row Cross, so the filter does too.
+- **The sheet covers the field and the lane**; the Time, Colour and Output
+  cards stay in view and move while you try presets. Wide: collections and
+  facets on the left, the list, an inspector column on the right. Tall: the
+  inspector under the list, holding Init and Save (spec §6.2).
+- **"In this preset"** (an Afterecho addition to the spec): six lines read
+  from the preset (taps and spacing, time, Cross and feedback, Tone and
+  colour, Motion, Duck and Mix). Offered to the spec for Vortex and Tide.
+- **Picks are ink in both looks**, as everywhere on the page (v2.33), not the
+  spec's accent-in-light colour law.
+- **Folders**: presets move to `~/Library/Application Support/Soft
+  Systems/Afterecho/Presets`; the old `Mooltitwap/presets` files are copied
+  once and never deleted. The look (`appearance.json`) stays where it was.
+- **The loaded preset is saved with the host session** (`preset-session`),
+  so a reopened project names it.
+- **Edited compares floats on their step grid**: the taps' Q default (0.707)
+  sits off its 0.01 grid, so a freshly loaded preset read as edited before.
+- **No factory presets yet**: the list (names, sounds) waits for the owner.
+- Rejected: keeping Tide's spotlight palette (`palette_scope.rs`, removed) —
+  the spec makes one browser for every plug-in.
+
 ## 2026-10-29 · Motion: one source moves every tap (v2.39.0)
 
 The last Phase 4 function, built as proposed and approved by the owner (it

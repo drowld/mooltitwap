@@ -15,7 +15,6 @@ use crate::gui::EditorState;
 use crate::params::PetalParams;
 use crate::presets::{self, Library};
 
-const BUILD: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) fn ensure(st: &mut EditorState) {
     if st.library.is_none() {
@@ -58,7 +57,7 @@ pub(crate) fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name:
         return false;
     }
     ensure(st);
-    let ok = st.library.as_mut().map(|l| l.save_as(name, params, BUILD)).unwrap_or(false);
+    let ok = st.library.as_mut().map(|l| l.save_named(name, presets::capture(params))).unwrap_or(false);
     if ok {
         st.current_preset = Some(name.to_string());
         st.loaded_snapshot = Some(presets::capture(params));
@@ -88,7 +87,7 @@ pub(crate) fn preset_init(st: &mut EditorState, params: &Arc<PetalParams>, sette
 /// The dirty `*`: a preset is loaded and the live params have since diverged.
 pub fn is_dirty(st: &EditorState, params: &Arc<PetalParams>) -> bool {
     st.current_preset.is_some()
-        && st.loaded_snapshot.as_ref().map(|snap| !presets::matches(params, snap)).unwrap_or(false)
+        && st.loaded_snapshot.as_ref().map(|snap| !presets::matches(params, snap, presets::VALUES_FORMAT_PLAIN)).unwrap_or(false)
 }
 
 struct Row {
@@ -112,7 +111,7 @@ pub fn draw(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, 
 
     // snapshot + filter (scope ∘ search), capped at 9 rows
     let lib: Vec<Row> = st.library.as_ref().map(|l| {
-        l.presets.iter().map(|p| Row { name: p.name.clone(), fav: p.favorite, build: p.build.clone(), tags: p.tags.clone() }).collect()
+        l.presets().map(|p| Row { name: p.name.clone(), fav: l.is_favourite(&p.id()), build: p.plugin_version.clone(), tags: p.tags.clone() }).collect()
     }).unwrap_or_default();
     let q = st.preset_search.trim().to_lowercase();
     let q_disp = st.preset_search.trim().to_string();
@@ -509,14 +508,14 @@ pub fn draw(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, 
     if tag_commit {
         if let Some(nm) = st.palette_tag_for.clone() {
             let t = st.palette_tag_buf.trim().to_string();
-            if !t.is_empty() { if let Some(l) = st.library.as_mut() { l.add_tag(&nm, &t); } }
+            if !t.is_empty() { if let Some(l) = st.library.as_mut() { let _ = l.add_tag(&nm, &t); } }
             st.palette_tag_buf.clear();
             st.palette_tag_focus = true;
         }
     }
     if tag_cancel { st.palette_tag_for = None; st.palette_tag_buf.clear(); st.palette_focus = true; }
     if let Some((nm, t)) = tag_remove {
-        if let Some(l) = st.library.as_mut() { l.remove_tag(&nm, &t); }
+        if let Some(l) = st.library.as_mut() { let _ = l.remove_tag(&nm, &t); }
     }
     if let Some(nm) = open_rename {
         st.palette_name_open = true;
@@ -538,7 +537,7 @@ pub fn draw(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, 
         if typed.is_empty() {
             st.palette_name_focus = true;
         } else if let Some(old) = st.palette_rename_from.clone() {
-            let ok = st.library.as_mut().map(|l| l.rename(&old, &typed)).unwrap_or(false);
+            let ok = st.library.as_mut().is_some_and(|l| l.rename(&old, &typed).is_ok());
             if ok {
                 if st.current_preset.as_deref() == Some(old.as_str()) { st.current_preset = Some(typed.clone()); }
                 for n in st.recent.iter_mut() { if *n == old { *n = typed.clone(); } }
@@ -561,7 +560,7 @@ pub fn draw(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, 
     }
     if let Some(nm) = del_arm { st.palette_del_confirm = Some(nm); }
     if let Some(nm) = do_delete {
-        if let Some(l) = st.library.as_mut() { l.delete(&nm); }
+        if let Some(l) = st.library.as_mut() { let _ = l.delete(&nm); }
         if st.current_preset.as_deref() == Some(nm.as_str()) { st.current_preset = None; st.loaded_snapshot = None; }
         st.recent.retain(|n| n != &nm);
         st.palette_del_confirm = None;

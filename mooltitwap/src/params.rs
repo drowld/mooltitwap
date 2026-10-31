@@ -283,6 +283,11 @@ pub struct PetalParams {
     #[persist = "theme-dark"]
     pub theme_dark: Arc<std::sync::atomic::AtomicBool>,
 
+    /// The loaded preset (name, kind, edited), saved with the host's session
+    /// so a reopened project names it (the preset spec §10). GUI thread only.
+    #[persist = "preset-session"]
+    pub preset_session: Arc<std::sync::Mutex<crate::presets::PresetSession>>,
+
     // ---- Topology (Layer 1) ----
     /// Free mode: time in ms. Sync mode: time as 0..1 normalized over SYNC_DIVS.
     #[id = "base_time_l"]
@@ -596,6 +601,7 @@ impl Default for PetalParams {
                 if crate::gui::SCOPE_PAGE { st.with_host_resize() } else { st }
             },
             theme_dark: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            preset_session: Arc::new(std::sync::Mutex::new(Default::default())),
             base_time_l: FloatParam::new(
                 "Base Time L",
                 time_default,
