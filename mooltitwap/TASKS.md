@@ -2,7 +2,7 @@
 _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDESIGN_PLAN.md. Branch `ui/scope-first`, local commits only (push on major milestones, owner's call)._
 
 ## In Progress
-- [ ] **Owner hand test (v2.34–v2.42)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), and v2.42 (Repeats, the Motion matrix, Hanken Grotesk). v2.41.0 installed 2026-10-31; v2.42.0 built, not installed. Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
+- [ ] **Owner hand test (v2.34–v2.42)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), and v2.42 (Repeats, the Motion matrix, Hanken Grotesk). v2.42.0 installed 2026-10-31 (`358f65f`). Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
 - [ ] **Factory presets: tune by ear** — the 18 approved presets (v2.41.0, `factory.rs`) are written and tested against their descriptions; none heard yet. Linear SOF-147.
 
 ## Next
