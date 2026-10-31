@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::delay::{ChannelTaps, DelayLine, SlewedTime};
 use crate::diffusion::Diffusion;
-use crate::filter::{soft_clip, LoopTone, PeakLimiter, Svf, ToneCoefs};
+use crate::filter::{soft_clip, DcBlock, LoopTone, PeakLimiter, Svf, ToneCoefs};
 use crate::matrix::{SOURCES, TAP_TARGETS};
 use crate::params::{
     ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, PetalParams, TapeType, NUM_TAPS, REPEATS_LOOP,
@@ -38,22 +38,42 @@ fn s_curve(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// Move `now` toward `target` by at most the factor `up` (or `1 / up`) a
-/// sample, landing on it exactly. True if it moved.
-#[inline]
-fn glide_log(now: &mut f32, target: f32, up: f32) -> bool {
-    if *now == target {
-        return false;
+/// A cutoff or Q gliding in the log domain through two one-poles (v2.43,
+/// as gain and pan glide), so a jump — a Step's, a knob's — starts and lands
+/// without a corner. `now` is the value the filter runs at.
+#[derive(Clone, Copy)]
+struct LogGlide {
+    to: f32,
+    to_ln: f32,
+    mid_ln: f32,
+    now_ln: f32,
+    now: f32,
+}
+
+impl LogGlide {
+    fn at(v: f32) -> Self {
+        Self { to: v, to_ln: v.ln(), mid_ln: v.ln(), now_ln: v.ln(), now: v }
     }
-    let r = target / *now;
-    *now = if r > up {
-        *now * up
-    } else if r * up < 1.0 {
-        *now / up
-    } else {
-        target
-    };
-    true
+
+    /// One sample toward `target` (`k`: each one-pole's share a sample),
+    /// landing on it exactly. True if it moved.
+    #[inline]
+    fn step(&mut self, target: f32, k: f32) -> bool {
+        if target != self.to {
+            (self.to, self.to_ln) = (target, target.ln());
+        }
+        if self.now == self.to && self.mid_ln == self.to_ln {
+            return false;
+        }
+        self.mid_ln += (self.to_ln - self.mid_ln) * k;
+        self.now_ln += (self.mid_ln - self.now_ln) * k;
+        if (self.to_ln - self.now_ln).abs() < 1e-5 && (self.to_ln - self.mid_ln).abs() < 1e-5 {
+            *self = Self::at(self.to);
+        } else {
+            self.now = self.now_ln.exp();
+        }
+        true
+    }
 }
 
 /// What the feedback path does to each pass: Diffuse, Tape and Saturate
@@ -183,10 +203,13 @@ pub struct Mooltitwap {
     duck_depth: f32,
     duck_dip: f32,
     /// Motion (v2.42, the matrix): where each LFO's cycle is (in cycles) and
-    /// Step's (in steps), the dry input's level for Follow (10 ms up, 200 ms
-    /// down), and each tap's movement now per tap target (`matrix::tap_mods`).
-    lfo_phase: [f64; 4],
-    step_phase: f64,
+    /// each Step's (in steps), each Step's value gliding per tap (and for the
+    /// whole echo, the last), the dry input's level for Follow (10 ms up,
+    /// 200 ms down), and each tap's movement now per tap target
+    /// (`matrix::tap_mods`).
+    lfo_phase: [f64; matrix::LFOS],
+    step_phase: [f64; 2],
+    step_now: [[f32; NUM_TAPS + 1]; 2],
     motion_env: f32,
     mod_tap: [[f32; NUM_TAPS]; TAP_TARGETS],
     /// The whole-echo targets as Motion has them, gliding (5 ms) to where
@@ -202,6 +225,15 @@ pub struct Mooltitwap {
     dry_r: DelayLine,
     rep_gain: [f32; 16],
     rep_w: f32,
+    /// The count last set, so a handover to ∞ keeps playing it until the
+    /// loop has taken over (rather than the copies fading first).
+    rep_n: usize,
+    /// Safety (v2.43): the loops' DC blockers (main L/R, bounce odd/even);
+    /// Ear guard's power follower and gain; Clear's fade (samples left).
+    dc: [DcBlock; 4],
+    guard_pow: f32,
+    guard_g: f32,
+    clear_left: Option<usize>,
     /// Samples since the loop last became the bounce (saturating). A tap
     /// starts swinging once the first bounced repeat has reached it.
     ping_age: usize,
@@ -233,15 +265,16 @@ pub struct Mooltitwap {
     /// Per-tap glides (v2.37), so a pattern that moves every tap at once
     /// (or stepped automation) doesn't click: each tap's gain and pan gains
     /// as heard, through two 5 ms one-poles (`_mid`, then `_now`) so a glide
-    /// starts and ends without a corner; its cutoff and Q, their whole range
-    /// in 20 ms in log steps, the filters recomputed only while they move.
+    /// starts and ends without a corner; its cutoff and Q the same way in the
+    /// log domain (`LogGlide`, v2.43; before, a fixed rate with corners that
+    /// clicked under Step), the filters recomputed only while they move.
     /// Nothing changes while nothing moves.
     tap_gain_mid: [f32; NUM_TAPS],
     tap_gain_now: [f32; NUM_TAPS],
     tap_pan_mid: [(f32, f32); NUM_TAPS],
     tap_pan_now: [(f32, f32); NUM_TAPS],
-    tap_cut_now: [f32; NUM_TAPS],
-    tap_q_now: [f32; NUM_TAPS],
+    tap_cut: [LogGlide; NUM_TAPS],
+    tap_q: [LogGlide; NUM_TAPS],
     /// A filter-type change crossfades over 10 ms (`tap_type_xf` 0..1) from
     /// a copy of the filter still running the old type to the new one.
     tap_type_now: [crate::params::FilterType; NUM_TAPS],
@@ -330,8 +363,9 @@ impl Default for Mooltitwap {
             duck_hold: 0,
             duck_depth: 0.0,
             duck_dip: 0.0,
-            lfo_phase: [0.0; 4],
-            step_phase: 0.0,
+            lfo_phase: [0.0; matrix::LFOS],
+            step_phase: [0.0; 2],
+            step_now: [[0.0; NUM_TAPS + 1]; 2],
             motion_env: 0.0,
             mod_tap: [[0.0; NUM_TAPS]; TAP_TARGETS],
             fb_now: 0.0,
@@ -341,6 +375,11 @@ impl Default for Mooltitwap {
             dry_r: DelayLine::new(dummy_max),
             rep_gain: [0.0; 16],
             rep_w: 0.0,
+            rep_n: 0,
+            dc: [DcBlock::default(); 4],
+            guard_pow: 0.0,
+            guard_g: 1.0,
+            clear_left: None,
             ping_age: usize::MAX,
             ping_live: 0,
             ping_since_off: usize::MAX,
@@ -355,8 +394,8 @@ impl Default for Mooltitwap {
             tap_gain_now: [0.0; NUM_TAPS],
             tap_pan_mid: [(1.0, 1.0); NUM_TAPS],
             tap_pan_now: [(1.0, 1.0); NUM_TAPS],
-            tap_cut_now: [20_000.0; NUM_TAPS],
-            tap_q_now: [0.707; NUM_TAPS],
+            tap_cut: [LogGlide::at(20_000.0); NUM_TAPS],
+            tap_q: [LogGlide::at(0.707); NUM_TAPS],
             tap_type_now: [crate::params::FilterType::LowPass; NUM_TAPS],
             tap_type_old: [crate::params::FilterType::LowPass; NUM_TAPS],
             tap_type_xf: [1.0; NUM_TAPS],
@@ -416,12 +455,12 @@ impl Mooltitwap {
     /// odd one as the next even.
     #[inline]
     fn loop_inputs(&self, at: f32, b: f32, ch_mode: ChannelMode, ping_read: bool) -> [f32; 4] {
-        let raw_l = self.main_l.delay.read(at);
-        let raw_r = self.main_r.delay.read(at);
+        let raw_l = self.main_l.delay.read_before_write(at);
+        let raw_r = self.main_r.delay.read_before_write(at);
         // Ping's lines coming back (see bounce.rs): the odd repeats (bound
         // left) and the even ones (bound right).
         let (odd, even) = if ping_read && at <= self.ping_valid as f32 {
-            (self.ping_odd.read(at), self.ping_even.read(at))
+            (self.ping_odd.read_before_write(at), self.ping_even.read_before_write(at))
         } else {
             (0.0, 0.0)
         };
@@ -492,6 +531,10 @@ impl Plugin for Mooltitwap {
         self.dry_l.reset();
         self.dry_r.reset();
         self.rep_gain = [0.0; 16];
+        self.dc = [DcBlock::default(); 4];
+        (self.guard_pow, self.guard_g) = (0.0, 1.0);
+        self.lim_l = PeakLimiter::new(self.sample_rate);
+        self.lim_r = PeakLimiter::new(self.sample_rate);
         self.ping_on = false;
         self.ping_leave = None;
         self.ping_share = 0.0;
@@ -666,7 +709,7 @@ impl Plugin for Mooltitwap {
         // cutoff/Q. Cascaded biquads do shift the -3dB point slightly with
         // each stage, but for a music plugin the perceptual difference is
         // exactly "steeper roll-off", which is what the slope control means.
-        // The filters run at the gliding cutoff and Q (see `tap_cut_now`); a
+        // The filters run at the gliding cutoff and Q (see `LogGlide`); a
         // new type starts a crossfade from a copy of the filter as it was.
         let mut tap_cut = [0.0f32; NUM_TAPS];
         let mut tap_q = [0.0f32; NUM_TAPS];
@@ -676,7 +719,7 @@ impl Plugin for Mooltitwap {
             (tap_cut[i], tap_q[i]) = (tap.filter_cutoff.value(), tap.filter_q.value());
             let ty = tap.filter_type.value();
             if initial_snap {
-                (self.tap_cut_now[i], self.tap_q_now[i]) = (tap_cut[i], tap_q[i]);
+                (self.tap_cut[i], self.tap_q[i]) = (LogGlide::at(tap_cut[i]), LogGlide::at(tap_q[i]));
                 self.tap_type_now[i] = ty;
                 self.tap_type_xf[i] = 1.0;
             } else if ty != self.tap_type_now[i] {
@@ -687,7 +730,7 @@ impl Plugin for Mooltitwap {
                 self.tap_type_xf[i] = 0.0;
             }
             for st in 0..4 {
-                self.tap_svf_l[i][st].set(self.tap_cut_now[i], self.tap_q_now[i], sr);
+                self.tap_svf_l[i][st].set(self.tap_cut[i].now, self.tap_q[i].now, sr);
                 self.tap_svf_r[i][st].copy_coefs(&self.tap_svf_l[i][st]);
                 self.tap_svf_old_l[i][st].copy_coefs(&self.tap_svf_l[i][st]);
                 self.tap_svf_old_r[i][st].copy_coefs(&self.tap_svf_l[i][st]);
@@ -819,11 +862,34 @@ impl Plugin for Mooltitwap {
         let crossfeed = p.crossfeed.value();
         let crossfeed_mode = p.crossfeed_mode.value();
 
+        // Clear: the echoes fade out over 10 ms, then the delay empties.
+        let clear_len = ((0.01 * sr) as usize).max(1);
+        if self.params.clear_request.swap(false, Ordering::Relaxed) && self.clear_left.is_none() {
+            self.clear_left = Some(clear_len);
+        }
+        let mut cleared = false;
+        // Safety: the loop's DC blockers (5 Hz); Ear guard keeps echoes that
+        // stay over −8 dBFS RMS (a 300 ms average) for a couple of seconds
+        // down to it — 1.5 s to ease in, 0.5 s to let go.
+        let dc_r = 1.0 - core::f32::consts::TAU * 5.0 / sr;
+        let guard_on = p.ear_guard.value();
+        const GUARD_CEIL: f32 = 0.398; // −8 dBFS
+        let guard_avg = 1.0 - (-1.0 / (0.3 * sr)).exp();
+        let guard_att = 1.0 - (-1.0 / (1.5 * sr)).exp();
+        let guard_rel = 1.0 - (-1.0 / (0.5 * sr)).exp();
+        let mut guard_least = 1.0f32;
+        let mut fault = false;
+
         // Repeats: a count, or ∞ (the loop).
         let n_rep = p.repeats.value();
         let finite = n_rep < REPEATS_LOOP;
         let n_rep = n_rep as usize;
         let rep_target = if finite { 1.0 } else { 0.0 };
+        if finite {
+            self.rep_n = n_rep;
+        }
+        // the copies play while a count is set or the loop is still taking over
+        let n_copies = if finite || self.rep_w > 0.0 { self.rep_n } else { 0 };
         if initial_snap {
             self.rep_w = rep_target;
         }
@@ -861,18 +927,28 @@ impl Plugin for Mooltitwap {
         let lfos = p.lfos();
         let lfo_shape = lfos.map(|l| l.shape.value());
         let lfo_scatter = lfos.map(|l| l.scatter.value());
-        let lfo_step: [f64; 4] = core::array::from_fn(|k| lfos[k].hz(tempo_bpm) as f64 / sr as f64);
+        let lfo_step: [f64; matrix::LFOS] = core::array::from_fn(|k| lfos[k].hz(tempo_bpm) as f64 / sr as f64);
         for (k, l) in lfos.iter().enumerate() {
             if let (Some(beats), true, Some(pos)) = (l.beats(), playing, song_beats) {
                 self.lfo_phase[k] = pos / beats as f64;
             }
         }
-        let steps = p.step.values();
-        let step_len = p.step.len.value() as usize;
-        let step_scatter = p.step.scatter.value();
-        let step_inc = p.step.hz(tempo_bpm) as f64 / sr as f64;
-        if let (Some(beats), true, Some(pos)) = (p.step.beats(), playing, song_beats) {
-            self.step_phase = pos / beats as f64;
+        let stp = p.steps();
+        let steps = stp.map(|st| st.values());
+        let step_len = stp.map(|st| st.len.value() as usize);
+        let step_scatter = stp.map(|st| st.scatter.value());
+        let step_hz = stp.map(|st| st.hz(tempo_bpm));
+        let step_inc = step_hz.map(|hz| hz as f64 / sr as f64);
+        // each tick, a step's value moves this share of the way to the next:
+        // a few ms at Glide 0 (no click), a whole step's slide at 100 %
+        let step_glide = core::array::from_fn::<f32, 2, _>(|j| {
+            let tau = (stp[j].glide.value() / step_hz[j].max(1e-3)).max(0.003);
+            1.0 - (-32.0 / (tau * sr)).exp()
+        });
+        for (j, st) in stp.iter().enumerate() {
+            if let (Some(beats), true, Some(pos)) = (st.beats(), playing, song_beats) {
+                self.step_phase[j] = pos / beats as f64;
+            }
         }
         if !tap_on {
             self.mod_tap = [[0.0; NUM_TAPS]; TAP_TARGETS];
@@ -887,8 +963,6 @@ impl Plugin for Mooltitwap {
         let (set_cut, set_q) = (tap_cut, tap_q);
         let menv_up = 1.0 - (-1.0 / (0.01 * sr)).exp();
         let menv_down = 1.0 - (-1.0 / (0.2 * sr)).exp();
-        let cut_up = 1000f32.powf(1.0 / (0.02 * sr));
-        let q_up = 120f32.powf(1.0 / (0.02 * sr));
         let type_step = 1.0 / (0.01 * sr);
 
         // ── Ping (see bounce.rs) ─────────────────────────────────────────
@@ -1023,11 +1097,16 @@ impl Plugin for Mooltitwap {
                 let env_m = motion::env_value(self.motion_env);
                 if glob_on {
                     let mut src = [0.0f32; SOURCES];
-                    for k in 0..4 {
+                    for k in 0..matrix::LFOS {
                         src[k] = motion::shape_at(lfo_shape[k], self.lfo_phase[k], NUM_TAPS);
                     }
                     src[matrix::FOLLOW] = env_m;
-                    src[matrix::STEP] = matrix::step_at(&steps, step_len, self.step_phase, 0.0, 0, 1);
+                    for j in 0..2 {
+                        let to = matrix::step_at(&steps[j], step_len[j], self.step_phase[j], 0.0, 0, 1);
+                        let now = &mut self.step_now[j][NUM_TAPS];
+                        *now += (to - *now) * step_glide[j];
+                        src[matrix::STEP + j] = *now;
+                    }
                     let gm = matrix::global_mods(&grid, &src);
                     if glob_used[matrix::FEEDBACK] {
                         fb_target = matrix::feedback(feedback, gm[matrix::FEEDBACK]);
@@ -1059,11 +1138,16 @@ impl Plugin for Mooltitwap {
                 if tap_on {
                     for i in 0..n_active {
                         let mut src = [0.0f32; SOURCES];
-                        for k in 0..4 {
+                        for k in 0..matrix::LFOS {
                             src[k] = motion::shape_at(lfo_shape[k], motion::tap_phase(self.lfo_phase[k], lfo_scatter[k], i, n_active), i);
                         }
                         src[matrix::FOLLOW] = env_m;
-                        src[matrix::STEP] = matrix::step_at(&steps, step_len, self.step_phase, step_scatter, i, n_active);
+                        for j in 0..2 {
+                            let to = matrix::step_at(&steps[j], step_len[j], self.step_phase[j], step_scatter[j], i, n_active);
+                            let now = &mut self.step_now[j][i];
+                            *now += (to - *now) * step_glide[j];
+                            src[matrix::STEP + j] = *now;
+                        }
                         let m = matrix::tap_mods(&grid, &src);
                         for (t, v) in m.iter().enumerate() {
                             self.mod_tap[t][i] = *v;
@@ -1086,7 +1170,9 @@ impl Plugin for Mooltitwap {
             for (ph, step) in self.lfo_phase.iter_mut().zip(lfo_step) {
                 *ph += step;
             }
-            self.step_phase += step_inc;
+            for (ph, inc) in self.step_phase.iter_mut().zip(step_inc) {
+                *ph += inc;
+            }
             self.fb_now += (fb_target - self.fb_now) * tap_glide;
             self.cross_now += (cross_target - self.cross_now) * tap_glide;
             self.mix_now += (wet_target - self.mix_now) * tap_glide;
@@ -1216,14 +1302,14 @@ impl Plugin for Mooltitwap {
                 for k in 0..16 {
                     gk *= fb;
                     let at = (k + 1) as f32 * fb_at;
-                    let to = if finite && k < n_rep && at < max_delay_samples { gk } else { 0.0 };
+                    let to = if k < n_copies && at < max_delay_samples { gk } else { 0.0 };
                     let g = &mut self.rep_gain[k];
                     *g += (to - *g) * tap_glide;
                     if to == 0.0 && g.abs() < 1e-6 {
                         *g = 0.0;
                         continue;
                     }
-                    let (dl, dr) = (self.dry_l.read(at) * *g, self.dry_r.read(at) * *g);
+                    let (dl, dr) = (self.dry_l.read_before_write(at) * *g, self.dry_r.read_before_write(at) * *g);
                     fir[0] += dl;
                     fir[1] += dr;
                     if b > 0.0 {
@@ -1305,6 +1391,12 @@ impl Plugin for Mooltitwap {
                 );
             }
 
+            // no offset builds up round the loops (the hold below stays bit for bit)
+            fb_sat_l = self.dc[0].process(fb_sat_l, dc_r);
+            fb_sat_r = self.dc[1].process(fb_sat_r, dc_r);
+            odd_out = self.dc[2].process(odd_out, dc_r);
+            even_out = self.dc[3].process(even_out, dc_r);
+
             // Freeze: the hold takes over what's written back, at exactly
             // 100 % (no Feedback, Curve or colour), and new input fades out.
             if hold > 0.0 {
@@ -1367,11 +1459,10 @@ impl Plugin for Mooltitwap {
                 }
 
                 let stages = tap_filter_stages[i];
-                let moved = glide_log(&mut self.tap_cut_now[i], tap_cut[i], cut_up)
-                    | glide_log(&mut self.tap_q_now[i], tap_q[i], q_up);
+                let moved = self.tap_cut[i].step(tap_cut[i], tap_glide) | self.tap_q[i].step(tap_q[i], tap_glide);
                 if moved {
                     let mut c = Svf::new();
-                    c.set(self.tap_cut_now[i], self.tap_q_now[i], sr);
+                    c.set(self.tap_cut[i].now, self.tap_q[i].now, sr);
                     for st in 0..4 {
                         self.tap_svf_l[i][st].copy_coefs(&c);
                         self.tap_svf_r[i][st].copy_coefs(&c);
@@ -1452,6 +1543,36 @@ impl Plugin for Mooltitwap {
                 wet_r *= g;
             }
 
+            // Ear guard: only the echoes, after the loop.
+            let to = if guard_on {
+                let pw = (wet_l * wet_l + wet_r * wet_r) * 0.5;
+                self.guard_pow += (pw - self.guard_pow) * guard_avg;
+                let rms = self.guard_pow.sqrt();
+                if rms > GUARD_CEIL { GUARD_CEIL / rms } else { 1.0 }
+            } else {
+                1.0
+            };
+            self.guard_g += (to - self.guard_g) * if to < self.guard_g { guard_att } else { guard_rel };
+            if to >= 1.0 && self.guard_g > 0.99999 {
+                self.guard_g = 1.0;
+            }
+            if self.guard_g < 1.0 {
+                guard_least = guard_least.min(self.guard_g);
+                wet_l *= self.guard_g;
+                wet_r *= self.guard_g;
+            }
+            // Clear: fade the echoes out, then empty the delay (after the block)
+            if let Some(left) = self.clear_left {
+                let g = left as f32 / clear_len as f32;
+                wet_l *= g;
+                wet_r *= g;
+                if left == 0 {
+                    cleared = true;
+                } else {
+                    self.clear_left = Some(left - 1);
+                }
+            }
+
             let mut out_l = in_l * (1.0 - dry_wet) + wet_l * dry_wet;
             let mut out_r = in_r * (1.0 - dry_wet) + wet_r * dry_wet;
 
@@ -1473,6 +1594,7 @@ impl Plugin for Mooltitwap {
             out_l = self.lim_l.process(out_l * output_gain);
             out_r = self.lim_r.process(out_r * output_gain);
 
+            fault |= !(out_l.is_finite() && out_r.is_finite());
             l_chan[s] = out_l;
             r_chan[s] = out_r;
 
@@ -1511,6 +1633,18 @@ impl Plugin for Mooltitwap {
             }
         }
 
+        // Something broke (a NaN or an infinity got in): silence this block
+        // and start clean rather than stick loud. Clear empties the same way.
+        if fault {
+            for ch in buffer.as_slice() {
+                ch.fill(0.0);
+            }
+        }
+        if fault || cleared {
+            self.reset();
+            self.clear_left = None;
+        }
+        self.params.guard_db.store((-20.0 * guard_least.max(1e-6).log10()).to_bits(), Ordering::Relaxed);
         // the Duck knob shows the most the echoes dipped in this block
         self.params.duck_dip_db.store(duck_most.to_bits(), Ordering::Relaxed);
         // and the field each tap's movement, per tap target
@@ -1928,10 +2062,10 @@ mod tests {
             let out = render(&mut plug, &noise_burst(1.5), freeze_from(0.1));
             let c = plug.freeze_len;
             assert!((c - 0.04 * SR).abs() <= 1.0, "latched {c} samples");
-            // The feedback head reads before the write, so a cycle of c
-            // samples comes round every c + 1, held or not.
+            // A cycle of c samples comes round every c samples, held or not
+            // (v2.44; before, the loop read a sample late: every c + 1).
             for d in 1..(3.0 * c) as usize {
-                let (a, b) = (d as f32, d as f32 + c + 1.0);
+                let (a, b) = (d as f32, d as f32 + c);
                 assert_eq!(plug.main_l.delay.read(a), plug.main_l.delay.read(b), "{colour:?}: L at {d}");
                 assert_eq!(plug.main_r.delay.read(a), plug.main_r.delay.read(b), "{colour:?}: R at {d}");
             }
@@ -2292,6 +2426,194 @@ mod tests {
     }
 
     #[test]
+    fn a_cycle_comes_round_exactly_on_time() {
+        // one tap at 20 ms (960 samples, a 960-sample cycle): an impulse
+        // comes back at 960, 1920 and 2880 samples, on the loop and on a
+        // count alike (before v2.44 the loop's came a sample later each pass)
+        for repeats in [REPEATS_LOOP as f32, 3.0] {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "feedback", 1.0);
+            set(&plug, "repeats", repeats);
+            let mut input = vec![(0.0, 0.0); 4000];
+            input[0] = (0.1, 0.1);
+            let out = render(&mut plug, &input, |_, _| {});
+            for k in 1..=3 {
+                let w = &out[k * 960 - 8..k * 960 + 8];
+                let at = w.iter().enumerate().max_by(|a, b| a.1 .0.abs().total_cmp(&b.1 .0.abs())).unwrap().0;
+                assert_eq!(at, 8, "repeats {repeats}: pass {k} peaks {} samples off", at as i32 - 8);
+            }
+        }
+    }
+
+    /// Before/after renders for the SOF-60 fix, to hear (not a check):
+    /// `SOF60_WAV=<folder> cargo test … sof60_renders -- --ignored --test-threads=1`.
+    #[test]
+    #[ignore]
+    fn sof60_renders() {
+        let Some(dir) = std::env::var_os("SOF60_WAV") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wav = |name: &str, out: &[(f32, f32)]| {
+            let mut b = Vec::new();
+            let data = (out.len() * 8) as u32;
+            b.extend(b"RIFF");
+            b.extend((36 + data).to_le_bytes());
+            b.extend(b"WAVEfmt ");
+            b.extend(16u32.to_le_bytes());
+            b.extend(3u16.to_le_bytes()); // float
+            b.extend(2u16.to_le_bytes());
+            b.extend((SR as u32).to_le_bytes());
+            b.extend((SR as u32 * 8).to_le_bytes());
+            b.extend(8u16.to_le_bytes());
+            b.extend(32u16.to_le_bytes());
+            b.extend(b"data");
+            b.extend(data.to_le_bytes());
+            for (l, r) in out {
+                b.extend(l.to_le_bytes());
+                b.extend(r.to_le_bytes());
+            }
+            std::fs::write(dir.join(name), b).unwrap();
+        };
+        let ms = |v: f32| v.ln() / 2000f32.ln();
+        // 1. a held chord through four taps while Time glides 100 → 160 ms
+        //    and back (Repitch): the glide itself, no repeats
+        let chord: Vec<(f32, f32)> = (0..(SR * 8.0) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let v = 0.15 * ((2.0 * PI * 220.0 * t).sin() + (2.0 * PI * 277.2 * t).sin() + (2.0 * PI * 329.6 * t).sin());
+                (v, v)
+            })
+            .collect();
+        // 2. plucks every second into a loop at 90 % on a 33.3 ms Time
+        //    (a fractional cycle), so the repeats' timing and tone show
+        let plucks: Vec<(f32, f32)> = (0..(SR * 8.0) as usize)
+            .map(|i| {
+                let t = i as f32 / SR;
+                let ph = t.fract();
+                let v = if t < 6.0 { 0.4 * (-ph * 9.0).exp() * ((2.0 * PI * 440.0 * t).sin() + 0.5 * (2.0 * PI * 1320.0 * t).sin()) } else { 0.0 };
+                (v, v)
+            })
+            .collect();
+        for (legacy, tag) in [(true, "1-before"), (false, "2-after")] {
+            crate::delay::LEGACY_READ.store(legacy, Ordering::Relaxed);
+            let mut plug = plugin(&[-0.6, -0.2, 0.2, 0.6]);
+            set(&plug, "feedback", 0.0);
+            set(&plug, "dry_wet", 0.5);
+            let n = chord.len();
+            let out = render(&mut plug, &chord, |at, plug| {
+                let x = at as f32 / n as f32;
+                let tri = if x < 0.5 { x * 2.0 } else { 2.0 - x * 2.0 };
+                set(plug, "base_time_l", ms(100.0 + 60.0 * tri));
+            });
+            wav(&format!("glide-{tag}.wav"), &out);
+            let mut plug = plugin(&[-0.4, 0.4]);
+            set(&plug, "base_time_l", ms(33.3));
+            set(&plug, "feedback", 0.9);
+            set(&plug, "dry_wet", 0.5);
+            wav(&format!("repeats-{tag}.wav"), &render(&mut plug, &plucks, |_, _| {}));
+        }
+        crate::delay::LEGACY_READ.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_fractional_delay_reads_that_far_back() {
+        // a ramp in a line: a read lands exactly that many samples back and
+        // moves smoothly through each whole sample (no 2-sample jump)
+        let mut line = DelayLine::new(64);
+        for k in 0..40 {
+            line.write(k as f32);
+        }
+        let newest = 39.0;
+        for d in [1.0, 2.5, 10.25, 10.75, 11.0] {
+            assert!((line.read(d) - (newest - d)).abs() < 1e-4, "read({d}) = {}", line.read(d));
+        }
+        let step = (line.read(11.001) - line.read(10.999)).abs();
+        assert!(step < 0.01, "across a whole sample it moves {step}");
+        // before the write, the newest is a sample old already
+        assert!((line.read_before_write(10.25) - (newest + 1.0 - 10.25)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn ear_guard_eases_a_runaway_loop_and_leaves_the_loop_alone() {
+        // a loud tone into a loop at 105 %, then silence: with the guard the
+        // echoes settle near −8 dBFS RMS; without it they stay louder. The
+        // loop itself keeps going either way (it isn't touched).
+        let run = |guard: bool| {
+            let mut plug = plugin(&[-0.3, 0.3]);
+            set(&plug, "feedback", 1.05);
+            set(&plug, "ear_guard", if guard { 1.0 } else { 0.0 });
+            let mut input = held_tone();
+            input.resize((8.0 * SR) as usize, (0.0, 0.0));
+            for s in input.iter_mut().skip(SR as usize) {
+                *s = (0.0, 0.0);
+            }
+            let out = render(&mut plug, &input, |_, _| {});
+            (rms(&out, 7.0, 8.0), plug.main_l.delay.buffer_peak())
+        };
+        let ((on, loop_on), (off, loop_off)) = (run(true), run(false));
+        let on_db = 20.0 * (on / 2f32.sqrt()).log10();
+        assert!(on_db < -7.0, "guarded echoes at {on_db:.1} dBFS RMS");
+        assert!(off > on * 1.3, "unguarded {off:.3} vs guarded {on:.3}");
+        assert!((loop_on - loop_off).abs() < 1e-3 * loop_off.max(1e-3), "the loop differs: {loop_on} vs {loop_off}");
+    }
+
+    #[test]
+    fn clear_empties_the_delay() {
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "feedback", 0.9);
+        render(&mut plug, &held_tone()[..SR as usize], |_, _| {});
+        assert!(plug.main_l.delay.buffer_peak() > 0.01);
+        plug.params.clear_request.store(true, Ordering::Relaxed);
+        let out = render(&mut plug, &vec![(0.0, 0.0); (0.2 * SR) as usize], |_, _| {});
+        assert_eq!(plug.main_l.delay.buffer_peak(), 0.0);
+        // the echoes faded out first: no step bigger than the tone's own
+        let step = out.windows(2).fold(0.0f32, |m, w| m.max((w[1].0 - w[0].0).abs()));
+        assert!(step < 0.05, "a step of {step}");
+        assert!(out[(0.05 * SR) as usize..].iter().all(|s| s.0 == 0.0 && s.1 == 0.0));
+    }
+
+    #[test]
+    fn a_broken_signal_is_silenced_and_cleared() {
+        let mut plug = plugin(&[0.0]);
+        set(&plug, "feedback", 0.9);
+        let mut input = vec![(0.1, 0.1); 2048];
+        input[300] = (f32::NAN, f32::NAN);
+        render(&mut plug, &input, |_, _| {});
+        let after = render(&mut plug, &held_tone()[..SR as usize], |_, _| {});
+        assert!(after.iter().all(|s| s.0.is_finite() && s.1.is_finite()));
+        assert!(rms(&after, 0.5, 1.0) > 0.01, "it plays again");
+    }
+
+    #[test]
+    fn step_on_cutoff_is_no_sharper_than_a_smooth_lfo() {
+        // Step 1 jumping a tap's cutoff four octaves either way at 8 steps a
+        // second, at Glide 0, against a sine LFO at the same depth and rate:
+        // the jumps are rounded off, so they bend the tone hardly more than
+        // the smooth sweep does (the sweep itself is what moves it)
+        let input = held_tone();
+        let sharpest = |step: bool| {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "tap_filter_cutoff_1", 1500.0);
+            if step {
+                set(&plug, "step_sync", 0.0);
+                set(&plug, "step_rate", 8.0);
+                set(&plug, "step_glide", 0.0);
+                for (i, v) in [1.0, -1.0, 0.5, -0.5].into_iter().enumerate() {
+                    set(&plug, &format!("step_v_{}", i + 1), v);
+                }
+                set(&plug, "step_len", 4.0);
+                set(&plug, "mx_step_cutoff", 1.0);
+            } else {
+                set(&plug, "motion_rate", 8.0);
+                set(&plug, "mx_lfo1_cutoff", 1.0);
+            }
+            sharpest_bend(&render(&mut plug, &input, |_, _| {}))
+        };
+        let (smooth, (stepped, at)) = (sharpest(false).0, sharpest(true));
+        assert!(stepped < 1.2 * smooth, "{:.2}× the sine's sharpest bend, at {:.3} s", stepped / smooth, at as f32 / SR + 0.3);
+    }
+
+    #[test]
     fn motion_swings_the_taps_from_side_to_side() {
         // noise through one centred tap; Motion's sine at 2 Hz on Pan, full depth
         let mut plug = plugin(&[0.0]);
@@ -2329,9 +2651,9 @@ mod tests {
         set(&plug, "mx_follow_cutoff", 1.0);
         set(&plug, "tap_filter_cutoff_1", 1000.0);
         render(&mut plug, &played(0.5, 0.0, 0.5, 0.5, 0.5), |_, _| {});
-        let playing = plug.tap_cut_now[0];
+        let playing = plug.tap_cut[0].now;
         render(&mut plug, &vec![(0.0, 0.0); (1.5 * SR) as usize], |_, _| {});
-        let quiet = plug.tap_cut_now[0];
+        let quiet = plug.tap_cut[0].now;
         assert!(playing > 4000.0 && quiet < 200.0, "playing {playing:.0} Hz, quiet {quiet:.0} Hz");
     }
 

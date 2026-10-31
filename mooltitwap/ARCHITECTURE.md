@@ -1,6 +1,6 @@
 # mooltitwap (Afterecho) — Architecture
 
-_As of v2.42.0 (2026-10-31), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
+_As of v2.44.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
 
 ## Overview
 16-tap multitap delay (VST3 + CLAP + standalone on desktop, AUv3 on iPad) on **nice-plug**
@@ -23,21 +23,23 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
    bounce lines: per-tap pan, SVF cascade (type crossfade on change), gain — all gliding
    (two 5 ms one-poles; cutoff/Q in log steps). Every 32 samples Motion's matrix re-aims
    each tap's pan/gain/cutoff/Q and the whole echo's Colour/Feedback/Cross/Tone/Mix/Duck.
-6. Crossfeed Mix → output colour → Ducking (wet only) → dry/wet → decode → Out → limiter.
+6. Crossfeed Mix → output colour → Ducking (wet only) → Ear guard (wet only) → Clear's
+   fade → dry/wet → decode → Out → limiter. A non-finite sample silences the block and
+   clears the delay. The loops' write-back passes 5 Hz DC blockers (not Freeze's hold).
 
 ## Key modules (src/)
 - `lib.rs` — plugin impls, `process`, engine state, tests (incl. click and A/B-style checks).
-- `params.rs` — `PetalParams` (+ `TapParams[16]`, `LfoParams` ×4, `StepParams`, `MxRow` ×6), enums (`MotionShape`, `MOTION_DIVS`…),
+- `params.rs` — `PetalParams` (+ `TapParams[16]`, `LfoParams` ×3, `StepParams` ×2, `MxRow` ×6), enums (`MotionShape`, `MOTION_DIVS`…),
   helpers shared by engine and page (`spacing`, `taps_heard`, `pattern_secs`,
   `motion_depths`, `motion_hz`), and plain atomics the engine writes for the page:
   `held_cycle_secs`, `duck_dip_db`, `motion_now[4][16]` (per tap target; tempo is a separate `Arc<AtomicU32>`).
 - `topology.rs` — tap positions (`Spacing`, `compute_positions`, `euclid_steps`, swing),
   `tap_delay_secs`, `cluster_span_secs`: one copy for engine and page.
 - `bounce.rs` — Ping placement (width, swing of panned taps). `motion.rs` — LFO shapes
-  and the tap targets' maths. `matrix.rs` — the Motion matrix (sources × targets, sums,
+  and the tap targets' maths. `matrix.rs` — the Motion matrix (LFO 1–3, Follow, Step 1–2 × targets, sums,
   whole-echo conversions, Step). `migrate.rs` — old sessions (`filter_state`) and presets
   into v2.42's params (Repeats ∞, v2.39 Motion → the matrix). `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
-- `delay.rs` — `DelayLine` (Lagrange read; fractional reads are backwards, SOF-60),
+- `delay.rs` — `DelayLine` (Lagrange read; `read_before_write` for the loops' and Repeats' reads, v2.44),
   `TapReader` (Repitch / Fade / Jump), `SlewedTime`. `diffusion.rs`, `tape.rs` (RE-DEEMER port).
 - `presets.rs` — the Soft Systems preset library (Vortex's port): the file (format 2,
   plain discrete values, Time/Cross facets), `Library` (factory from the binary + user

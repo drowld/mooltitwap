@@ -51,7 +51,7 @@ const PLAIN_FLOATS: &[&str] = &["feedback_time"];
 
 /// Performance switches a preset or A/B leaves as they are (v2.35): loading
 /// one mustn't let go of a held loop, nor flipping A/B start one.
-const NOT_STORED: &[&str] = &["freeze"];
+const NOT_STORED: &[&str] = &["freeze", "ear_guard"];
 
 // ---------------------------------------------------------------- capture / apply
 

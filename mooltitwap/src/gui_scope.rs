@@ -99,8 +99,9 @@ const WIDE: Layout = Layout {
     w: 1366.0,
     h: 660.0,
     pad: 20.0,
-    picture: (20.0, 70.0, 800.0, 330.0),
-    lane: (20.0, 412.0, 800.0, 232.0),
+    // the field ends with the Time card, the lane starts with Colour
+    picture: (20.0, 70.0, 800.0, 318.0),
+    lane: (20.0, 400.0, 800.0, 244.0),
     lane_stacked: false,
     right_x: 834.0,
     right_w: 512.0,
@@ -117,8 +118,8 @@ const TALL: Layout = Layout {
     w: 1050.0,
     h: 780.0,
     pad: 18.0,
-    picture: (18.0, 70.0, 560.0, 416.0),
-    lane: (18.0, 498.0, 560.0, 264.0),
+    picture: (18.0, 70.0, 560.0, 392.0),
+    lane: (18.0, 474.0, 560.0, 288.0),
     lane_stacked: true,
     right_x: 592.0,
     right_w: 440.0,
@@ -252,8 +253,9 @@ pub struct ScopeState {
     /// Picture: Y axis 0 Pan · 1 Gain · 2 Cutoff; view 0 Field · 1 Bars.
     y_axis: usize,
     view: usize,
-    /// Field drags move only the Y value; the taps keep their time.
-    lock_time: bool,
+    /// The Time view (v2.43, above Pan on the Y list): each tap on its own
+    /// row, drags move only its time. The value views move only values.
+    time_view: bool,
     /// Lane tab: 0 Echo · 1 Motion · 2 Tap (the selected tap's parameters).
     lane_tab: usize,
     /// The tab the lane returns to when the Tap tab closes.
@@ -278,9 +280,9 @@ pub struct ScopeState {
     /// Each axis's range on the menu's slider (0 left … 1 right; unset =
     /// the axis's default), the pin being dragged, and each axis's undo
     /// history (every tap's value before a pattern).
-    pat_range: [Option<[f32; 2]>; 5],
+    pat_range: [Option<[f32; 2]>; 6],
     pat_pin: Option<usize>,
-    pat_undo: [Vec<[f32; NUM_TAPS]>; 5],
+    pat_undo: [Vec<[f32; NUM_TAPS]>; 6],
     /// Preview: apply a shape on the first frame, to see it without clicking.
     pat_demo: bool,
     /// The preset browser's state (the loaded preset, Try, the sheet's view).
@@ -367,10 +369,10 @@ pub fn frame(
             sc.look = Appearance::load();
             sc.look_saved = Some(sc.look);
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=tall,bars,gain|cutoff|reso|type,sel3,tap|motion,lock,presets,light,tape,pattern,
+            // AFTERECHO_PREVIEW=tall,bars,time|gain|cutoff|reso|type|slope,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
             // saveas|trying|deleting (with AFTERECHO_PRESET_DIR, a folder of presets to show)
-            // (the iPad page, the Bars view, the Y axis, a selected tap, the Tap
-            // or Motion tab, Lock time, the preset browser, the light page, Colour's Tape
+            // (the iPad page, the Bars view, the Time view or a Y axis, a selected
+            // tap, the Tap or Motion tab and its source, the preset browser, the light page, Colour's Tape
             // tab, the Taps menu with Ramp down applied). A preview never saves
             // the look it shows.
             if let (false, Ok(v)) = (ios, std::env::var("AFTERECHO_PREVIEW")) {
@@ -388,8 +390,9 @@ pub fn frame(
                         "motion" => sc.lane_tab = 1,
                         "mxdemo" => (sc.lane_tab, sc.mx_demo) = (1, true),
                         "step" => sc.mx_src = matrix::STEP,
+                        "step2" => sc.mx_src = matrix::STEP + 1,
                         "follow" => sc.mx_src = matrix::FOLLOW,
-                        "lock" => sc.lock_time = true,
+                        "time" => sc.time_view = true,
                         "presets" => open_presets = true,
                         "saveas" => (open_presets, sc.presets.preview) = (true, 1),
                         "trying" => (open_presets, sc.presets.preview) = (true, 2),
@@ -828,6 +831,11 @@ fn header(
         setter.set_parameter(&params.freeze, !frozen);
         setter.end_set_parameter(&params.freeze);
     }
+    // Clear (v2.43): empty the delay now — the panic button.
+    let cresp = button(ui, r(o, s, ab_x - 16.0 - 96.0 - 8.0 - 72.0, y, 72.0, h), "Clear", false, "sc_clear", s, 13.0);
+    if epo::tap_or_click(ui, &cresp) {
+        params.clear_request.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     // light / dark
     let tb = r(o, s, l.w - l.pad - 38.0, y, 38.0, h);
@@ -1183,10 +1191,12 @@ fn gesture_set<P: Param>(ui: &egui::Ui, key: Id, setter: &ParamSetter, p: &P, d:
 
 /// Snapped `time_offset` for a dragged tap (Snap on): the tap's whole position
 /// (topology position + offset, in cluster-span units) goes to the nearest
-/// 1/NUM_TAPS, i.e. its time to a multiple of the base time. Same as v3.
-fn snap_offset(cur_time_secs: f32, cur_off: f32, raw_off: f32, span_secs: f32) -> f32 {
+/// 1/(NUM_TAPS × grid), i.e. its time to a multiple of the base time over
+/// Snap's grid (v2.43; 1 is v3's snap).
+fn snap_offset(cur_time_secs: f32, cur_off: f32, raw_off: f32, span_secs: f32, grid: f32) -> f32 {
     let pos = cur_time_secs / span_secs.max(1e-6) - cur_off;
-    let snapped = ((pos + raw_off) * NUM_TAPS as f32).round() / NUM_TAPS as f32;
+    let steps = NUM_TAPS as f32 * grid.max(1.0);
+    let snapped = ((pos + raw_off) * steps).round() / steps;
     snapped - pos
 }
 
@@ -1269,36 +1279,40 @@ fn picture(
     let rect = r(o, s, x, y, w, h);
     let p = ui.painter().clone();
     p.rect_filled(rect, g::R_CARD * s, theme::FRAME());
-    // The title opens the Taps menu (pattern tools); the chevron says so.
+    // The title opens the Taps menu (pattern tools; values only, so not in
+    // the Time view); the chevron says so.
     let tb = r(o, s, x + 10.0, y + 10.0, 74.0, 28.0);
     let tresp = ui.interact(tb, ui.id().with("sc_taps_menu"), Sense::click());
+    if sc.time_view {
+        sc.pat_open = false;
+    }
     outline(&p, tb, sc.pat_open, s);
-    let tcol = if sc.pat_open { PAPER() } else if tresp.hovered() { INK() } else { INK2() };
+    let tcol = if sc.pat_open { PAPER() } else if sc.time_view { theme::with_alpha(INK2(), 90) } else if tresp.hovered() { INK() } else { INK2() };
     text(&p, Pos2::new(tb.left() + 12.0 * s, tb.center().y), Align2::LEFT_CENTER, "Taps", 12.0, s, tcol);
     let cv = Pos2::new(tb.right() - 16.0 * s, tb.center().y + 1.5 * s);
     let chev = Stroke::new(1.4 * s, tcol);
     p.line_segment([cv + Vec2::new(-4.0, -2.5) * s, cv], chev);
     p.line_segment([cv, cv + Vec2::new(4.0, -2.5) * s], chev);
-    if epo::tap_or_click(ui, &tresp) {
+    if !sc.time_view && epo::tap_or_click(ui, &tresp) {
         sc.pat_open = !sc.pat_open;
     }
     sc.pat_btn = Some(tb);
     if !l.lane_stacked {
-        let hint = match (sc.view, sc.lock_time) {
-            (0, false) => "drag a dot",
-            (0, true) => "drag a dot up or down",
+        let hint = match (sc.time_view, sc.view) {
+            (true, _) => "drag a dot left or right",
+            (false, 0) => "drag a dot up or down",
             _ => "drag across the bars",
         };
         text(&p, rect.min + Vec2::new(96.0, 24.0) * s, Align2::LEFT_CENTER, hint, 12.0, s, SOFT());
     }
 
-    // header, right to left: Field / Bars, then Snap · Lock time (field only),
-    // so the view switch stays put when they go
+    // header, right to left: Field / Bars (the value views'), then in the
+    // Time view Snap and its grid, so the view switch stays put
     let right = x + w - 12.0;
-    if let Some(i) = seg(ui, r(o, s, right - 112.0, y + 10.0, 112.0, 28.0), &["Field", "Bars"], sc.view, "sc_view", s, 12.0, true) {
+    if let Some(i) = seg(ui, r(o, s, right - 112.0, y + 10.0, 112.0, 28.0), &["Field", "Bars"], sc.view, "sc_view", s, 12.0, !sc.time_view) {
         sc.view = i;
     }
-    if sc.view == 0 {
+    if sc.time_view {
         let xr = o.x + (right - 122.0) * s;
         rule(ui.painter(), Pos2::new(xr, o.y + (y + 14.0) * s), Pos2::new(xr, o.y + (y + 34.0) * s), s);
         let snap = params.tap_snap.value();
@@ -1308,20 +1322,27 @@ fn picture(
             setter.set_parameter(&params.tap_snap, !snap);
             setter.end_set_parameter(&params.tap_snap);
         }
-        // Lock time: a tap that sits right keeps its time while its value moves.
-        let resp = button(ui, r(o, s, right - 280.0, y + 10.0, 84.0, 28.0), "Lock time", sc.lock_time, "sc_lock", s, 12.0);
-        if epo::tap_or_click(ui, &resp) {
-            sc.lock_time = !sc.lock_time;
+        let grid = (params.tap_grid.value() - 1).clamp(0, 3) as usize;
+        if let Some(i) = seg(ui, r(o, s, right - 340.0, y + 10.0, 144.0, 28.0), &["1", "1/2", "1/3", "1/4"], grid, "sc_grid", s, 12.0, snap) {
+            setter.begin_set_parameter(&params.tap_grid);
+            setter.set_parameter(&params.tap_grid, i as i32 + 1);
+            setter.end_set_parameter(&params.tap_grid);
         }
     }
     // Y, down the left edge beside the axis it picks. Mono has no pan, so its
     // picture starts on gain. A new axis starts without a shape to re-spread.
+    // Time first, then the values.
     let mono = params.channel_mode.value() == ChannelMode::Mono;
     let axis_i = if mono && sc.y_axis == 0 { 1 } else { sc.y_axis };
-    let names = Axis::ALL.map(Axis::name);
+    let mut names = vec!["Time"];
+    names.extend(Axis::ALL.map(Axis::name));
     let list = r(o, s, x + 14.0, y + 56.0, 64.0, 26.0 * names.len() as f32);
-    if let Some(i) = seg_v(ui, list, &names, axis_i, "sc_y", s, 12.0, &[!mono, true, true, true, true, true]) {
-        sc.y_axis = i;
+    let cur = if sc.time_view { 0 } else { axis_i + 1 };
+    if let Some(i) = seg_v(ui, list, &names, cur, "sc_y", s, 12.0, &[true, !mono, true, true, true, true, true]) {
+        sc.time_view = i == 0;
+        if i > 0 {
+            sc.y_axis = i - 1;
+        }
         sc.pat_shape = None;
     }
 
@@ -1331,7 +1352,7 @@ fn picture(
         pattern_apply(params, setter, sc, axis_i);
     }
     let plot = Rect::from_min_max(rect.min + Vec2::new(128.0, 56.0) * s, rect.max - Vec2::new(24.0, 34.0) * s);
-    if sc.view == 0 {
+    if sc.time_view || sc.view == 0 {
         let viz = crate::gui::compute_viz_data_ex(params, tempo, 1);
         field(ui, plot, s, params, setter, sc, &viz, axis, tempo);
     } else {
@@ -1339,9 +1360,10 @@ fn picture(
     }
 }
 
-/// The tap field: X = time on v3's tight taps-only range, Y = the picked axis.
-/// Drag a dot: ↔ moves its time offset (unless Lock time), ↕ its value.
-/// Click it: select it and open the Tap tab. Double-click resets what can move.
+/// The tap field: X = time on v3's tight taps-only range, Y = the picked axis
+/// (↕ moves a dot's value), or in the Time view a row per tap (↔ moves its
+/// time offset, onto Snap's grid unless Shift is held). Click a dot: select
+/// it and open the Tap tab. Double-click resets what the view moves.
 #[allow(clippy::too_many_arguments)]
 fn field(
     ui: &mut egui::Ui, plot: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
@@ -1357,21 +1379,47 @@ fn field(
     let range = ui.ctx().data(|m| m.get_temp::<f32>(held_id)).unwrap_or(fit);
     let x_at = |secs: f32| plot.left() + (secs / range).min(1.0) * plot.width();
     let span = viz.span_l_secs.max(1e-4);
-    time_grid(&p, plot, range, tempo, is_sync, s, true);
-    axis_grid(&p, plot, axis, ch, s);
+    let time_view = sc.time_view;
+    let n = n_active(params);
+    let snap = params.tap_snap.value();
+    let grid = params.tap_grid.value().max(1) as f32;
+    time_grid(&p, plot, range, tempo, is_sync, s, !time_view);
+    if time_view {
+        // Snap's grid, then a row per tap
+        if snap {
+            let stepw = span / (NUM_TAPS as f32 * grid);
+            let mut k = 0;
+            while (k as f32 * stepw) <= range && k < 4096 {
+                let xg = x_at(k as f32 * stepw);
+                let whole = k % grid as usize == 0;
+                let col = if whole { theme::line2() } else { theme::line() };
+                p.line_segment([Pos2::new(xg, plot.top()), Pos2::new(xg, plot.bottom())], Stroke::new(if whole { 1.0 } else { 0.5 } * s, col));
+                k += 1;
+            }
+        }
+        for i in 0..=n {
+            let yr = plot.top() + i as f32 / n as f32 * plot.height();
+            p.line_segment([Pos2::new(plot.left(), yr), Pos2::new(plot.right(), yr)], Stroke::new(0.5 * s, theme::line()));
+        }
+    } else {
+        axis_grid(&p, plot, axis, ch, s);
+    }
+    // a dot's height: its value, or its own row in the Time view
+    let y_of = |i: usize, v: f32| {
+        if time_view { plot.top() + (i as f32 + 0.5) / n as f32 * plot.height() } else { plot.top() + axis.norm(v) * plot.height() }
+    };
 
     // A click on the background deselects; registered first so dots win overlaps.
     if ui.interact(plot, ui.id().with("sc_field_bg"), Sense::click()).clicked() {
         sc.deselect();
     }
-    let n = n_active(params);
     // Time L/R unlinked: the right channel's taps land at their own times.
     // They show as diamonds joined to their dot, under the dots, and don't
     // drag (L and R share each tap's offset).
     if !params.time_linked.value() {
         for i in 0..n {
             let tap = &params.taps[i];
-            let y = plot.top() + axis.norm(axis.get(tap)) * plot.height();
+            let y = y_of(i, axis.get(tap));
             let xl = x_at(viz.times_l_grid[i] * fit);
             let xr = x_at(viz.times_r[i] * viz.grid_range_secs);
             if (xr - xl).abs() < 1.0 {
@@ -1384,15 +1432,16 @@ fn field(
         let key = text(&p, Pos2::new(plot.right() - 10.0 * s, plot.top() + 12.0 * s), Align2::RIGHT_CENTER, "R taps", 11.0, s, SOFT());
         paint_diamond(&p, Pos2::new(key.left() - 10.0 * s, key.center().y), 4.5 * s, Stroke::new(1.3 * s, SOFT()));
     }
-    let snap = params.tap_snap.value();
-    let lock = sc.lock_time;
+    let lock = !time_view;
+    // Shift: off the grid, for fine moves
+    let snap_now = snap && !ui.input(|i| i.modifiers.shift);
     let mut selected = None;
     let mut pressing = false;
     for i in 0..n {
         let tap = &params.taps[i];
         let v = axis.get(tap);
         let secs = viz.times_l_grid[i] * fit;
-        let c = Pos2::new(x_at(secs), plot.top() + axis.norm(v) * plot.height());
+        let c = Pos2::new(x_at(secs), y_of(i, v));
         let hit = if theme::touch() { theme::TOUCH_MIN_HIT } else { 28.0 } * s;
         let id = ui.id().with(("sc_tap", i));
         let d = drag_at(ui, id, Rect::from_center_size(c, Vec2::splat(hit)));
@@ -1422,14 +1471,15 @@ fn field(
                 // px → seconds on this range → fraction of the cluster span
                 virt = (virt + d.delta.x / plot.width() * range / span).clamp(-0.5, 0.5);
                 ui.ctx().data_mut(|m| m.insert_temp(virt_id, virt));
-                let o = if snap { snap_offset(secs, tap.time_offset.value(), virt, span) } else { virt };
+                let o = if snap_now { snap_offset(secs, tap.time_offset.value(), virt, span, grid) } else { virt };
                 off = Some(o.clamp(-0.5, 0.5));
+            } else {
+                let yv: f32 = ui.ctx().data(|m| m.get_temp(yvirt_id)).unwrap_or_else(|| axis.norm(v));
+                let yv = (yv + d.delta.y / plot.height()).clamp(0.0, 1.0);
+                ui.ctx().data_mut(|m| m.insert_temp(yvirt_id, yv));
+                val = Some(axis.value(yv));
             }
-            let yv: f32 = ui.ctx().data(|m| m.get_temp(yvirt_id)).unwrap_or_else(|| axis.norm(v));
-            let yv = (yv + d.delta.y / plot.height()).clamp(0.0, 1.0);
-            ui.ctx().data_mut(|m| m.insert_temp(yvirt_id, yv));
-            val = Some(axis.value(yv));
-            sc.focus = Some(axis.id(i));
+            sc.focus = Some(if lock { axis.id(i) } else { format!("time_offset_{}", i + 1) });
         }
         gesture_set(ui, id.with("off"), setter, &tap.time_offset, &d, off);
         axis.gesture(ui, id.with("val"), setter, tap, &d, val);
@@ -1447,8 +1497,9 @@ fn field(
             ui.ctx().data_mut(|m| m.remove::<bool>(was_id));
         }
         if d.double {
-            axis.set(setter, tap, axis.neutral());
-            if !lock {
+            if lock {
+                axis.set(setter, tap, axis.neutral());
+            } else {
                 setter.begin_set_parameter(&tap.time_offset);
                 setter.set_parameter(&tap.time_offset, 0.0);
                 setter.end_set_parameter(&tap.time_offset);
@@ -1457,19 +1508,19 @@ fn field(
 
         let col = tap_col(i, n);
         let active = tap.active.value();
-        let rad = if axis == Axis::Pan {
+        let rad = if time_view || axis == Axis::Pan {
             (4.0 + 7.0 * gain_db_to_pos(tap.gain_db.value())) * s // size = level
         } else {
             5.0 * s
         };
         // Motion: the dot is where Motion has the tap now; its set value
         // (what a drag moves) stays as a ring.
-        let cm = Pos2::new(c.x, plot.top() + axis.norm(moved_value(params, axis, i, v)) * plot.height());
+        let cm = if time_view { c } else { Pos2::new(c.x, y_of(i, moved_value(params, axis, i, v))) };
         if (cm.y - c.y).abs() > 0.5 * s {
             p.circle_stroke(c, rad + 1.5 * s, Stroke::new(1.0 * s, theme::with_alpha(col, 120)));
             p.line_segment([c, cm], Stroke::new(1.5 * s, theme::with_alpha(col, 90)));
         }
-        if axis == Axis::Gain {
+        if !time_view && axis == Axis::Gain {
             let stem = theme::with_alpha(col, if active { 160 } else { 70 });
             p.line_segment([Pos2::new(cm.x, cm.y + rad), Pos2::new(cm.x, plot.bottom())], Stroke::new(1.5 * s, stem));
         }
@@ -1491,13 +1542,15 @@ fn field(
         p.line_segment([Pos2::new(plot.left(), c.y), Pos2::new(plot.right(), c.y)], hair);
         // The value goes above the dot (below near the top edge), not beside it,
         // so it never covers the neighbouring taps in a tight cluster.
-        let ytxt = format!("{} {}  ↕", axis.name(), axis.text(axis.get(&params.taps[i]), ch));
-        let (at, align) = if c.y - rad - 34.0 * s > plot.top() {
-            (Pos2::new(c.x, c.y - rad - 8.0 * s), Align2::CENTER_BOTTOM)
-        } else {
-            (Pos2::new(c.x, c.y + rad + 8.0 * s), Align2::CENTER_TOP)
-        };
-        pill_in(&p, at, align, &ytxt, s, PAPER(), INK(), plot);
+        if !time_view {
+            let ytxt = format!("{} {}  ↕", axis.name(), axis.text(axis.get(&params.taps[i]), ch));
+            let (at, align) = if c.y - rad - 34.0 * s > plot.top() {
+                (Pos2::new(c.x, c.y - rad - 8.0 * s), Align2::CENTER_BOTTOM)
+            } else {
+                (Pos2::new(c.x, c.y + rad + 8.0 * s), Align2::CENTER_TOP)
+            };
+            pill_in(&p, at, align, &ytxt, s, PAPER(), INK(), plot);
+        }
         let arrow = if lock { "" } else { "↔  " };
         let ttxt = format!("{arrow}Tap {} · {}", i + 1, secs_text(viz.times_l_grid[i] * fit));
         pill_in(&p, Pos2::new(c.x, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &ttxt, s, INK(), PAPER(), plot);
@@ -1745,7 +1798,7 @@ fn lane(
         (c(0, 0, 1), c(0, 1, 1), c(0, 2, 2), c(1, 0, 1), c(1, 1, 1), c(1, 2, 2))
     };
     stepper_cell(ui, c_rep, s, setter, &params.repeats, "repeats", "Repeats", if finite { "then stops" } else { "loops" }, &mut sc.focus);
-    knob_cell(ui, c_fb, s, setter, &params.feedback, "feedback", "Feedback", false, !params.freeze.value(), None, &mut sc.focus);
+    feedback_cell(ui, c_fb, s, setter, &params.feedback, !params.freeze.value(), &mut sc.focus);
     // Curve shapes the loop's decay, so only ∞ has one.
     enum_cell(ui, c_curve, s, setter, &params.fb_curve, "fb_curve", "Curve", &["Natural", "Bloom", "Gate"], !finite, &mut sc.focus);
     // Left darkens each repeat, right thins it, the centre is off.
@@ -1757,6 +1810,42 @@ fn lane(
     knob_cell(ui, c_xf, s, setter, &params.crossfeed, "crossfeed", xf_label, false, !(ping && mono), None, &mut sc.focus);
     enum_cell_ex(ui, c_mode, s, setter, &params.crossfeed_mode, "crossfeed_mode", "Cross", &["Mix", "Ping", "Diffuse"], &[true, !mono, true], &mut sc.focus);
 }
+
+/// Feedback's knob (v2.43): it stops at 100 % on the way up — past it only
+/// by dragging on — and draws the self-oscillating range above 100 % in the
+/// warning colour.
+fn feedback_cell(ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &FloatParam, enabled: bool, focus: &mut Option<String>) {
+    let (ctl, lab, val) = cell_parts(cell, s);
+    let dial = Rect::from_center_size(ctl.center(), Vec2::splat(g::DIAL * s));
+    let hit = if theme::touch() { dial.expand(((theme::TOUCH_MIN_HIT - g::DIAL) * 0.5).max(0.0) * s) } else { dial };
+    let resp = ui.interact(hit, ui.id().with(("knob", "feedback")), Sense::click_and_drag());
+    if enabled {
+        let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+        let before = param.value();
+        if epo::knob_drive(ui, setter, param, hit, &resp) {
+            *focus = Some("feedback".into());
+        }
+        let v = param.value();
+        if (resp.dragged() || theme::touch()) && before <= 1.0 && v > 1.0 && v < FB_DETENT {
+            setter.set_parameter(param, 1.0);
+        }
+    }
+    let n = param.modulated_normalized_value();
+    let alpha = if enabled { 255 } else { 90 };
+    let p = ui.painter();
+    paint_dial(p, dial.center(), g::DIAL * 0.5 * s, n, false, s, alpha);
+    let unity = param.preview_normalized(1.0);
+    if n > unity + 1e-4 {
+        let arc = dial_arc(dial.center(), g::DIAL * 0.5 * s, unity, n);
+        p.add(egui::Shape::line(arc, Stroke::new(3.0 * s, theme::with_alpha(theme::accent(1), alpha))));
+    }
+    text(p, lab, Align2::CENTER_CENTER, "Feedback", 11.0, s, theme::with_alpha(INK2(), alpha));
+    let col = if param.value() > 1.0 { theme::accent(1) } else { INK() };
+    mono(p, val, Align2::CENTER_CENTER, &param.normalized_value_to_string(n, true), 11.5, s, theme::with_alpha(col, alpha));
+}
+
+/// Feedback stops at 100 % on the way up until a drag carries it this far.
+const FB_DETENT: f32 = 1.02;
 
 /// A count stepper cell (Repeats): ‹ value ›, the name above, a word below.
 /// The arrows step; dragging the value moves it like a knob.
@@ -1838,7 +1927,7 @@ fn motion_panel(
         (ed, Rect::from_min_max(Pos2::new(xm + 12.0 * s, body.top()), body.max))
     };
     match src {
-        0..=3 => lfo_editor(ui, ed, s, l.lane_stacked, params, setter, src, &mut sc.focus),
+        0..=2 => lfo_editor(ui, ed, s, l.lane_stacked, params, setter, src, &mut sc.focus),
         matrix::FOLLOW => {
             let p = ui.painter();
             let at = ed.left_top() + Vec2::new(0.0, 14.0 * s);
@@ -1846,7 +1935,7 @@ fn motion_panel(
             text(p, at + Vec2::new(0.0, 22.0 * s), Align2::LEFT_CENTER, "Louder moves its routes up, quiet down.", 12.0, s, INK2());
             text(p, at + Vec2::new(0.0, 40.0 * s), Align2::LEFT_CENTER, "10 ms up, 200 ms down.", 12.0, s, SOFT());
         }
-        _ => step_editor(ui, ed, s, l.lane_stacked, params, setter, &mut sc.focus),
+        _ => step_editor(ui, ed, s, l.lane_stacked, params, setter, src - matrix::STEP, &mut sc.focus),
     }
     if let Some(i) = mx_grid(ui, grid, s, params, setter, src, &mut sc.focus) {
         sc.mx_src = i;
@@ -1941,21 +2030,26 @@ fn bool_seg_cell(
     text(ui.painter(), lab, Align2::CENTER_CENTER, label, 11.0, s, INK2());
 }
 
-/// Step's controls: the steps as bars round a centre line (drag across them
-/// to draw; the ones past Length are dimmed), Rate, Free / Sync, Length and
-/// Scatter.
+/// A Step's controls: the steps as bars round a centre line (drag across
+/// them to draw; the ones past Length are dimmed), Rate, Free / Sync,
+/// Length, Scatter and Glide. `j`: Step 1 or 2 (0, 1).
 #[allow(clippy::too_many_arguments)]
-fn step_editor(ui: &mut egui::Ui, ed: Rect, s: f32, stacked: bool, params: &Arc<PetalParams>, setter: &ParamSetter, focus: &mut Option<String>) {
-    let st = &params.step;
+fn step_editor(
+    ui: &mut egui::Ui, ed: Rect, s: f32, stacked: bool, params: &Arc<PetalParams>, setter: &ParamSetter, j: usize,
+    focus: &mut Option<String>,
+) {
+    let st = params.steps()[j];
+    let prefix = if j == 0 { "step" } else { "step2" };
+    let id = |what: &str| format!("{prefix}_{what}");
     let (bars, cells) = if stacked {
-        let c = |col, span| cell_at(ed, 8, 1, 0, col, span, s);
+        let c = |col, span| cell_at(ed, 9, 1, 0, col, span, s);
         let b = c(0, 3);
-        (Rect::from_min_max(b.min + Vec2::new(0.0, 2.0 * s), b.max - Vec2::new(0.0, 2.0 * s)), [c(3, 1), c(4, 2), c(6, 1), c(7, 1)])
+        (Rect::from_min_max(b.min + Vec2::new(0.0, 2.0 * s), b.max - Vec2::new(0.0, 2.0 * s)), [c(3, 1), c(4, 2), c(6, 1), c(7, 1), c(8, 1)])
     } else {
         let bars = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(ed.width(), 70.0 * s));
         let row = Rect::from_min_max(Pos2::new(ed.left(), bars.bottom() + 4.0 * s), ed.max);
-        let c = |col| cell_at(row, 4, 1, 0, col, 1, s);
-        (bars, [c(0), c(1), c(2), c(3)])
+        let c = |col, span| cell_at(row, 6, 1, 0, col, span, s);
+        (bars, [c(0, 1), c(1, 2), c(3, 1), c(4, 1), c(5, 1)])
     };
     let p = ui.painter().clone();
     p.rect_filled(bars, g::R_CTL * s, INSET());
@@ -1964,7 +2058,7 @@ fn step_editor(ui: &mut egui::Ui, ed: Rect, s: f32, stacked: bool, params: &Arc<
     p.line_segment([Pos2::new(inner.left(), mid), Pos2::new(inner.right(), mid)], Stroke::new(1.0 * s, theme::line()));
     let len = st.len.value().clamp(1, 16) as usize;
     let bw = inner.width() / 16.0;
-    let col = theme::accent(matrix::STEP);
+    let col = theme::accent(matrix::STEP + j);
     for i in 0..16 {
         let v = st.steps[i].v.value();
         let x0 = inner.left() + i as f32 * bw + 1.5 * s;
@@ -1973,7 +2067,7 @@ fn step_editor(ui: &mut egui::Ui, ed: Rect, s: f32, stacked: bool, params: &Arc<
         let c = if i < len { col } else { theme::with_alpha(col, 70) };
         p.rect_filled(Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x0 + bw - 3.0 * s, bot.max(top + 2.0 * s))), 1.5 * s, c);
     }
-    let d = drag_at(ui, ui.id().with("sc_step_bars"), bars);
+    let d = drag_at(ui, ui.id().with(("sc_step_bars", j)), bars);
     if let (true, Some(pos)) = (d.pressing, d.pos) {
         let i = (((pos.x - inner.left()) / bw).floor() as i32).clamp(0, 15) as usize;
         let v = ((mid - pos.y) / (inner.height() * 0.5)).clamp(-1.0, 1.0);
@@ -1983,16 +2077,17 @@ fn step_editor(ui: &mut egui::Ui, ed: Rect, s: f32, stacked: bool, params: &Arc<
             setter.set_parameter(&st.steps[i].v, v);
             setter.end_set_parameter(&st.steps[i].v);
         }
-        *focus = Some(format!("step_v_{}", i + 1));
+        *focus = Some(id(&format!("v_{}", i + 1)));
     }
     if st.sync.value() {
-        knob_cell(ui, cells[0], s, setter, &st.div, "step_div", "Rate", false, true, None, focus);
+        knob_cell(ui, cells[0], s, setter, &st.div, &id("div"), "Rate", false, true, None, focus);
     } else {
-        knob_cell(ui, cells[0], s, setter, &st.rate, "step_rate", "Rate", false, true, None, focus);
+        knob_cell(ui, cells[0], s, setter, &st.rate, &id("rate"), "Rate", false, true, None, focus);
     }
-    bool_seg_cell(ui, cells[1], s, setter, &st.sync, "step_sync", "Speed", ["Free", "Sync"], focus);
-    knob_cell(ui, cells[2], s, setter, &st.len, "step_len", "Length", false, true, None, focus);
-    knob_cell(ui, cells[3], s, setter, &st.scatter, "step_scatter", "Scatter", false, true, None, focus);
+    bool_seg_cell(ui, cells[1], s, setter, &st.sync, &id("sync"), "Speed", ["Free", "Sync"], focus);
+    knob_cell(ui, cells[2], s, setter, &st.len, &id("len"), "Length", false, true, None, focus);
+    knob_cell(ui, cells[3], s, setter, &st.scatter, &id("scatter"), "Scatter", false, true, None, focus);
+    knob_cell(ui, cells[4], s, setter, &st.glide, &id("glide"), "Glide", false, true, None, focus);
 }
 
 /// The matrix: sources down the side (a click picks one to edit), targets
@@ -2069,7 +2164,7 @@ fn mx_grid(
 }
 
 /// Param id prefixes of the matrix rows and the cells' ids, in grid order.
-const MX_PREFIX: [&str; matrix::SOURCES] = ["mx_lfo1", "mx_lfo2", "mx_lfo3", "mx_lfo4", "mx_follow", "mx_step"];
+const MX_PREFIX: [&str; matrix::SOURCES] = ["mx_lfo1", "mx_lfo2", "mx_lfo3", "mx_follow", "mx_step", "mx_step2"];
 const MX_TGT_IDS: [&str; matrix::TARGETS] = ["pan", "gain", "cutoff", "reso", "colour", "fdbk", "cross", "tone", "mix", "duck"];
 
 fn mono_text(p: &egui::Painter, at: Pos2, t: &str, s: f32, col: Color32) {
@@ -2090,6 +2185,7 @@ fn mx_demo(params: &PetalParams, setter: &ParamSetter) {
     set(&params.mx_follow.gain, 0.4);
     set(&params.mx_follow.duck, 0.5);
     set(&params.mx_step.fdbk, 0.35);
+    set(&params.mx_step2.cutoff, 0.5);
     for (i, v) in [0.8, -0.2, 0.4, -0.6, 1.0, 0.0, -0.4, 0.6].into_iter().enumerate() {
         set(&params.step.steps[i].v, v);
     }
@@ -2311,8 +2407,18 @@ fn echo(
         // ↕ feedback: anywhere on the lane, relative so it can pass 100 %
         let fid = ui.id().with("sc_echo_fb");
         let fd = drag_at(ui, fid, plot.expand2(Vec2::new(0.0, 14.0 * s)));
+        // accumulated from the press, so the stop at 100 % can be dragged past
         let fb = params.feedback.value();
-        let fv = (fd.delta.y != 0.0).then(|| (fb - fd.delta.y / plot.height() * 1.05).clamp(0.0, 1.05));
+        let virt_id = fid.with("virt");
+        if fd.started {
+            ui.ctx().data_mut(|m| m.insert_temp(virt_id, fb));
+        }
+        let fv = (fd.delta.y != 0.0).then(|| {
+            let virt: f32 = ui.ctx().data(|m| m.get_temp(virt_id)).unwrap_or(fb);
+            let virt = (virt - fd.delta.y / plot.height() * 1.05).clamp(0.0, 1.05);
+            ui.ctx().data_mut(|m| m.insert_temp(virt_id, virt));
+            if fb <= 1.0 && virt > 1.0 && virt < FB_DETENT { 1.0 } else { virt }
+        });
         if fv.is_some() {
             *focus = Some("feedback".into());
         }
@@ -2631,6 +2737,13 @@ fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Peta
     knob_cell(ui, c(0), s, setter, &params.input_gain, "input_gain", "In", true, true, None, focus);
     knob_cell(ui, c(1), s, setter, &params.dry_wet, "dry_wet", "Mix", false, true, None, focus);
     knob_cell(ui, c(2), s, setter, &params.output_gain, "output_gain", "Out", true, true, None, focus);
+    // Ear guard (v2.43), and how far it has the echoes down right now
+    toggle_cell(ui, c(3), s, setter, &params.ear_guard, "ear_guard", "Ear guard", "On", "Off", focus);
+    let down = f32::from_bits(params.guard_db.load(std::sync::atomic::Ordering::Relaxed));
+    if params.ear_guard.value() && down > 0.1 {
+        let (_, _, val) = cell_parts(c(3), s);
+        mono(ui.painter(), val, Align2::CENTER_CENTER, &format!("−{down:.1} dB"), 11.5, s, theme::accent(1));
+    }
     let xr = c(4).left() - 4.0 * s;
     rule(ui.painter(), Pos2::new(xr, inner.top() + 8.0 * s), Pos2::new(xr, inner.bottom() - 4.0 * s), s);
     knob_cell(ui, c(4), s, setter, &params.duck, "duck", "Duck", false, true, None, focus);
@@ -3023,7 +3136,9 @@ mod tests {
             // header: tabs end before the preset box, which ends before A/B
             let tabs_end = l.pad + 176.0 + l.tabs_w;
             let preset = ((l.w - l.preset_w) * 0.5, (l.w + l.preset_w) * 0.5);
-            assert!(tabs_end < preset.0 && preset.1 < l.w - l.pad - 38.0 - 10.0 - 80.0);
+            // … and before Clear, Freeze and A/B
+            let ab_x = l.w - l.pad - 38.0 - 10.0 - 80.0;
+            assert!(tabs_end < preset.0 && preset.1 < ab_x - 16.0 - 96.0 - 8.0 - 72.0);
         }
     }
 

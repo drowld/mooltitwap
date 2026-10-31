@@ -54,6 +54,23 @@ impl Svf {
     }
 }
 
+/// A one-pole high-pass a few Hz up (v2.43): keeps offset from building up
+/// in the loop. `r` = 1 − 2π·f/sr.
+#[derive(Clone, Copy, Default)]
+pub struct DcBlock {
+    x1: f32,
+    y1: f32,
+}
+
+impl DcBlock {
+    #[inline]
+    pub fn process(&mut self, x: f32, r: f32) -> f32 {
+        let y = x - self.x1 + r * self.y1;
+        (self.x1, self.y1) = (x, y);
+        y
+    }
+}
+
 /// Soft tanh saturator with drive.
 #[inline]
 pub fn soft_clip(x: f32) -> f32 {

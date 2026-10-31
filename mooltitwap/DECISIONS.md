@@ -2,6 +2,60 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-01 · Fractional delay reads fixed (v2.44.0, SOF-60)
+
+Owner: "ok fix it" (it blocked per-tap detune, SOF-156).
+- **`DelayLine::read` interpolates the right way.** Its four Lagrange points
+  ran newest-first, so `read(10.25)` returned 9.75 samples back and jumped
+  2 samples at each whole one: gliding delays (Repitch) stepped. Now the
+  fraction moves the read back. Whole-sample reads are unchanged.
+- **The loops read before the write, so they now read a sample short**
+  (`read_before_write`): a cycle of C samples comes round every C, not C + 1
+  (main loop, bounce, Freeze's hold and Repeats' copies). The page's cycle
+  readout and the sound now agree.
+- **Heard as**: Repitch glides lose their stepping (a held chord through a
+  gliding Time: artifact energy −35 → −60 dB relative to the signal);
+  repeats land a sample a pass earlier (at 90 % feedback over a 33 ms cycle,
+  the same tone). Renders in `spikes/sof60-ab/` (not committed).
+- **Also fixed on the way**: switching a count back to ∞ let the copies fade
+  in 5 ms while the loop took 20 ms to take over, a small dip; the copies
+  now play until the handover ends (the switch's sharpest bend went from
+  1.29× a steady tone's to 1.02×).
+
+## 2026-10-31 · Time view, Grid, two Steps, ear safety (v2.43.0)
+
+From the owner's notes on v2.42; built with my picks (owner: "Build with your picks").
+- **Time view** first on the Y list: a row per tap, drags move only time
+  (Shift: off the grid). The value views move only values, so **Lock time
+  is gone** (rejected: keeping it, default on — the Time view does its job;
+  diagonal drags are the loss). Snap and a new **Grid** (1, 1/2, 1/3, 1/4 of
+  the tap spacing, `tap_grid`) show in the Time view; the Taps menu is off there.
+- **Alignment**: the field ends with the Time card, the lane starts with
+  Colour (Wide 318/244, Tall 392/288).
+- **Sources: LFO 1–3, Follow, Step 1–2** (was LFO 1–4). LFO 4 existed only
+  in v2.42 (one day, local): its routes are dropped, not migrated.
+- **Step clicks**: each Step has Glide (default 10 %: a jump slides over a
+  tenth of its step; at 0 still ~3 ms), and the taps' cutoff and Q now
+  glide through two 5 ms one-poles in the log domain (`LogGlide`), as gain
+  and pan do, instead of a fixed rate with corners. Not proven by a test:
+  the click measures available read the resonant sweep, not the corner, so
+  old and new measure alike; a test checks a Step is no sharper than a
+  smooth LFO at the same depth. Owner to judge by ear. Rejected for now: a
+  value held per repeat (taps read one shared line, so it would need a
+  filter per repeat per tap); "per repeat" stepping stays an option.
+- **Ear safety, none of it inside the loop's gain** (the DSP rule):
+  - *Ear guard* (Output card, on by default, not in presets): echoes over
+    −8 dBFS RMS (300 ms average) for a couple of seconds ease down to it
+    (1.5 s in, 0.5 s out), after the loop; a test checks the loop itself is
+    untouched.
+  - *Feedback stops at 100 %* on the way up (knob and lane drag; past it
+    from 102 %), and the range above 100 % draws in the warning colour.
+  - *A NaN or infinity* silences the block and clears the delay.
+  - *DC blockers* (5 Hz) on what the loops write back (not on Freeze's hold).
+  - *Clear* (header): the echoes fade out over 10 ms, then the delay
+    empties. It clears ~36 MB of lines on the audio thread (at 48 kHz), so
+    a dropout is possible at that moment.
+
 ## 2026-10-31 · Repeats, the Motion matrix, Hanken Grotesk (v2.42.0)
 
 From the owner's notes on v2.41; built as mocked (artifact "Afterecho Next

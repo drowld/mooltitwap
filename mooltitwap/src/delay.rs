@@ -43,7 +43,13 @@ impl DelayLine {
     }
 
     /// Read at a fractional delay in samples using 4-point Lagrange
-    /// interpolation. `delay_samples` must be >= 1.0 and < capacity - 2.
+    /// interpolation, after this sample's write (`read(1.0)` is the sample
+    /// before the newest). `delay_samples` must be >= 1.0 and < capacity - 2.
+    ///
+    /// v2.44 (SOF-60): the four points run newest to oldest, so the fraction
+    /// moves the read *back*: `read(10.25)` is 10.25 samples back. Before, it
+    /// interpolated toward the newer sample (9.75 back) and jumped 2 samples
+    /// at each whole one, so gliding delays (Repitch) stepped.
     ///
     /// Why Lagrange vs cubic Hermite: at a fractional offset of 0.5, cubic
     /// Hermite has measurable HF rolloff (~1 dB near Nyquist), while at offset
@@ -65,16 +71,35 @@ impl DelayLine {
         let i0 = (base + self.capacity - 1) & mask;
         let i1 = base;
         let i2 = (base + 1) & mask;
-        let i3 = (base + 2) & mask;
 
-        let y0 = self.buffer[i0];
-        let y1 = self.buffer[i1];
-        let y2 = self.buffer[i2];
-        let y3 = self.buffer[i3];
+        #[cfg(test)]
+        if LEGACY_READ.load(std::sync::atomic::Ordering::Relaxed) {
+            let i3 = (base + 2) & mask;
+            return lagrange4(self.buffer[i0], self.buffer[i1], self.buffer[i2], self.buffer[i3], frac);
+        }
+        // i2 is one newer than i1, i0 one older: the fraction runs from i1
+        // toward the older i0, with i2 and the one before i0 as the outer points
+        let i_older2 = (base + self.capacity - 2) & mask;
+        lagrange4(self.buffer[i2], self.buffer[i1], self.buffer[i0], self.buffer[i_older2], frac)
+    }
 
-        lagrange4(y0, y1, y2, y3, frac)
+    /// A read made before this sample's write (the feedback loops' and
+    /// Repeats' reads): the newest sample is already one old, so `delay`
+    /// lands exactly `delay` samples before the sample about to be written.
+    /// Before v2.44 these used `read`, and every cycle came round a sample late.
+    #[inline]
+    pub fn read_before_write(&self, delay_samples: f32) -> f32 {
+        #[cfg(test)]
+        if LEGACY_READ.load(std::sync::atomic::Ordering::Relaxed) {
+            return self.read(delay_samples);
+        }
+        self.read(delay_samples - 1.0)
     }
 }
+
+/// Tests only: read the way v2.43 and before did, for before/after renders.
+#[cfg(test)]
+pub static LEGACY_READ: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 4-point Lagrange interpolation, sample points at x = -1, 0, 1, 2.
 /// `t` is the fractional offset in [0, 1] between y1 and y2.

@@ -1,4 +1,5 @@
-//! Motion's matrix (v2.42): six sources, each routed to any of ten targets
+//! Motion's matrix (v2.42): six sources (LFO 1–3, Follow, Step 1–2 since
+//! v2.43), each routed to any of ten targets
 //! with its own depth. Four targets move each tap (the v2.39 Motion ones);
 //! six move the whole echo. Pure maths, shared by the engine and the page.
 //!
@@ -13,10 +14,12 @@ pub const SOURCES: usize = 6;
 pub const TARGETS: usize = 10;
 /// The first four targets move each tap; the rest the whole echo.
 pub const TAP_TARGETS: usize = 4;
-pub const FOLLOW: usize = 4;
-pub const STEP: usize = 5;
+pub const LFOS: usize = 3;
+pub const FOLLOW: usize = 3;
+/// Step 1; Step 2 is the row after it.
+pub const STEP: usize = 4;
 
-pub const SRC_NAMES: [&str; SOURCES] = ["LFO 1", "LFO 2", "LFO 3", "LFO 4", "Follow", "Step"];
+pub const SRC_NAMES: [&str; SOURCES] = ["LFO 1", "LFO 2", "LFO 3", "Follow", "Step 1", "Step 2"];
 pub const TGT_NAMES: [&str; TARGETS] = ["Pan", "Gain", "Cutoff", "Reso", "Colour", "Fdbk", "Cross", "Tone", "Mix", "Duck"];
 
 /// Depths, `[source][target]`.
@@ -129,8 +132,8 @@ mod tests {
 
     #[test]
     fn routes_add_up_and_stay_in_range() {
-        let g = grid(&[(0, 0, 1.0), (1, 0, 1.0), (4, 4, 1.0), (5, 4, -0.5)]);
-        let s = [1.0, 1.0, 0.0, 0.0, 1.0, 1.0];
+        let g = grid(&[(0, 0, 1.0), (1, 0, 1.0), (3, 4, 1.0), (5, 4, -0.5)]);
+        let s = [1.0, 1.0, 0.0, 1.0, 0.0, 1.0];
         assert_eq!(tap_mods(&g, &s)[0], 1.0);
         assert!((global_mods(&g, &s)[COLOUR] - 0.5).abs() < 1e-6);
         // gain never boosts, whatever the routes say

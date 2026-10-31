@@ -1,6 +1,6 @@
 use nice_plug::prelude::*;
 use nice_plug_egui::EguiState;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Arc;
 
 pub const NUM_TAPS: usize = 16;
@@ -170,8 +170,9 @@ impl LfoParams {
     }
 }
 
-/// Step (v2.42): up to 16 values played in turn, one per step of its rate.
-/// Scatter starts each tap further along the steps.
+/// Step (v2.42; two since v2.43): up to 16 values played in turn, one per
+/// step of its rate. Scatter starts each tap further along the steps; Glide
+/// rounds each step's jump off (a few ms at 0, a whole step's slide at 100 %).
 #[derive(Params)]
 pub struct StepParams {
     #[id = "rate"]
@@ -184,6 +185,8 @@ pub struct StepParams {
     pub len: IntParam,
     #[id = "scatter"]
     pub scatter: FloatParam,
+    #[id = "glide"]
+    pub glide: FloatParam,
     /// The steps, −1…1 (hidden from hosts; drawn on the Step tab).
     #[nested(array)]
     pub steps: [StepValue; 16],
@@ -195,31 +198,35 @@ pub struct StepValue {
     pub v: FloatParam,
 }
 
-impl Default for StepParams {
-    fn default() -> Self {
+impl StepParams {
+    fn new(n: usize) -> Self {
+        let name = |what: &str| format!("Step {n} {what}");
         Self {
-            rate: FloatParam::new("Step Rate", 4.0, FloatRange::Skewed { min: 0.05, max: 16.0, factor: FloatRange::skew_factor(-2.0) })
+            rate: FloatParam::new(name("Rate"), 4.0, FloatRange::Skewed { min: 0.05, max: 16.0, factor: FloatRange::skew_factor(-2.0) })
                 .with_value_to_string(Arc::new(hz_text))
                 .with_string_to_value(Arc::new(|s| s.trim().to_ascii_lowercase().trim_end_matches("hz").trim().parse().ok())),
             // a step per 1/16
-            div: IntParam::new("Step Div", MOTION_DIVS.len() as i32 - 1, IntRange::Linear { min: 0, max: MOTION_DIVS.len() as i32 - 1 })
+            div: IntParam::new(name("Div"), MOTION_DIVS.len() as i32 - 1, IntRange::Linear { min: 0, max: MOTION_DIVS.len() as i32 - 1 })
                 .with_value_to_string(Arc::new(div_text)),
-            sync: BoolParam::new("Step Sync", true),
-            len: IntParam::new("Step Length", 8, IntRange::Linear { min: 1, max: 16 }),
-            scatter: FloatParam::new("Step Scatter", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+            sync: BoolParam::new(name("Sync"), true),
+            len: IntParam::new(name("Length"), 8, IntRange::Linear { min: 1, max: 16 }),
+            scatter: FloatParam::new(name("Scatter"), 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
+            // a little by default: a jump that slides over a tenth of its step
+            glide: FloatParam::new(name("Glide"), 0.1, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
             steps: core::array::from_fn(|i| StepValue {
-                v: FloatParam::new(format!("Step {}", i + 1), 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
+                v: FloatParam::new(format!("Step {n}.{}", i + 1), 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
                     .with_step_size(0.01)
                     .hide(),
             }),
         }
     }
-}
 
-impl StepParams {
     /// Beats per step when synced, else None (it runs in Hz).
     pub fn beats(&self) -> Option<f32> {
         self.sync.value().then(|| motion_div_beats(self.div.value()))
@@ -518,6 +525,10 @@ pub struct PetalParams {
     /// Global snap toggle for the Grid view horizontal drag.
     #[id = "tap_snap"]
     pub tap_snap: BoolParam,
+    /// Snap's grid (v2.43): the tap spacing divided by 1…4, so a tap can sit
+    /// on halves, thirds or quarters of it.
+    #[id = "tap_grid"]
+    pub tap_grid: IntParam,
 
     #[id = "channel_mode"]
     pub channel_mode: EnumParam<ChannelMode>,
@@ -629,6 +640,18 @@ pub struct PetalParams {
     /// 0. Written by the audio thread for the page to draw; not a param and
     /// not saved.
     pub held_cycle_secs: AtomicU32,
+    /// Ear guard (v2.43): echoes that stay very loud for a couple of seconds
+    /// ease down at the output (never inside the loop, which may still
+    /// self-oscillate). On by default; a safety setting, so presets and A/B
+    /// leave it alone.
+    #[id = "ear_guard"]
+    pub ear_guard: BoolParam,
+    /// How far the guard has the echoes down (dB, f32 bits, the most in the
+    /// last block), for the page. Not a param, not saved.
+    pub guard_db: AtomicU32,
+    /// Clear (v2.43): the page asks the audio thread to empty the delay
+    /// (the echoes fade out over 10 ms first). Not a param.
+    pub clear_request: AtomicBool,
 
     // ---- Filter ----
     #[id = "filter_type"]
@@ -674,10 +697,10 @@ pub struct PetalParams {
     pub lfo2: LfoParams,
     #[nested(id_prefix = "lfo3", group = "LFO 3")]
     pub lfo3: LfoParams,
-    #[nested(id_prefix = "lfo4", group = "LFO 4")]
-    pub lfo4: LfoParams,
-    #[nested(id_prefix = "step", group = "Step")]
+    #[nested(id_prefix = "step", group = "Step 1")]
     pub step: StepParams,
+    #[nested(id_prefix = "step2", group = "Step 2")]
+    pub step2: StepParams,
     /// The grid: one row per source, a cell per target (hidden from hosts;
     /// saved with the session and in presets).
     #[nested(id_prefix = "mx_lfo1", group = "Matrix")]
@@ -686,12 +709,12 @@ pub struct PetalParams {
     pub mx_lfo2: MxRow,
     #[nested(id_prefix = "mx_lfo3", group = "Matrix")]
     pub mx_lfo3: MxRow,
-    #[nested(id_prefix = "mx_lfo4", group = "Matrix")]
-    pub mx_lfo4: MxRow,
     #[nested(id_prefix = "mx_follow", group = "Matrix")]
     pub mx_follow: MxRow,
     #[nested(id_prefix = "mx_step", group = "Matrix")]
     pub mx_step: MxRow,
+    #[nested(id_prefix = "mx_step2", group = "Matrix")]
+    pub mx_step2: MxRow,
     /// Scales every route; Polarity (−100 … 100 %) after it, so −100 % turns
     /// the whole grid upside down (Vortex's MATRIX_POLARITY.md).
     #[id = "mx_amount"]
@@ -843,6 +866,8 @@ impl Default for PetalParams {
             sync_mode_r: EnumParam::new("Sync Mode R", SyncMode::Free),
             delay_mode: EnumParam::new("Delay Mode", DelayMode::Repitch),
             tap_snap: BoolParam::new("Snap", true),
+            tap_grid: IntParam::new("Snap Grid", 1, IntRange::Linear { min: 1, max: 4 })
+                .with_value_to_string(Arc::new(|v| if v <= 1 { "1".into() } else { format!("1/{v}") })),
 
             channel_mode: EnumParam::new("Channel Mode", ChannelMode::Stereo),
 
@@ -957,6 +982,9 @@ impl Default for PetalParams {
                 .with_string_to_value(Arc::new(tone_from_text)),
             freeze: BoolParam::new("Freeze", false),
             held_cycle_secs: AtomicU32::new(0),
+            ear_guard: BoolParam::new("Ear Guard", true),
+            guard_db: AtomicU32::new(0),
+            clear_request: AtomicBool::new(false),
 
             filter_type: EnumParam::new("Filter Type", FilterType::LowPass),
             filter_cutoff: FloatParam::new(
@@ -1039,14 +1067,14 @@ impl Default for PetalParams {
             lfo1: LfoParams::new(1, MotionShape::Sine, 0.5),
             lfo2: LfoParams::new(2, MotionShape::Triangle, 0.25),
             lfo3: LfoParams::new(3, MotionShape::Glide, 1.0),
-            lfo4: LfoParams::new(4, MotionShape::SampleHold, 2.0),
-            step: StepParams::default(),
+            step: StepParams::new(1),
+            step2: StepParams::new(2),
             mx_lfo1: MxRow::new("LFO 1"),
             mx_lfo2: MxRow::new("LFO 2"),
             mx_lfo3: MxRow::new("LFO 3"),
-            mx_lfo4: MxRow::new("LFO 4"),
             mx_follow: MxRow::new("Follow"),
-            mx_step: MxRow::new("Step"),
+            mx_step: MxRow::new("Step 1"),
+            mx_step2: MxRow::new("Step 2"),
             mx_amount: FloatParam::new("Matrix Amount", 1.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
@@ -1080,14 +1108,19 @@ impl PetalParams {
         }
     }
 
-    /// The four LFOs, in order.
-    pub fn lfos(&self) -> [&LfoParams; 4] {
-        [&self.lfo1, &self.lfo2, &self.lfo3, &self.lfo4]
+    /// The three LFOs, in order.
+    pub fn lfos(&self) -> [&LfoParams; 3] {
+        [&self.lfo1, &self.lfo2, &self.lfo3]
+    }
+
+    /// The two Steps, in order.
+    pub fn steps(&self) -> [&StepParams; 2] {
+        [&self.step, &self.step2]
     }
 
     /// The matrix rows, in source order (`matrix::SRC_NAMES`).
     pub fn mx_rows(&self) -> [&MxRow; crate::matrix::SOURCES] {
-        [&self.mx_lfo1, &self.mx_lfo2, &self.mx_lfo3, &self.mx_lfo4, &self.mx_follow, &self.mx_step]
+        [&self.mx_lfo1, &self.mx_lfo2, &self.mx_lfo3, &self.mx_follow, &self.mx_step, &self.mx_step2]
     }
 
     /// Every cell's depth now, Amount and Polarity applied.
