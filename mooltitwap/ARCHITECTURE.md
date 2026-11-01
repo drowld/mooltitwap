@@ -46,11 +46,14 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
 - `delay.rs` — `DelayLine` (Lagrange read; `read_before_write` for the loops' and Repeats' reads, v2.44),
   `TapReader` (Repitch / Fade / Jump), `SlewedTime`. `diffusion.rs` (v2.47: six short drifting
   allpasses, L≠R; the loops read early by its `bulk` delay), `tape.rs` (RE-DEEMER port).
-- `presets.rs` — the Soft Systems preset library (Vortex's port): the file (format 2,
-  plain discrete values, Time/Cross facets), `Library` (factory from the binary + user
-  files in `Soft Systems/Afterecho/Presets`, `library.json`, one-time copy from
-  `Mooltitwap/presets`), `PresetSession` (persisted with the host). `NOT_STORED`
-  (Freeze) stays out of presets and A/B. `factory.rs` — the factory set as changes
+- `presets.rs` — Afterecho's half of the shared preset store (nice-plug
+  `softsystems-presets`, v2.48): `Store` implements its `Plugin` (which params a preset
+  holds, plain floats, the Time/Cross facets, the factory bank, the old
+  `Mooltitwap/presets` folder, `migrate::preset` on read); `Library` = the crate's
+  (factory from the binary + user files in `Soft Systems/Afterecho/Presets`,
+  `library.json`). Keeps its own grid-aware `matches` (edited) and wrappers for the old
+  editors. `PresetSession` (the crate's `PresetRef`) is persisted with the host.
+  `NOT_STORED` (Freeze, Ear guard) stays out of presets and A/B. `factory.rs` — the factory set as changes
   from Init.
 - `gui.rs` — `create_editor` (routes to the scope page when `SCOPE_PAGE`),
   `compute_viz_data_ex` (shared viz maths), the old v2 editor. `gui_v3.rs`, `palette_v3.rs` — old v3.

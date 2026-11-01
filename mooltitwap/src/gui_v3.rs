@@ -514,7 +514,7 @@ pub(crate) fn ab_switch(st: &mut EditorState, params: &Arc<PetalParams>, setter:
     if st.ab_active == target { return; }
     st.ab_slots[st.ab_active as usize] = Some(crate::presets::capture(params));
     if let Some(snap) = st.ab_slots[target as usize].clone() {
-        crate::presets::apply(params, setter, &snap, crate::presets::VALUES_FORMAT_PLAIN);
+        crate::presets::apply(params, setter, &snap, crate::presets::VALUES_FORMAT_PLAIN, &mut crate::presets::Sent::default());
     } else {
         // first visit to this slot — start it as a copy of what's live now
         st.ab_slots[target as usize] = st.ab_slots[st.ab_active as usize].clone();

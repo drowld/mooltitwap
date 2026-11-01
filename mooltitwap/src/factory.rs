@@ -7,11 +7,11 @@
 //! stores a sound.
 
 use crate::params::PetalParams;
-use crate::presets::{capture, Kind, Preset};
+use crate::presets::{sound, Kind, Preset, Store};
 use nice_plug::prelude::*;
 
-/// Raised whenever the factory set changes (nothing reads it yet).
-#[allow(dead_code)]
+/// Raised whenever the factory set changes (kept in library.json as
+/// `factory_version`).
 pub const FACTORY_VERSION: u32 = 1;
 
 /// One factory preset: `changes` are (param id, plain value) from Init.
@@ -246,7 +246,8 @@ fn build(r: &Recipe) -> Preset {
             debug_assert!(false, "factory preset {} names an unknown param {id}", r.name);
         }
     }
-    let mut pr = Preset::new(r.name, capture(&p), Kind::Factory);
+    let mut pr = Preset::new::<Store>(r.name, sound(&p), Kind::Factory);
+    pr.author = "Soft Systems".into();
     pr.tags = r.tags.iter().map(|t| t.to_string()).collect();
     pr.notes = r.notes.to_string();
     pr
@@ -275,13 +276,13 @@ mod tests {
     /// own reading of it ("In this preset" uses the same params).
     #[test]
     fn each_preset_is_what_it_says() {
-        use crate::presets::{Cross, Time};
+        use crate::presets::{Cross, PresetFacets, Time};
         let all = factory_presets();
         let get = |n: &str| all.iter().find(|p| p.name == n).unwrap_or_else(|| panic!("{n} missing"));
         let read = |n: &str| {
             let q = PetalParams::default();
             let p = get(n);
-            crate::presets::load_into(&q, &p.values, p.values_format);
+            crate::presets::load_into(&q, &p.values);
             q
         };
         let want = [
@@ -339,11 +340,12 @@ mod tests {
         assert_eq!(drift.taps[5].filter_type.value(), crate::params::FilterType::BandPass);
         assert!((drift.taps[5].filter_q.value() - 2.0).abs() < 0.01);
         // every one is its own sound, and none is Init
-        let init = crate::presets::Preset::new("Init", crate::presets::capture(&PetalParams::default()), Kind::User);
+        let same = crate::presets::tests::same_sound;
+        let init = Preset::new::<Store>("Init", sound(&PetalParams::default()), Kind::User);
         for (i, a) in all.iter().enumerate() {
-            assert!(!a.same_sound(&init), "{} is Init", a.name);
+            assert!(!same(a, &init), "{} is Init", a.name);
             for b in &all[i + 1..] {
-                assert!(!a.same_sound(b), "{} = {}", a.name, b.name);
+                assert!(!same(a, b), "{} = {}", a.name, b.name);
             }
         }
     }

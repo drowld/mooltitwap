@@ -2,6 +2,39 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-01 · Presets on the shared softsystems-presets crate (v2.48.0, SOF-205)
+
+Owner: "Yes, start it". The store (file, folders, factory serving,
+`library.json`, every operation) now lives in nice-plug
+`crates/softsystems-presets`, shared by every Soft Systems plug-in.
+`presets.rs` went from 1,533 to ~530 lines: `Store` implements the crate's
+`Plugin` (id `com.bussien.mooltitwap` and folder `Soft Systems/Afterecho/Presets`
+unchanged; `NOT_STORED`, `PLAIN_FLOATS`, the Time/Cross facets, the factory
+bank, the old `Mooltitwap/presets` folder; `migrate::preset` runs once when a
+file is read instead of at every load and compare).
+- **Changed by design (the crate's rules):** a load sends only the params that
+  change (one `Sent` per editor; the old v2/v3 editors use a fresh one per
+  load). A rewritten file stores its migrated values; a `values_format` 0 file
+  is rewritten as 1. `library.json` gains `factory_version`. Factory presets
+  carry `author` "Soft Systems", and a copy made from one carries `based_on`.
+- **Kept in Afterecho:** the edited check (`matches`) compares floats on their
+  step grid. The crate's doesn't: after editing a tap's Q, Init read as edited
+  (Q's default 0.707 snaps to 0.70 once set; tested). Asked the hub to fold it
+  into the crate; drop ours when it lands. The Time/Cross filters stay under
+  Afterecho's own `time`/`cross` keys in `library.json` (the crate keeps fields
+  it doesn't know). The sheet is still Afterecho's (the shared one comes with
+  softsystems-ui, SOF-224).
+- **Parity check** (harness in the session scratchpad): copies of the real
+  folders (one user preset) and a hand-made one (format-1, format-0, unchanged
+  and edited factory copies, unknown fields, broken, another plug-in's, a
+  newer format), then 18 operations. Every listed preset, its effective sound,
+  the library state and every refusal's words matched the old code; the files
+  differed only as above. The real folders were left untouched (checksums).
+- **Tests:** the 10 generic store tests now live in the crate (41 there);
+  Afterecho keeps its own plus `plugin_id_is_the_clap_id`. The sheet's tests
+  run against the real factory bank, since the crate serves the plug-in's.
+  Rejected: a test-only factory override inside `Store`.
+
 ## 2026-11-01 · Diffuse rebuilt: six short drifting allpasses (v2.47.0, SOF-199)
 
 Owner: "do C", from the listening test (`spikes/diffuse/`). v2.46.0 was never

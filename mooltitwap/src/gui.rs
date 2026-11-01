@@ -369,7 +369,7 @@ fn draw_plugin(
 // ─── Preset helpers ────────────────────────────────────────────────────────
 fn ensure_library(st: &mut EditorState) {
     if st.library.is_none() {
-        st.library = Some(crate::presets::Library::load());
+        st.library = Some(<crate::presets::Library as crate::presets::OldEditors>::load());
     }
 }
 fn preset_load(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, name: &str) {
@@ -378,13 +378,13 @@ fn preset_load(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSe
         .and_then(|l| l.get(name))
         .map(|p| (p.values.clone(), p.values_format));
     if let Some((values, fmt)) = snap {
-        crate::presets::apply(params, setter, &values, fmt);
+        crate::presets::apply(params, setter, &values, fmt, &mut crate::presets::Sent::default());
         st.current_preset = Some(name.to_string());
     }
 }
 fn preset_step(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, delta: i32) {
     ensure_library(st);
-    let names = st.library.as_ref().map(|l| l.names()).unwrap_or_default();
+    let names = st.library.as_ref().map(crate::presets::OldEditors::names).unwrap_or_default();
     if names.is_empty() { return; }
     let cur = st.current_preset.as_ref()
         .and_then(|c| names.iter().position(|n| n == c))
@@ -396,7 +396,7 @@ fn preset_step(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSe
 fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) {
     ensure_library(st);
     if let Some(lib) = st.library.as_mut() {
-        if lib.save_named(name, crate::presets::capture(params)) {
+        if crate::presets::OldEditors::save_named(lib, name, crate::presets::capture(params)) {
             st.current_preset = Some(name.to_string());
         }
     }
@@ -408,7 +408,7 @@ fn preset_save(st: &mut EditorState, params: &Arc<PetalParams>, name: &str) {
 fn draw_browser(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState, s: f32) {
     if !st.browser_open { return; }
     let screen = ui.ctx().screen_rect();
-    let names = st.library.as_ref().map(|l| l.names()).unwrap_or_default();
+    let names = st.library.as_ref().map(crate::presets::OldEditors::names).unwrap_or_default();
     let cur = st.current_preset.clone();
     let mut do_load: Option<String> = None;
     let mut do_save = false;

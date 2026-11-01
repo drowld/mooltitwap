@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::gui::EditorState;
 use crate::params::PetalParams;
-use crate::presets::{self, Library};
+use crate::presets::{self, Library, OldEditors};
 
 
 pub(crate) fn ensure(st: &mut EditorState) {
@@ -26,7 +26,7 @@ pub(crate) fn ensure(st: &mut EditorState) {
 pub fn preset_load(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, name: &str) {
     let data = st.library.as_ref().and_then(|l| l.get(name)).map(|p| (p.values.clone(), p.values_format));
     if let Some((values, fmt)) = data {
-        presets::apply(params, setter, &values, fmt);
+        presets::apply(params, setter, &values, fmt, &mut presets::Sent::default());
         st.current_preset = Some(name.to_string());
         st.recent.retain(|n| n != name);
         st.recent.insert(0, name.to_string());
@@ -87,7 +87,7 @@ pub(crate) fn preset_init(st: &mut EditorState, params: &Arc<PetalParams>, sette
 /// The dirty `*`: a preset is loaded and the live params have since diverged.
 pub fn is_dirty(st: &EditorState, params: &Arc<PetalParams>) -> bool {
     st.current_preset.is_some()
-        && st.loaded_snapshot.as_ref().map(|snap| !presets::matches(params, snap, presets::VALUES_FORMAT_PLAIN)).unwrap_or(false)
+        && st.loaded_snapshot.as_ref().map(|snap| !presets::matches(params, snap)).unwrap_or(false)
 }
 
 struct Row {

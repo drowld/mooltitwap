@@ -9,7 +9,7 @@
 use super::*;
 use crate::params::{DelayMode, DiffuseRouting};
 use crate::ui::theme::FAINT;
-use crate::presets::{self, Cross, Kind, Library, Preset, PresetSession, Time, VALUES_FORMAT_PLAIN};
+use crate::presets::{self, Cross, Kind, Library, Preset, PresetFacets, PresetSession, Sent, Time, VALUES_FORMAT_PLAIN};
 use std::collections::BTreeMap;
 
 const TXT: f32 = 13.0;
@@ -62,17 +62,16 @@ pub(super) struct Loaded {
 #[derive(Clone)]
 struct Base {
     values: BTreeMap<String, f32>,
-    fmt: u32,
 }
 
 impl Base {
     fn of(p: &Preset) -> Base {
-        Base { values: p.values.clone(), fmt: p.values_format }
+        Base { values: p.values.clone() }
     }
 
     /// Init: every param at its default.
     fn init() -> Base {
-        Base { values: BTreeMap::new(), fmt: VALUES_FORMAT_PLAIN }
+        Base { values: BTreeMap::new() }
     }
 }
 
@@ -104,11 +103,11 @@ const NOTES: &str = "ps_notes";
 #[derive(Default)]
 pub(crate) struct PresetUi {
     /// The library's folder and an old one to copy from once; None = the
-    /// user's own (`Library::open_default`). Tests and previews set their own.
+    /// user's own (`presets::open_default`). Tests and previews set their own.
     pub(super) dir: Option<(PathBuf, Option<PathBuf>)>,
-    /// The factory set when `dir` is set (tests); None = the binary's.
-    pub(super) factory: Option<Vec<Preset>>,
     pub(super) lib: Option<Library>,
+    /// What this editor last sent each param (a load sends only changes).
+    sent: Sent,
     /// None = Init.
     pub(super) loaded: Option<Loaded>,
     base: Option<Base>,
@@ -186,13 +185,14 @@ impl PresetUi {
             return;
         }
         let lib = match &self.dir {
-            Some((d, old)) => Library::open(d.clone(), old.clone(), self.factory.clone().unwrap_or_else(crate::factory::factory_presets)),
-            None => Library::open_default(),
+            Some((d, old)) => Library::open(d.clone(), old.as_slice()),
+            None => presets::open_default(),
         };
+        let (time, cross) = (presets::state_word(&lib, "time"), presets::state_word(&lib, "cross"));
         let st = &lib.state;
         self.coll = COLLS.iter().find(|c| c.2 == st.collection).map_or(Coll::All, |c| c.0);
-        self.time = Time::ALL.into_iter().find(|t| t.word() == st.time);
-        self.cross = Cross::ALL.into_iter().find(|c| c.word() == st.cross);
+        self.time = Time::ALL.into_iter().find(|t| t.word() == time);
+        self.cross = Cross::ALL.into_iter().find(|c| c.word() == cross);
         self.sort = if st.sort == "favourites" { Sort::FavFirst } else { Sort::Az };
         self.try_off = !st.try_on;
         self.lib = Some(lib);
@@ -207,9 +207,9 @@ impl PresetUi {
     }
 
     /// A library write's failure goes to the status line.
-    fn report(&mut self, r: Result<(), String>) {
+    fn report(&mut self, r: Result<(), presets::Error>) {
         if let Err(e) = r {
-            self.status = e;
+            self.status = e.to_string();
         }
     }
 
@@ -221,7 +221,7 @@ impl PresetUi {
     pub(super) fn load(&mut self, params: &PetalParams, setter: &ParamSetter, id: &str, keep: bool) {
         self.ensure();
         let Some(p) = self.lib().and_then(|l| l.get(id)).cloned() else { return };
-        presets::apply(params, setter, &p.values, p.values_format);
+        presets::apply(params, setter, &p.values, p.values_format, &mut self.sent);
         self.loaded = Some(Loaded { id: p.id(), name: p.name.clone(), kind: p.kind(), deleted: false });
         self.base = Some(Base::of(&p));
         self.edited_frame = None;
@@ -259,7 +259,7 @@ impl PresetUi {
     /// Back (§7.2): the snapshot restored exactly, the header included.
     pub(super) fn back(&mut self, params: &PetalParams, setter: &ParamSetter) {
         let Some(t) = self.trying.take() else { return };
-        presets::apply(params, setter, &t.values, VALUES_FORMAT_PLAIN);
+        presets::apply(params, setter, &t.values, VALUES_FORMAT_PLAIN, &mut self.sent);
         self.loaded = t.loaded;
         self.base = t.base;
         self.fallback = t.fallback;
@@ -272,7 +272,7 @@ impl PresetUi {
 
     /// Init (§7.10): every param at its default.
     pub(super) fn init(&mut self, params: &PetalParams, setter: &ParamSetter) {
-        presets::apply(params, setter, &BTreeMap::new(), VALUES_FORMAT_PLAIN);
+        presets::apply(params, setter, &BTreeMap::new(), VALUES_FORMAT_PLAIN, &mut self.sent);
         self.loaded = None;
         self.base = Some(Base::init());
         self.trying = None;
@@ -312,8 +312,8 @@ impl PresetUi {
     pub(super) fn update(&mut self, params: &PetalParams, frame: u64) -> bool {
         if self.edited_frame != Some(frame) {
             self.edited = match (&self.base, &self.loaded) {
-                (Some(b), _) => !presets::matches(params, &b.values, b.fmt),
-                (None, None) => !presets::matches(params, &BTreeMap::new(), VALUES_FORMAT_PLAIN),
+                (Some(b), _) => !presets::matches(params, &b.values),
+                (None, None) => !presets::matches(params, &BTreeMap::new()),
                 (None, Some(_)) => self.fallback,
             };
             self.edited_frame = Some(frame);
@@ -507,7 +507,7 @@ impl PresetUi {
         }
         let Some(l) = self.loaded.clone() else { return };
         let Some(lib) = self.lib.as_mut() else { return };
-        match lib.save(&l.id, presets::capture(params)) {
+        match lib.save(&l.id, presets::sound(params)) {
             Ok(()) => {
                 self.base = lib.get(&l.id).map(Base::of);
                 self.edited_frame = None;
@@ -515,7 +515,7 @@ impl PresetUi {
                 self.keep();
                 self.status = format!("saved “{}”", l.name);
             }
-            Err(e) => self.status = e,
+            Err(e) => self.status = e.to_string(),
         }
     }
 
@@ -557,7 +557,7 @@ impl PresetUi {
         let from = self.loaded.as_ref().filter(|l| !l.deleted).map(|l| l.id.clone());
         let Some(lib) = self.lib.as_mut() else { return };
         match edit {
-            NameEdit::SaveAs => match lib.save_as(&self.name_buf, presets::capture(params), from.as_deref()) {
+            NameEdit::SaveAs => match lib.save_as(&self.name_buf, presets::sound(params), from.as_deref()) {
                 Ok(id) => {
                     let p = lib.get(&id).cloned().expect("just saved");
                     self.loaded = Some(Loaded { id: id.clone(), name: p.name.clone(), kind: Kind::User, deleted: false });
@@ -571,7 +571,7 @@ impl PresetUi {
                     self.status = format!("saved “{}” to User", p.name);
                 }
                 Err(e) => {
-                    self.name_err = e;
+                    self.name_err = e.to_string();
                     self.focus = Some(NAME);
                 }
             },
@@ -598,7 +598,7 @@ impl PresetUi {
                     self.status = format!("renamed to “{name}”");
                 }
                 Err(e) => {
-                    self.name_err = e;
+                    self.name_err = e.to_string();
                     self.focus = Some(NAME);
                 }
             },
@@ -621,7 +621,7 @@ impl PresetUi {
                 self.begin_rename();
                 self.status = format!("made “{name}” in User — name it");
             }
-            Err(e) => self.status = e,
+            Err(e) => self.status = e.to_string(),
         }
     }
 
@@ -657,7 +657,7 @@ impl PresetUi {
                 self.notes = None;
                 self.status = format!("deleted “{name}” — the current sound is unchanged");
             }
-            Err(e) => self.status = e,
+            Err(e) => self.status = e.to_string(),
         }
     }
 
@@ -678,8 +678,8 @@ impl PresetUi {
         let Some(lib) = self.lib.as_mut() else { return };
         let r = lib.update_state(|s| {
             s.collection = coll;
-            s.time = time;
-            s.cross = cross;
+            s.extra.insert("time".into(), time.into());
+            s.extra.insert("cross".into(), cross.into());
             s.sort = sort;
             s.try_on = try_on;
         });
@@ -793,7 +793,7 @@ impl PresetUi {
         for p in paths.iter().filter(|p| p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("json"))) {
             match lib.import(p) {
                 Ok(name) => done.push(name),
-                Err(e) => err = Some(e),
+                Err(e) => err = Some(e.to_string()),
             }
         }
         if let Some(last) = done.last() {
@@ -826,7 +826,7 @@ impl PresetUi {
         }
         self.status = match lib.export(&p.id(), &path) {
             Ok(()) => format!("exported “{}” to {}", p.name, home_short(&path)),
-            Err(e) => e,
+            Err(e) => e.to_string(),
         };
     }
 
@@ -838,7 +838,7 @@ impl PresetUi {
             }
         }
         let probe = self.probe.get_or_insert_with(|| Box::new(PetalParams::default()));
-        presets::load_into(probe, &p.values, p.values_format);
+        presets::load_into(probe, &p.values);
         let lines = summary_lines(probe);
         self.summary = Some((p.id(), lines.clone()));
         lines
@@ -1969,10 +1969,11 @@ fn repeats_word(n: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presets::tests::{test_factory, TempDir, TestGui};
+    use crate::presets::tests::{TempDir, TestGui};
 
+    /// The binary's factory bank, user presets in a folder of the test's own.
     fn ui_in(t: &TempDir) -> PresetUi {
-        PresetUi { dir: Some((t.0.clone(), None)), factory: Some(test_factory()), ..Default::default() }
+        PresetUi { dir: Some((t.0.clone(), None)), ..Default::default() }
     }
 
     /// Try snapshots the whole state, edits included; Back restores it
@@ -2073,11 +2074,11 @@ mod tests {
         let setter = ParamSetter::new(&TestGui);
         let mut pu = ui_in(&t);
         pu.step(&p, &setter, 1);
-        assert_eq!(pu.loaded.as_ref().unwrap().id, "dark repeats", "A–Z first");
+        assert_eq!(pu.loaded.as_ref().unwrap().id, "bloom hall", "A–Z first");
         pu.step(&p, &setter, 1);
-        assert_eq!(pu.loaded.as_ref().unwrap().id, "ping garden");
+        assert_eq!(pu.loaded.as_ref().unwrap().id, "dark repeats");
         pu.track(true);
-        pu.tags = vec!["rhythmic".into()];
+        pu.tags = vec!["rhythmic".into(), "motion".into()];
         pu.step(&p, &setter, 1);
         assert_eq!(pu.loaded.as_ref().unwrap().id, "ping garden", "only one in the filtered list");
     }

@@ -5,7 +5,13 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.47.0 · 2026-11-01 · branch `ui/scope-first`
+## ⭐ CURRENT STATE — v2.48.0 · 2026-11-01 · branch `ui/scope-first`
+
+**v2.48.0 (later the same day, not committed or installed):** presets moved onto the
+shared nice-plug crate `softsystems-presets` (SOF-205; DECISIONS has the parity check
+and what changed by design). 106 unit tests pass; the sheet checked on screen against a
+scratch folder. Afterecho keeps its own grid-aware edited check until the crate gets one
+(asked the hub). The v2.47 notes below still hold.
 
 **Worked on (2026-11-01):** the owner's notes on v2.45 → v2.46 (Detune Range 1–12 st,
 In/Out with 0 dB at the top, full-page preset sheet, accent ring no longer cropped;
