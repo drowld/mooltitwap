@@ -1524,7 +1524,7 @@ fn draw_tap_content(ui: &mut egui::Ui, params: &Arc<PetalParams>, setter: &Param
                 epo::knob_ex(ui, setter, &params.diffuse_size, "SIZE", theme::KNOB_DIAM_INSPECT, acc, false, None, Some(&size_str));
             });
             ui.add_space(theme::SP_MD * s);
-            epo::hint(ui, "8× Schroeder allpass · smaller SIZE = tighter & brighter");
+            epo::hint(ui, "6 short allpasses · smaller SIZE = tighter");
         }
     }
     // Slider ergonomics are GLOBAL — restore so the footer/XFEED sliders keep

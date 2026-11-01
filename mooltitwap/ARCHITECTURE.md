@@ -1,6 +1,6 @@
 # mooltitwap (Afterecho) — Architecture
 
-_As of v2.45.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
+_As of v2.47.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
 
 ## Overview
 16-tap multitap delay (VST3 + CLAP + standalone on desktop, AUv3 on iPad) on **nice-plug**
@@ -11,7 +11,7 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
 ## Data flow (`lib.rs::process`, per sample)
 1. Encode channel mode (Stereo / M-S / Mono) → In gain → input colour (Diffuse/Tape/Saturate on In).
 2. Ducking's and Motion's followers read the raw dry input.
-3. Feedback: read the main lines at the cycle (Auto = cluster span, floored at Euclid's
+3. Feedback: read the main lines at the cycle, less Diffuse's delay when it's in a loop (Auto = cluster span, floored at Euclid's
    whole pattern; Manual = its own time). Two loops share it by Ping's share: the main
    loop (L/R) and the bounce (`ping_odd`/`ping_even`, mono, odd/even repeats), crossfaded.
    Repeats as a count (v2.42) replaces the loop's read with N copies read from `dry_l/r`
@@ -39,11 +39,13 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
   and the tap targets' maths. `matrix.rs` — the Motion matrix (LFO 1–3, Follow, Step 1–2 × targets, sums,
   whole-echo conversions, Step). `migrate.rs` — old sessions (`filter_state`) and presets
   into v2.42's params (Repeats ∞, v2.39 Motion → the matrix). `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
-- `detune.rs` — per-tap detune (v2.45): `Wsola` (Light: grains, a tap's sides spliced
-  together) and `Pv` (Clean: phase vocoder, frames from the tap's lines); the engine
-  crossfades plain ↔ shifted and Light ↔ Clean per tap (`TapLines`).
+- `detune.rs` — per-tap detune (v2.45; a % of Detune Range, 1–12 st, v2.46): `Wsola`
+  (Light: grains, a tap's sides spliced together) and `Pv` (Clean: phase vocoder, frames
+  from the tap's lines), each with a `min_delay`; the engine crossfades plain ↔ shifted
+  and Light ↔ Clean per tap (`TapLines`).
 - `delay.rs` — `DelayLine` (Lagrange read; `read_before_write` for the loops' and Repeats' reads, v2.44),
-  `TapReader` (Repitch / Fade / Jump), `SlewedTime`. `diffusion.rs`, `tape.rs` (RE-DEEMER port).
+  `TapReader` (Repitch / Fade / Jump), `SlewedTime`. `diffusion.rs` (v2.47: six short drifting
+  allpasses, L≠R; the loops read early by its `bulk` delay), `tape.rs` (RE-DEEMER port).
 - `presets.rs` — the Soft Systems preset library (Vortex's port): the file (format 2,
   plain discrete values, Time/Cross facets), `Library` (factory from the binary + user
   files in `Soft Systems/Afterecho/Presets`, `library.json`, one-time copy from
@@ -57,7 +59,7 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
   matrix, across the whole lane; Tap), the Time card (Time | Pattern, Euclid ring,
   Swing), Colour, Output (Duck), Settings.
   `gui_scope/preset_sheet.rs` — the header's preset box and the preset sheet, drawn in
-  place of the field and the lane while open (state in `PresetUi`: Try, edited, session).
+  place of everything under the header while open (v2.46; state in `PresetUi`: Try, edited, session).
 
 ## Layout and scaling
 Two page shapes, absolute layouts in logical px: Wide 1366×660 and Tall 1050×780

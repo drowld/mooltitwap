@@ -1012,7 +1012,9 @@ struct Geo {
 
 impl Geo {
     fn new(l: &Layout, tall: bool, finger: bool) -> Geo {
-        let (x, y, w) = (l.picture.0, l.picture.1, l.picture.2);
+        // v2.46: the whole page under the header, the cards' column too
+        let (x, y) = (l.picture.0, l.picture.1);
+        let w = l.right_x + l.right_w - x;
         let h = l.lane.1 + l.lane.3 - y;
         let (lx, right) = (x + 12.0, x + w - 12.0);
         let col_w = if tall { 150.0 } else { 180.0 };
@@ -1023,7 +1025,7 @@ impl Geo {
             let iy = foot_y - 16.0 - INSP_TALL;
             (list_x, iy, right - list_x, right - list_x, iy - 10.0)
         } else {
-            let iw = 208.0;
+            let iw = (w * 0.23).clamp(208.0, 300.0);
             (right - iw, top, iw, right - iw - 14.0 - list_x, foot_y - 14.0)
         };
         Geo {

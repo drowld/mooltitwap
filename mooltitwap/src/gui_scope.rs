@@ -489,8 +489,8 @@ fn page(
 ) {
     header(ui, o, s, l, params, setter, st);
     st.palette_top = o.y + (g::HEAD_Y + g::HEAD_H + 6.0) * s;
-    // The preset browser takes the field's and the lane's place, so the
-    // cards on the right stay in view and move while you try presets.
+    // The preset browser covers the whole page under the header (v2.46;
+    // before, the cards stayed in view beside it).
     st.scope.presets.track(st.preset_open);
     let presets_open = st.preset_open;
     if presets_open {
@@ -499,10 +499,10 @@ fn page(
     } else {
         picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
         lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
+        time_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
+        colour_card(ui, o, s, l, params, setter, &mut st.scope);
+        output_card(ui, o, s, l, params, setter, &mut st.scope.focus);
     }
-    time_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
-    colour_card(ui, o, s, l, params, setter, &mut st.scope);
-    output_card(ui, o, s, l, params, setter, &mut st.scope.focus);
     settings_menu(ui, o, s, l, params, setter, &mut st.scope);
     if !presets_open {
         taps_menu(ui, s, params, setter, &mut st.scope);
@@ -984,7 +984,7 @@ impl Axis {
             Axis::Cutoff => 1.0 - (v / 20.0).max(1.0).ln() / 1000f32.ln(),
             Axis::Reso => 1.0 - (v / 0.1).max(1.0).ln() / 120f32.ln(),
             Axis::Type | Axis::Slope => 1.0 - v / 2.0,
-            Axis::Detune => 0.5 - v / (2.0 * crate::detune::MAX_CENTS),
+            Axis::Detune => 0.5 - v / 200.0,
         };
         n.clamp(0.0, 1.0)
     }
@@ -997,7 +997,7 @@ impl Axis {
             Axis::Cutoff => 20.0 * 1000f32.powf(1.0 - n),
             Axis::Reso => 0.1 * 120f32.powf(1.0 - n),
             Axis::Type | Axis::Slope => ((1.0 - n) * 2.0).round(),
-            Axis::Detune => ((0.5 - n) * 2.0 * crate::detune::MAX_CENTS).round(),
+            Axis::Detune => ((0.5 - n) * 2000.0).round() / 10.0,
         }
     }
 
@@ -1021,23 +1021,23 @@ impl Axis {
         }
     }
 
-    fn text(self, v: f32, ch: ChannelMode) -> String {
+    fn text(self, v: f32, lb: Labels) -> String {
         match self {
-            Axis::Pan => pan_text(v, ch),
+            Axis::Pan => pan_text(v, lb.ch),
             Axis::Gain => db_text(v),
             Axis::Cutoff => hz_text(v),
             Axis::Reso => format!("Q {v:.1}"),
             Axis::Type => type_name(v).to_string(),
             Axis::Slope => format!("{} dB/oct", slope_name(v)),
-            Axis::Detune => cents_text(v),
+            Axis::Detune => detune_text(v, lb.det_range),
         }
     }
 
     /// The short form above a bar: no unit for gain, the filter type for cutoff.
-    fn short(self, tap: &TapParams, ch: ChannelMode) -> String {
+    fn short(self, tap: &TapParams, lb: Labels) -> String {
         let v = self.get(tap);
         match self {
-            Axis::Pan => pan_text(v, ch),
+            Axis::Pan => pan_text(v, lb.ch),
             Axis::Gain => db_text(v).trim_end_matches(" dB").to_string(),
             Axis::Cutoff => {
                 let ty = type_name(enum_index(&tap.filter_type, 3) as f32);
@@ -1046,24 +1046,37 @@ impl Axis {
             Axis::Reso => format!("{v:.1}"),
             Axis::Type => type_name(v).to_string(),
             Axis::Slope => slope_name(v).to_string(),
-            Axis::Detune => cents_text(v).trim_end_matches(" ct").to_string(),
+            Axis::Detune => unitless(detune_text(v, lb.det_range)),
         }
     }
 
     /// Gridlines as (norm, label).
-    fn grid(self, ch: ChannelMode) -> Vec<(f32, String)> {
+    fn grid(self, lb: Labels) -> Vec<(f32, String)> {
         let at = |pts: &[(f32, &str)]| -> Vec<(f32, String)> {
             pts.iter().map(|&(v, t)| (self.norm(v), t.to_string())).collect()
         };
         match self {
-            Axis::Pan if ch == ChannelMode::MidSide => at(&[(-1.0, "Mid"), (0.0, "M·S"), (1.0, "Side")]),
+            Axis::Pan if lb.ch == ChannelMode::MidSide => at(&[(-1.0, "Mid"), (0.0, "M·S"), (1.0, "Side")]),
             Axis::Pan => at(&[(-1.0, "L"), (0.0, "C"), (1.0, "R")]),
             Axis::Gain => at(&[(6.0, "+6"), (0.0, "0 dB"), (-12.0, "−12"), (-24.0, "−24"), (-48.0, "−48")]),
             Axis::Cutoff => at(&[(20000.0, "20k"), (5000.0, "5k"), (1000.0, "1k"), (200.0, "200"), (50.0, "50")]),
             Axis::Reso => at(&[(12.0, "Q 12"), (4.0, "4"), (1.2, "1.2"), (0.4, "0.4"), (0.1, "0.1")]),
             Axis::Type => at(&[(2.0, "HP"), (1.0, "BP"), (0.0, "LP")]),
             Axis::Slope => at(&[(2.0, "48 dB"), (1.0, "24"), (0.0, "12")]),
-            Axis::Detune => at(&[(100.0, "+100 ct"), (50.0, "+50"), (0.0, "0"), (-50.0, "−50"), (-100.0, "−100")]),
+            // in cents at a one-semitone range (±100 ct), else in semitones
+            Axis::Detune => [100.0, 50.0, 0.0, -50.0, -100.0]
+                .into_iter()
+                .map(|v| {
+                    let t = if lb.det_range < 2.0 {
+                        let c = (v * lb.det_range).round() as i32;
+                        let sign = if c > 0 { "+" } else if c < 0 { "−" } else { "" };
+                        format!("{sign}{} ct", c.abs())
+                    } else {
+                        detune_text(v, lb.det_range)
+                    };
+                    (self.norm(v), if v == 100.0 { t } else { unitless(t) })
+                })
+                .collect(),
         }
     }
 }
@@ -1082,13 +1095,37 @@ fn slope_of(v: f32) -> FilterSlope {
     FilterSlope::from_index(v.round().clamp(0.0, 2.0) as usize)
 }
 
-/// Detune in cents: "+25 ct", "0 ct", "−50 ct".
-fn cents_text(v: f32) -> String {
-    let c = v.round() as i32;
-    match c {
-        0 => "0 ct".into(),
-        c if c > 0 => format!("+{c} ct"),
-        c => format!("−{} ct", -c),
+/// A tap's Detune (% of the range, `range` semitones) as heard: cents
+/// under a semitone, "+25 ct", "0 ct", "−50 ct"; semitones from one up,
+/// "+1 st", "−7.5 st", "+12 st".
+fn detune_text(pct: f32, range: f32) -> String {
+    let c = (pct * range).round() as i32;
+    let sign = if c > 0 { "+" } else if c < 0 { "−" } else { "" };
+    let a = c.abs();
+    if a < 100 {
+        format!("{sign}{a} ct")
+    } else {
+        let st = format!("{:.2}", a as f32 / 100.0);
+        format!("{sign}{} st", st.trim_end_matches('0').trim_end_matches('.'))
+    }
+}
+
+/// A label without its unit, for the bars and the gridlines under the top one.
+fn unitless(t: String) -> String {
+    t.trim_end_matches(" ct").trim_end_matches(" st").to_string()
+}
+
+/// What an axis's labels need besides the value.
+#[derive(Clone, Copy)]
+struct Labels {
+    ch: ChannelMode,
+    /// Detune Range, semitones.
+    det_range: f32,
+}
+
+impl Labels {
+    fn of(params: &PetalParams) -> Labels {
+        Labels { ch: params.channel_mode.value(), det_range: params.detune_range.value() as f32 }
     }
 }
 
@@ -1284,8 +1321,8 @@ fn time_grid(p: &egui::Painter, plot: Rect, range: f32, tempo: f32, is_sync: boo
 }
 
 /// The picked axis's gridlines, labelled left of the plot.
-fn axis_grid(p: &egui::Painter, plot: Rect, axis: Axis, ch: ChannelMode, s: f32) {
-    for (n, t) in axis.grid(ch) {
+fn axis_grid(p: &egui::Painter, plot: Rect, axis: Axis, lb: Labels, s: f32) {
+    for (n, t) in axis.grid(lb) {
         let y = plot.top() + n * plot.height();
         p.line_segment([Pos2::new(plot.left(), y), Pos2::new(plot.right(), y)], Stroke::new(1.0 * s, theme::line()));
         text(p, Pos2::new(plot.left() - 12.0 * s, y), Align2::RIGHT_CENTER, &t, 10.5, s, SOFT());
@@ -1392,7 +1429,6 @@ fn field(
     sc: &mut ScopeState, viz: &VizData, axis: Axis, tempo: f32,
 ) {
     let p = ui.painter().clone();
-    let ch = params.channel_mode.value();
     let is_sync = params.sync_mode.value() == SyncMode::Sync;
     // The view fits the pattern; while a dot is dragged it holds still, so the
     // dot stays under the pointer even as the pattern grows.
@@ -1424,7 +1460,7 @@ fn field(
             p.line_segment([Pos2::new(plot.left(), yr), Pos2::new(plot.right(), yr)], Stroke::new(0.5 * s, theme::line()));
         }
     } else {
-        axis_grid(&p, plot, axis, ch, s);
+        axis_grid(&p, plot, axis, Labels::of(params), s);
     }
     // a dot's height: its value, or its own row in the Time view
     let y_of = |i: usize, v: f32| {
@@ -1565,7 +1601,7 @@ fn field(
         // The value goes above the dot (below near the top edge), not beside it,
         // so it never covers the neighbouring taps in a tight cluster.
         if !time_view {
-            let ytxt = format!("{} {}  ↕", axis.name(), axis.text(axis.get(&params.taps[i]), ch));
+            let ytxt = format!("{} {}  ↕", axis.name(), axis.text(axis.get(&params.taps[i]), Labels::of(params)));
             let (at, align) = if c.y - rad - 34.0 * s > plot.top() {
                 (Pos2::new(c.x, c.y - rad - 8.0 * s), Align2::CENTER_BOTTOM)
             } else {
@@ -1591,8 +1627,7 @@ fn bars(
     sc: &mut ScopeState, axis: Axis,
 ) {
     let p = ui.painter().clone();
-    let ch = params.channel_mode.value();
-    axis_grid(&p, plot, axis, ch, s);
+    axis_grid(&p, plot, axis, Labels::of(params), s);
     let n = n_active(params);
     let slot = plot.width() / n as f32;
     let bw = (slot * 0.46).clamp(5.0 * s, 36.0 * s);
@@ -1658,7 +1693,7 @@ fn bars(
             p.circle_filled(Pos2::new(cx, ym), 3.5 * s, INK());
         }
         if show_all || sel {
-            mono(&p, Pos2::new(cx, plot.top() - 10.0 * s), Align2::CENTER_CENTER, &axis.short(tap, ch), 11.0, s, if sel { INK() } else { INK2() });
+            mono(&p, Pos2::new(cx, plot.top() - 10.0 * s), Align2::CENTER_CENTER, &axis.short(tap, Labels::of(params)), 11.0, s, if sel { INK() } else { INK2() });
         }
 
         // the number under the bar: tap it to select the tap, tap again
@@ -2243,8 +2278,11 @@ fn tap_panel(
     knob_cell(ui, c(0, 0), s, setter, &tap.time_offset, &id("time_offset"), "Time", true, true, Some(time), focus);
     knob_cell(ui, c(0, 1), s, setter, &tap.pan, &id("pan"), "Pan", true, ch != ChannelMode::Mono, Some(pan_text(tap.pan.value(), ch)), focus);
     knob_cell(ui, c(0, 2), s, setter, &tap.gain_db, &id("gain_db"), "Gain", false, true, Some(db_text(tap.gain_db.value())), focus);
-    knob_cell(ui, c(0, 3), s, setter, &tap.detune, &id("tap_detune"), "Detune", true, true, Some(cents_text(tap.detune.value())), focus);
-    toggle_cell(ui, c(0, 4), s, setter, &tap.active, &id("active"), "Tap", "On", "Muted", focus);
+    let det = detune_text(tap.detune.value(), params.detune_range.value() as f32);
+    knob_cell(ui, c(0, 3), s, setter, &tap.detune, &id("tap_detune"), "Detune", true, true, Some(det), focus);
+    // the range is every tap's (v2.46)
+    stepper_cell(ui, c(0, 4), s, setter, &params.detune_range, "detune_range", "Range", "all taps", focus);
+    toggle_cell(ui, c(1, 4), s, setter, &tap.active, &id("active"), "Tap", "On", "Muted", focus);
     enum_cell(ui, c(1, 0), s, setter, &tap.filter_type, &id("tap_filter_type"), "Filter", &["LP", "BP", "HP"], true, focus);
     knob_cell(ui, c(1, 1), s, setter, &tap.filter_cutoff, &id("tap_filter_cutoff"), "Cutoff", false, true, Some(hz_text(tap.filter_cutoff.value())), focus);
     knob_cell(ui, c(1, 2), s, setter, &tap.filter_q, &id("tap_filter_q"), "Reso", false, true, Some(format!("Q {:.1}", tap.filter_q.value())), focus);
@@ -2881,7 +2919,7 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
             if d.released {
                 sc.pat_pin = None;
             }
-            let end = |u: f32| axis.text(axis.value(axis.u_norm(u)), ch);
+            let end = |u: f32| axis.text(axis.value(axis.u_norm(u)), Labels::of(params));
             mono(&p, at(16.0, 130.0, 150.0, 16.0).left_center(), Align2::LEFT_CENTER, &end(range[0]), 12.0, s, INK2());
             mono(&p, at(164.0, 130.0, 150.0, 16.0).right_center(), Align2::RIGHT_CENTER, &end(range[1]), 12.0, s, INK2());
 
@@ -2965,14 +3003,16 @@ fn settings_menu(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Pe
                         });
                         menu_row(ui, "Accent", s, |ui| {
                             ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 5.0 * s;
+                                // Each swatch's cell holds its ring (v2.46): a ring
+                                // drawn past the cell was clipped square.
+                                ui.spacing_mut().item_spacing.x = 0.0;
                                 for i in std::iter::once(theme::ACCENTS - 1).chain(0..theme::ACCENTS - 1) {
-                                    let sz = 18.0 * s;
+                                    let sz = 24.0 * s;
                                     let (rr, resp) = ui.allocate_exact_size(Vec2::splat(sz), Sense::click());
-                                    let p = ui.painter_at(rr.expand(2.0 * s));
-                                    p.circle_filled(rr.center(), sz * 0.5, theme::accent_swatch(i as usize));
+                                    let p = ui.painter();
+                                    p.circle_filled(rr.center(), 9.0 * s, theme::accent_swatch(i as usize));
                                     if sc.look.accent == i {
-                                        p.circle_stroke(rr.center(), sz * 0.5 + 1.5 * s, Stroke::new(1.5 * s, INK()));
+                                        p.circle_stroke(rr.center(), 10.5 * s, Stroke::new(1.5 * s, INK()));
                                     }
                                     if epo::tap_or_click(ui, &resp.on_hover_text(theme::ACCENT_NAMES[i as usize])) {
                                         sc.look.accent = i;
@@ -3228,7 +3268,23 @@ mod tests {
             assert_eq!(Axis::Type.value(Axis::Type.norm(ty)), ty);
             assert_eq!(type_of(ty) as usize, ty as usize);
         }
-        assert_eq!(Axis::Type.text(2.0, ChannelMode::Stereo), "HP");
+        assert_eq!(Axis::Type.text(2.0, Labels { ch: ChannelMode::Stereo, det_range: 1.0 }), "HP");
+    }
+
+    #[test]
+    fn detune_reads_in_cents_then_semitones() {
+        assert_eq!(detune_text(25.0, 1.0), "+25 ct");
+        assert_eq!(detune_text(-100.0, 1.0), "−1 st");
+        assert_eq!(detune_text(0.0, 12.0), "0 ct");
+        assert_eq!(detune_text(100.0, 12.0), "+12 st");
+        assert_eq!(detune_text(-62.5, 12.0), "−7.5 st");
+        assert_eq!(detune_text(4.0, 12.0), "+48 ct");
+        let lb = Labels { ch: ChannelMode::Stereo, det_range: 7.0 };
+        assert_eq!(Axis::Detune.grid(lb)[0].1, "+7 st");
+        assert_eq!(Axis::Detune.grid(lb)[1].1, "+3.5");
+        let lb = Labels { ch: ChannelMode::Stereo, det_range: 1.0 };
+        let g: Vec<String> = Axis::Detune.grid(lb).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(g, ["+100 ct", "+50", "0", "−50", "−100"]);
     }
 }
 

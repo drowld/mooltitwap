@@ -409,8 +409,8 @@ pub enum FilterSlope {
 /// How the global Crossfeed knob blends between channels.
 /// - Mix: post-tap stereo blend (good for centering / widening).
 /// - PingPong: crossfeed lives in the feedback path → echoes alternate L↔R.
-/// - Diffuse: feedback runs through a cascade of allpass filters
-///   (ChowMatrix-style), smearing echoes into a reverb-like tail.
+/// - Diffuse: feedback runs through Diffuse's chain (`diffusion.rs`), Cross
+///   its density, smearing echoes into a reverb-like tail.
 /// Where in the signal path the DIFFUSE tab's diffuser is inserted.
 /// - `Input`: applied to the dry input before it enters the delay buffer.
 ///   Each tap reads pre-diffused signal, so the cluster sounds layered.
@@ -472,6 +472,10 @@ pub enum CrossfeedMode {
     #[id = "diffuse"]
     Diffuse,
 }
+
+/// In and Out: −24…+12 dB with 0 dB at the knob's top (v2.46), each half
+/// linear in dB, so an untouched knob shows no fill.
+const GAIN_RANGE: FloatRange = FloatRange::SymmetricalSkewed { min: -24.0, max: 12.0, factor: 1.0, center: 0.0 };
 
 #[derive(Params)]
 pub struct PetalParams {
@@ -542,6 +546,9 @@ pub struct PetalParams {
     /// vocoder, about 3× the CPU; taps under ~90 ms use Light).
     #[id = "detune_quality"]
     pub detune_quality: EnumParam<DetuneQuality>,
+    /// What a tap's Detune at ±100 % means, in semitones (v2.46).
+    #[id = "detune_range"]
+    pub detune_range: IntParam,
 
     #[id = "channel_mode"]
     pub channel_mode: EnumParam<ChannelMode>,
@@ -587,17 +594,17 @@ pub struct PetalParams {
     pub crossfeed_mode: EnumParam<CrossfeedMode>,
 
     // ---- Output diffusion ----
-    /// Wet-path allpass cascade depth [0, 1].  0 = bypass, 1 = full 64 stages.
-    /// Smears each tap's transients into a diffuse, reverb-like bloom without
-    /// altering the frequency response. Runs after the tap mix, before dry/wet.
+    /// Diffuse's density [0, 1]: its allpasses' gain (v2.47, `diffusion.rs`).
+    /// 0 = off on In and Out (the chain fades in over the first 20 %), a plain
+    /// delay the loops take back on FB. Smears each repeat into a wide wash
+    /// without altering the frequency response.
     #[id = "diffuse_amount"]
     pub diffuse_amount: FloatParam,
     /// Where the DIFFUSE tab's effect is inserted into the signal path.
     #[id = "diffuse_routing"]
     pub diffuse_routing: EnumParam<DiffuseRouting>,
-    /// Scales the Schroeder allpass stage delays. 1.0 = nominal 12–55 ms;
-    /// 0.25 = tight & bright (less low-frequency phase smear → less "muffled");
-    /// 2.0 = lush, plate-like.
+    /// Scales the six allpass delays (1.0 = 1.3–11 ms, ~31 ms in all;
+    /// 0.25 tight, 2.0 long). Glides, so turning it doesn't click.
     #[id = "diffuse_size"]
     pub diffuse_size: FloatParam,
 
@@ -827,11 +834,13 @@ impl Default for TapParams {
             .with_value_to_string(Arc::new(|v| format!("{:.1}", v)))
             .with_smoother(SmoothingStyle::Logarithmic(30.0)),
             filter_slope: EnumParam::new("Tap Slope", FilterSlope::Db12),
-            detune: FloatParam::new("Tap Detune", 0.0, FloatRange::Linear { min: -crate::detune::MAX_CENTS, max: crate::detune::MAX_CENTS })
-                .with_unit(" ct")
-                .with_step_size(1.0)
-                .with_value_to_string(Arc::new(|v| if v.abs() < 0.5 { "0".into() } else { format!("{v:+.0}") }))
-                .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches("ct").trim().parse().ok())),
+            // % of Detune Range (v2.46; v2.45 had cents at a fixed ±100, the
+            // same at the default range of 1 semitone)
+            detune: FloatParam::new("Tap Detune", 0.0, FloatRange::Linear { min: -100.0, max: 100.0 })
+                .with_unit(" %")
+                .with_step_size(0.1)
+                .with_value_to_string(Arc::new(|v| if v.abs() < 0.05 { "0".into() } else { format!("{v:+.1}") }))
+                .with_string_to_value(Arc::new(|s| s.trim().trim_end_matches('%').trim().parse().ok())),
         }
     }
 }
@@ -888,6 +897,9 @@ impl Default for PetalParams {
             delay_mode: EnumParam::new("Delay Mode", DelayMode::Repitch),
             tap_snap: BoolParam::new("Snap", true),
             detune_quality: EnumParam::new("Detune Quality", DetuneQuality::Light),
+            detune_range: IntParam::new("Detune Range", 1, IntRange::Linear { min: 1, max: crate::detune::MAX_SEMITONES })
+                .with_value_to_string(Arc::new(|v| format!("{v} st")))
+                .with_string_to_value(Arc::new(|s| s.trim().trim_start_matches('±').trim_end_matches("st").trim().parse().ok())),
             tap_grid: IntParam::new("Snap Grid", 1, IntRange::Linear { min: 1, max: 4 })
                 .with_value_to_string(Arc::new(|v| if v <= 1 { "1".into() } else { format!("1/{v}") })),
 
@@ -1034,7 +1046,7 @@ impl Default for PetalParams {
             input_gain: FloatParam::new(
                 "Input Gain",
                 0.0,
-                FloatRange::Linear { min: -24.0, max: 12.0 },
+                GAIN_RANGE,
             )
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1))
@@ -1052,7 +1064,7 @@ impl Default for PetalParams {
             output_gain: FloatParam::new(
                 "Output Gain",
                 0.0,
-                FloatRange::Linear { min: -24.0, max: 12.0 },
+                GAIN_RANGE,
             )
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1))

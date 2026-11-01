@@ -105,6 +105,13 @@ impl DelayLine {
         }
         self.read(delay_samples - 1.0)
     }
+
+    /// `read_before_write` at a whole number of samples (≥ 1), without the
+    /// interpolation: Diffuse's chain reads 24 of these a sample.
+    #[inline]
+    pub fn back(&self, samples: usize) -> f32 {
+        self.buffer[(self.write_idx + self.capacity - samples) & (self.capacity - 1)]
+    }
 }
 
 /// Tests only: read the way v2.43 and before did, for before/after renders.

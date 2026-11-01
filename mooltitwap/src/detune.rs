@@ -1,4 +1,5 @@
-//! Per-tap detune (v2.45): a tap can sound up to a semitone up or down. The
+//! Per-tap detune (v2.45): a tap can sound up to 12 semitones up or down
+//! (Detune Range, v2.46; a semitone in v2.45). The
 //! shift happens inside the tap's read of the delay line, so the tap time
 //! absorbs whatever the shifter needs to look back, and the repeats keep the
 //! tap's own detune (it doesn't stack pass after pass).
@@ -19,8 +20,8 @@ use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use std::sync::Arc;
 
-/// Detune range either way, in cents.
-pub const MAX_CENTS: f32 = 100.0;
+/// The widest Detune Range, in semitones either way (v2.46).
+pub const MAX_SEMITONES: i32 = 12;
 
 const GRAIN_MS: f32 = 80.0;
 const SEARCH_MS: f32 = 10.0;
@@ -97,6 +98,11 @@ impl Wsola {
         }
     }
 
+    /// The shortest tap time (samples) at which it lands on time.
+    pub fn min_delay(&self, ratio: f32) -> f32 {
+        (ratio - 1.0).abs() * self.len as f32 * 0.5 + (self.search as usize + self.corr) as f32 + 4.0
+    }
+
     /// Start over (the next sample starts a grain on the tap time), with its
     /// grain cycle `phase` (0…1) in: taps start theirs at different moments,
     /// so their searches don't land in the same audio block.
@@ -111,6 +117,12 @@ impl Wsola {
     /// the sample `start − k` back (`start` back, then newer).
     #[inline]
     pub fn step(&mut self, nominal: f32, ratio: f32, src: &impl Fn(usize, &mut [f32])) -> Grains {
+        // A grain's read moves (ratio − 1) × its length while it plays, and
+        // the splice search needs its window and a matching reference behind
+        // it: a tap too short for that sounds a little late instead of
+        // reading ahead of the write (v2.46; ~21 ms at a semitone, ~41 ms
+        // at an octave).
+        let nominal = nominal.max(self.min_delay(ratio));
         if self.newest.is_none() {
             // just restarted: two grains already under way, as if it had been
             // running, so it starts at full level (Hann at overlap 2 sums to 1)
@@ -146,8 +158,10 @@ impl Wsola {
         // start where the grain's average delay is the tap time
         let d_ideal = nominal + (ratio - 1.0) * self.len as f32 * 0.5;
         let prev = self.newest.map(|i| self.grains[i]).filter(|g| g.active);
+        // the closest a grain may start: an upward one reads newer as it plays
+        let d_min = ((ratio - 1.0) * self.len as f32).max(0.0) + 2.0;
         let d0 = match prev {
-            Some(g) => g.d + self.best_jump(g.d, d_ideal - g.d, src),
+            Some(g) => g.d + self.best_jump(g.d, d_ideal - g.d, d_min, src),
             None => d_ideal,
         };
         let slot = (0..3).find(|&i| !self.grains[i].active).unwrap_or(0);
@@ -157,7 +171,7 @@ impl Wsola {
 
     /// The jump (delay samples, sub-sample) from the current grain to the new
     /// one that best matches waveforms, searched around `j_ideal`.
-    fn best_jump(&mut self, d_prev: f32, j_ideal: f32, src: &impl Fn(usize, &mut [f32])) -> f32 {
+    fn best_jump(&mut self, d_prev: f32, j_ideal: f32, d_min: f32, src: &impl Fn(usize, &mut [f32])) -> f32 {
         let c = self.corr as i64;
         let dp = d_prev.round() as i64;
         let ji = j_ideal.round() as i64;
@@ -166,7 +180,7 @@ impl Wsola {
         if dp < c + 4 {
             return j_ideal;
         }
-        let lo = (ji - self.search).max(c + 4 - dp);
+        let lo = (ji - self.search).max(c + 4 - dp).max(d_min.ceil() as i64 - dp);
         let hi = ji + self.search;
         if lo >= hi {
             return ji.max(lo) as f32;

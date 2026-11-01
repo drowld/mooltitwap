@@ -83,8 +83,10 @@ impl LogGlide {
 /// glides per sample).
 #[derive(Clone, Copy)]
 struct LoopColour {
-    /// Diffuse depth when routed to the feedback path, else 0.
-    diffuse: f32,
+    /// Diffuse's Amount while it's routed to the feedback path (the chain
+    /// stays in the loop even at 0, where it's just a delay the loop's read
+    /// takes back).
+    diffuse: Option<f32>,
     tape: bool,
     sat: bool,
     tone: ToneCoefs,
@@ -100,9 +102,9 @@ impl LoopColour {
     ) -> (f32, f32) {
         // DIFFUSE routing = Feedback: smear the recirculating signal so
         // each cluster repeat picks up more allpass density.
-        if self.diffuse > 1e-4 {
-            l = diff_l.process(l, self.diffuse);
-            r = diff_r.process(r, self.diffuse);
+        if let Some(a) = self.diffuse {
+            l = diff_l.process(l, a);
+            r = diff_r.process(r, a);
         }
         // DEGRADE routing = Feedback: generation loss — every repeat gets
         // re-crushed, like tape/BBD copies of copies. Before the loop
@@ -276,6 +278,11 @@ pub struct Mooltitwap {
     /// over 20 ms so changing the mode doesn't click.
     xf_mix: f32,
     xf_diffuse: f32,
+    /// Diffuse on In or Out is running (Amount above 0).
+    wet_diff_on: bool,
+    /// Cross → Diffuse's chain: its input's fade and how long it has run.
+    x_feed: f32,
+    x_warm: usize,
 
     // Per-tap filters. Each tap has up to 4 cascaded SVFs for slope control
     // (1 stage = 12 dB/oct, 2 = 24, 4 = 48). The "filter slope" enum picks
@@ -304,7 +311,7 @@ pub struct Mooltitwap {
     tap_svf_old_l: [[Svf; 4]; NUM_TAPS],
     tap_svf_old_r: [[Svf; 4]; NUM_TAPS],
 
-    // Crossfeed diffusion (ChowMatrix-style allpass cascade), one per channel.
+    // Cross → Diffuse's chain (`diffusion.rs`), one per side.
     // Used exclusively by CrossfeedMode::Diffuse (feedback path).
     diff_l: Diffusion,
     diff_r: Diffusion,
@@ -372,8 +379,8 @@ impl Default for Mooltitwap {
             ping_valid: usize::MAX,
             main_quiet: 0,
             bounce_quiet: usize::MAX,
-            diff_odd: Diffusion::new(),
-            diff_even: Diffusion::new(),
+            diff_odd: Diffusion::new(0),
+            diff_even: Diffusion::new(1),
             tape_bounce: TapeDegrade::new(48_000.0),
             tone_main: LoopTone::default(),
             tone_bounce: LoopTone::default(),
@@ -417,6 +424,9 @@ impl Default for Mooltitwap {
             ping_gain_mid: [[0.0; 4]; NUM_TAPS],
             xf_mix: 0.0,
             xf_diffuse: 0.0,
+            wet_diff_on: false,
+            x_feed: 0.0,
+            x_warm: 0,
             tap_svf_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
             tap_svf_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
             tap_gain_mid: [0.0; NUM_TAPS],
@@ -430,10 +440,10 @@ impl Default for Mooltitwap {
             tap_type_xf: [1.0; NUM_TAPS],
             tap_svf_old_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
             tap_svf_old_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
-            diff_l: Diffusion::new(),
-            diff_r: Diffusion::new(),
-            diff_wet_l: Diffusion::new(),
-            diff_wet_r: Diffusion::new(),
+            diff_l: Diffusion::new(0),
+            diff_r: Diffusion::new(1),
+            diff_wet_l: Diffusion::new(0),
+            diff_wet_r: Diffusion::new(1),
             tape: TapeDegrade::new(48_000.0),
             fb_env: 0.0,
             fb_time_slew: SlewedTime::new(),
@@ -504,6 +514,9 @@ impl Mooltitwap {
         ]
     }
 }
+
+/// `x_warm` once warm (anything past the 80 ms it waits).
+const X_WARM_DONE: usize = usize::MAX / 2;
 
 /// A tap's lines, as it pans and (in Ping) places them: read through its
 /// heads or a detuned tap's grains, L and R (`same`: one reader for both).
@@ -631,6 +644,7 @@ impl Plugin for Mooltitwap {
         self.ping_fresh = usize::MAX;
         self.xf_mix = 0.0;
         self.xf_diffuse = 0.0;
+        (self.x_feed, self.x_warm) = (0.0, 0);
         for st in self.tap_svf_l.iter_mut() { for s in st.iter_mut() { s.reset(); } }
         for st in self.tap_svf_r.iter_mut() { for s in st.iter_mut() { s.reset(); } }
         self.tap_type_xf = [1.0; NUM_TAPS];
@@ -638,6 +652,9 @@ impl Plugin for Mooltitwap {
         self.diff_r.reset();
         self.diff_wet_l.reset();
         self.diff_wet_r.reset();
+        self.diff_odd.reset();
+        self.diff_even.reset();
+        self.wet_diff_on = false;
         self.tape.reset();
         self.fb_env = 0.0;
         self.fb_time_slew.snap_to(0.0);
@@ -777,6 +794,12 @@ impl Plugin for Mooltitwap {
 
         self.prev_n_active = n_active;
         self.needs_initial_snap = false;
+        if initial_snap {
+            for d in [&mut self.diff_wet_l, &mut self.diff_wet_r, &mut self.diff_odd, &mut self.diff_even] {
+                d.set_size(p.diffuse_size.value());
+                d.snap_size();
+            }
+        }
 
         // Per-tap filter configuration. Each tap's filter is a cascade of
         // 1-4 SVF stages (1=12 dB/oct, 2=24, 4=48). All stages get the same
@@ -826,9 +849,11 @@ impl Plugin for Mooltitwap {
         let mut diffuse_amount = diffuse_base;
         let diffuse_routing = p.diffuse_routing.value();
         let diffuse_size = p.diffuse_size.value();
-        // Push SIZE to the diffusion stages per block (allocation-free).
-        self.diff_wet_l.set_size(diffuse_size);
-        self.diff_wet_r.set_size(diffuse_size);
+        // Size glides in the chains (allocation-free). Ping's bounce loop
+        // gets the same, so both loops take back the same delay.
+        for d in [&mut self.diff_wet_l, &mut self.diff_wet_r, &mut self.diff_odd, &mut self.diff_even] {
+            d.set_size(diffuse_size);
+        }
 
         // DEGRADE block — configured once per block (filter design happens in
         // set_params, control rate), inserted per sample at the selected
@@ -986,7 +1011,9 @@ impl Plugin for Mooltitwap {
             }
         }
         let tap_glide = 1.0 - (-1.0 / (0.005 * sr)).exp();
-        let tap_det: [f32; NUM_TAPS] = core::array::from_fn(|i| p.taps[i].detune.value());
+        // cents: a tap's Detune is a % of the range (v2.46)
+        let det_range = p.detune_range.value() as f32;
+        let tap_det: [f32; NUM_TAPS] = core::array::from_fn(|i| p.taps[i].detune.value() * det_range);
         let det_hold = (0.3 * sr) as usize;
         let clean_on = p.detune_quality.value() == crate::params::DetuneQuality::Clean && !self.pv.is_empty();
 
@@ -1093,7 +1120,7 @@ impl Plugin for Mooltitwap {
         } else {
             0.0
         };
-        if diffuse_target > 0.0 && self.xf_diffuse == 0.0 {
+        if diffuse_target > 0.0 && self.x_feed == 0.0 {
             // fading in from nothing: no stale tail from the last time
             self.diff_l.reset();
             self.diff_r.reset();
@@ -1101,7 +1128,13 @@ impl Plugin for Mooltitwap {
         if initial_snap {
             self.xf_mix = mix_target;
             self.xf_diffuse = diffuse_target;
+            self.x_feed = diffuse_target;
+            self.x_warm = X_WARM_DONE;
         }
+        // Cross → Diffuse's chain is fed first (its input fading in) and
+        // heard once it's warm: its 31 ms delay and its tail are longer than
+        // the 20 ms crossfade, and would otherwise start abruptly (v2.47).
+        let x_warm_len = (0.08 * sr) as usize;
 
         // The loop tone glides to the knob, a unit per 20 ms.
         let tone_base = p.loop_tone.value();
@@ -1116,12 +1149,12 @@ impl Plugin for Mooltitwap {
         // keeps running this long so they ring out (the tone's longest tail
         // is its high-pass's, 8 ms at 20 Hz).
         let mut colour = LoopColour {
-            diffuse: if diffuse_routing == DiffuseRouting::Feedback { diffuse_amount } else { 0.0 },
+            diffuse: (diffuse_routing == DiffuseRouting::Feedback).then_some(diffuse_amount),
             tape: degrade_on && degrade_routing == DiffuseRouting::Feedback,
             sat: sat_on && sat_routing == DiffuseRouting::Feedback,
             tone: ToneCoefs::new(self.tone_t, sr),
         };
-        let ring_len = if colour.diffuse > 1e-4 || colour.tape {
+        let ring_len = if colour.diffuse.is_some() || colour.tape {
             (3.0 * sr) as usize
         } else if tone_target != 0.0 || self.tone_t != 0.0 || glob_used[matrix::TONE] {
             (0.1 * sr) as usize
@@ -1203,7 +1236,7 @@ impl Plugin for Mooltitwap {
                     if glob_used[matrix::COLOUR] {
                         let m = gm[matrix::COLOUR];
                         diffuse_amount = matrix::colour(diffuse_base, m);
-                        colour.diffuse = if diffuse_routing == DiffuseRouting::Feedback { diffuse_amount } else { 0.0 };
+                        colour.diffuse = (diffuse_routing == DiffuseRouting::Feedback).then_some(diffuse_amount);
                         sat_amount = matrix::colour(sat_base, m);
                         if degrade_on {
                             let cfg = tape_cfg(matrix::colour(degrade_amount, m));
@@ -1279,9 +1312,18 @@ impl Plugin for Mooltitwap {
 
             // DIFFUSE routing = Input: smear the dry input BEFORE it hits the delay.
             // Every tap then reads pre-smeared material, giving a layered feel.
-            if diffuse_amount > 1e-4 && diffuse_routing == DiffuseRouting::Input {
-                x_l = self.diff_wet_l.process(x_l, diffuse_amount);
-                x_r = self.diff_wet_r.process(x_r, diffuse_amount);
+            // (In and Out start the chain afresh when Amount leaves 0.)
+            let wet_route = matches!(diffuse_routing, DiffuseRouting::Input | DiffuseRouting::Output);
+            if !(wet_route && diffuse_amount > 1e-4) {
+                self.wet_diff_on = false;
+            } else if !self.wet_diff_on {
+                self.diff_wet_l.reset();
+                self.diff_wet_r.reset();
+                self.wet_diff_on = true;
+            }
+            if self.wet_diff_on && diffuse_routing == DiffuseRouting::Input {
+                x_l = self.diff_wet_l.blend(x_l, diffuse_amount);
+                x_r = self.diff_wet_r.blend(x_r, diffuse_amount);
             }
 
             // DEGRADE routing = Input: crush the dry input before the buffer —
@@ -1320,14 +1362,26 @@ impl Plugin for Mooltitwap {
             // ago, not the value we're about to write.
             let fb_at = fb_samps.max(2.0);
             let b = s_curve(self.ping_share);
-            let [main_l, main_r, odd_in, even_in] = self.loop_inputs(fb_at, b, ch_mode, ping_read);
+            // Diffuse in the loops delays every pass by its chain's length, so
+            // they read that much earlier and the cycle stays as set (v2.47).
+            // Cross → Diffuse adds its own chain to the main loop: while it
+            // fades in or out the loop is read at both times, `plain` without
+            // it and `crossed` with it.
+            let comp = if colour.diffuse.is_some() { self.diff_wet_l.bulk() } else { 0.0 };
+            let x_w = s_curve(self.xf_diffuse);
+            let at_plain = (fb_at - comp).max(2.0);
+            let at_crossed = (at_plain - self.diff_l.bulk()).max(2.0);
+            let plain = if x_w < 1.0 { self.loop_inputs(at_plain, b, ch_mode, ping_read) } else { [0.0; 4] };
+            let x_fed = self.x_feed > 0.0;
+            let crossed = if x_fed { self.loop_inputs(at_crossed, b, ch_mode, ping_read) } else { [0.0; 4] };
+            let [main_l, main_r, odd_in, even_in] = if x_w < 1.0 { plain } else { crossed };
             // Freeze holds the same, read at its latched length, and writes it
             // back untouched; while it fades in or out both paths run.
             let hold = s_curve(self.freeze_w);
             let held = if hold == 0.0 {
                 [0.0; 4]
-            } else if fb_at == self.freeze_len {
-                [main_l, main_r, odd_in, even_in]
+            } else if x_w < 1.0 && at_plain == self.freeze_len {
+                plain
             } else {
                 self.loop_inputs(self.freeze_len, b, ch_mode, ping_read)
             };
@@ -1372,9 +1426,11 @@ impl Plugin for Mooltitwap {
             // other); ∞ is the loop. While one hands over to the other both
             // run, crossfading. The loop's colour below shapes the copies too,
             // once (a count has no passes for it to build up over).
+            // The copies pass through the loop's colour once, so they're read
+            // early by the same amounts.
             let w_rep = s_curve(self.rep_w);
-            let mut fir = [0.0f32; 4];
-            if finite || self.rep_w > 0.0 || self.rep_gain.iter().any(|&g| g > 0.0) {
+            let fir_on = finite || self.rep_w > 0.0 || self.rep_gain.iter().any(|&g| g > 0.0);
+            if fir_on {
                 let mut gk = 1.0f32;
                 for k in 0..16 {
                     gk *= fb;
@@ -1384,9 +1440,20 @@ impl Plugin for Mooltitwap {
                     *g += (to - *g) * tap_glide;
                     if to == 0.0 && g.abs() < 1e-6 {
                         *g = 0.0;
+                    }
+                }
+            }
+            let fir_at = |early: f32| {
+                let mut fir = [0.0f32; 4];
+                if !fir_on {
+                    return fir;
+                }
+                for (k, &g) in self.rep_gain.iter().enumerate() {
+                    if g == 0.0 {
                         continue;
                     }
-                    let (dl, dr) = (self.dry_l.read_before_write(at) * *g, self.dry_r.read_before_write(at) * *g);
+                    let at = ((k + 1) as f32 * fb_at - early).max(2.0);
+                    let (dl, dr) = (self.dry_l.read_before_write(at) * g, self.dry_r.read_before_write(at) * g);
                     fir[0] += dl;
                     fir[1] += dr;
                     if b > 0.0 {
@@ -1394,14 +1461,19 @@ impl Plugin for Mooltitwap {
                         fir[2 + k % 2] += bounce::mono_of(ch_mode, dl, dr);
                     }
                 }
-            }
+                fir
+            };
             let lw = 1.0 - w_rep;
-            let fb_main = [
-                main_l * fb_gain * lw + fir[0] * (1.0 - b) * w_rep,
-                main_r * fb_gain * lw + fir[1] * (1.0 - b) * w_rep,
-                odd_in * fb_gain * lw + fir[2] * b * w_rep,
-                even_in * fb_gain * lw + fir[3] * b * w_rep,
-            ];
+            let feed = |i: [f32; 4], fir: [f32; 4]| {
+                [
+                    i[0] * fb_gain * lw + fir[0] * (1.0 - b) * w_rep,
+                    i[1] * fb_gain * lw + fir[1] * (1.0 - b) * w_rep,
+                    i[2] * fb_gain * lw + fir[2] * b * w_rep,
+                    i[3] * fb_gain * lw + fir[3] * b * w_rep,
+                ]
+            };
+            let fb_main = if x_w < 1.0 { feed(plain, fir_at(fb_at - at_plain)) } else { [0.0; 4] };
+            let fb_crossed = if x_fed { feed(crossed, fir_at(fb_at - at_crossed)) } else { [0.0; 4] };
 
             if self.tone_t != tone_target {
                 self.tone_t += (tone_target - self.tone_t).clamp(-tone_step, tone_step);
@@ -1414,7 +1486,7 @@ impl Plugin for Mooltitwap {
                 if self.main_quiet >= ring_len {
                     // starting again: nothing left over from the last time
                     // (only what's in the loop; Diffuse and Tape may be routed elsewhere)
-                    if colour.diffuse > 1e-4 {
+                    if colour.diffuse.is_some() {
                         self.diff_wet_l.reset();
                         self.diff_wet_r.reset();
                     }
@@ -1426,16 +1498,16 @@ impl Plugin for Mooltitwap {
                 let mut fb_in_l = fb_main[0];
                 let mut fb_in_r = fb_main[1];
 
-                // Crossfeed Diffuse acts on the FEEDBACK path. It fades in and
-                // out with the mode, at its input too, so the allpass tail starts
-                // and stops smoothly. Mix acts on the output (after the tap
-                // loop); Ping is the bounce loop.
-                let w = s_curve(self.xf_diffuse);
-                if cf > 1e-4 && w > 0.0 {
-                    let dl = self.diff_l.process(fb_in_l * w, 1.0);
-                    let dr = self.diff_r.process(fb_in_r * w, 1.0);
-                    fb_in_l = fb_in_l * (1.0 - cf * w) + dl * cf * w;
-                    fb_in_r = fb_in_r * (1.0 - cf * w) + dr * cf * w;
+                // Cross → Diffuse: its own chain in the main loop, Cross its
+                // density (v2.47; 0 is just the delay the read takes back).
+                // It crossfades with the plain loop as the mode changes. Mix
+                // acts on the output (after the tap loop); Ping is the bounce
+                // loop.
+                if x_fed {
+                    let dl = self.diff_l.process(fb_crossed[0] * self.x_feed, cf);
+                    let dr = self.diff_r.process(fb_crossed[1] * self.x_feed, cf);
+                    fb_in_l = fb_in_l * (1.0 - x_w) + dl * x_w;
+                    fb_in_r = fb_in_r * (1.0 - x_w) + dr * x_w;
                 }
                 (fb_sat_l, fb_sat_r) = colour.apply(
                     fb_in_l,
@@ -1660,12 +1732,9 @@ impl Plugin for Mooltitwap {
             // DIFFUSE routing = Output: smear the tap-mix on its way to dry/wet.
             // This is the cleanest option — diffusion doesn't interact with
             // feedback / cluster dynamics, just produces a reverb-tail bloom.
-            let mut wet_l = if diffuse_amount > 1e-4 && diffuse_routing == DiffuseRouting::Output {
-                self.diff_wet_l.process(tap_out_l, diffuse_amount)
-            } else { tap_out_l };
-            let mut wet_r = if diffuse_amount > 1e-4 && diffuse_routing == DiffuseRouting::Output {
-                self.diff_wet_r.process(tap_out_r, diffuse_amount)
-            } else { tap_out_r };
+            let out_diff = self.wet_diff_on && diffuse_routing == DiffuseRouting::Output;
+            let mut wet_l = if out_diff { self.diff_wet_l.blend(tap_out_l, diffuse_amount) } else { tap_out_l };
+            let mut wet_r = if out_diff { self.diff_wet_r.blend(tap_out_r, diffuse_amount) } else { tap_out_r };
 
             // DEGRADE routing = Output: crush the whole wet mix once (after
             // diffusion so the bloom degrades too), before dry/wet.
@@ -1752,7 +1821,18 @@ impl Plugin for Mooltitwap {
             r_chan[s] = out_r;
 
             self.xf_mix += (mix_target - self.xf_mix).clamp(-xf_step, xf_step);
-            self.xf_diffuse += (diffuse_target - self.xf_diffuse).clamp(-xf_step, xf_step);
+            if diffuse_target > 0.0 {
+                self.x_feed = (self.x_feed + xf_step).min(1.0);
+                self.x_warm = self.x_warm.saturating_add(1);
+                if self.x_warm >= x_warm_len {
+                    self.xf_diffuse = (self.xf_diffuse + xf_step).min(1.0);
+                }
+            } else {
+                self.xf_diffuse = (self.xf_diffuse - xf_step).max(0.0);
+                if self.xf_diffuse == 0.0 {
+                    (self.x_feed, self.x_warm) = (0.0, 0);
+                }
+            }
             self.freeze_w += (freeze_target - self.freeze_w).clamp(-xf_step, xf_step);
             self.rep_w += (rep_target - self.rep_w).clamp(-xf_step, xf_step);
             self.duck_depth += (duck_target - self.duck_depth).clamp(-duck_step, duck_step);
@@ -2673,6 +2753,22 @@ mod tests {
             set(&plug, "dry_wet", 0.5);
             write_wav(&dir.join(format!("{what}-0-nodetune.wav")), &render(&mut plug, input, |_, _| {}));
         }
+        // v2.46, Range 12: six taps at −5, +5, −7, +7, −12, +12 st on a
+        // 250 ms base (long enough for Clean an octave down)
+        for (q, name) in [(0.0, "light"), (1.0, "clean")] {
+            for (input, what) in [(&pluck, "pluck"), (&chord, "chord")] {
+                let mut plug = plugin(&[-0.7, 0.7, -0.5, 0.5, -0.3, 0.3]);
+                set(&plug, "base_time_l", 250f32.ln() / 2000f32.ln());
+                set(&plug, "feedback", 0.4);
+                set(&plug, "dry_wet", 0.5);
+                set(&plug, "detune_quality", q);
+                set(&plug, "detune_range", 12.0);
+                for (i, st) in [-5.0f32, 5.0, -7.0, 7.0, -12.0, 12.0].into_iter().enumerate() {
+                    set(&plug, &format!("tap_detune_{}", i + 1), st / 12.0 * 100.0);
+                }
+                write_wav(&dir.join(format!("{what}-range12-{name}.wav")), &render(&mut plug, input, |_, _| {}));
+            }
+        }
     }
 
     /// Before/after renders for the SOF-60 fix, to hear (not a check):
@@ -2741,6 +2837,12 @@ mod tests {
         assert!(step < 0.01, "across a whole sample it moves {step}");
         // before the write, the newest is a sample old already
         assert!((line.read_before_write(10.25) - (newest + 1.0 - 10.25)).abs() < 1e-4);
+        // and a whole-sample read is the same, without the interpolation
+        // (from 2: `read` won't go under 1, so `read_before_write(1)` reads 2 back)
+        assert_eq!(line.back(1), newest);
+        for k in 2..30 {
+            assert_eq!(line.back(k), line.read_before_write(k as f32));
+        }
     }
 
     /// The pitch of `out` (left) between `from` and `to` seconds, from its
@@ -2796,6 +2898,163 @@ mod tests {
             let off = 1200.0 * (got / want).log2();
             assert!(off.abs() < 3.0, "{ms} ms, {cents} ct: {got:.2} Hz, {off:.1} cents off");
             assert_eq!(plug.clean_w[0] > 0.5, ms > 100.0, "{ms} ms on the wrong quality");
+        }
+    }
+
+    #[test]
+    fn detune_range_reaches_an_octave() {
+        // Range 12: a tap at ±100 % is an octave, at +58.3 % a fifth; Light
+        // and Clean on a 300 ms tap, and Light on a 10 ms tap (too short for
+        // a grain an octave up: it sounds a little late, never reads ahead)
+        for (quality, ms, range) in [(0.0f32, 300.0f32, 12.0f32), (1.0, 300.0, 12.0), (0.0, 10.0, 12.0), (0.0, 10.0, 1.0)] {
+            for (pct, hz) in [(100.0f32, 220.0f32), (-100.0, 440.0), (700.0 / 12.0, 330.0)] {
+                let mut plug = plugin(&[0.0]);
+                set(&plug, "feedback", 0.0);
+                set(&plug, "detune_quality", quality);
+                set(&plug, "detune_range", range);
+                set(&plug, "base_time_l", ms.ln() / 2000f32.ln());
+                set(&plug, "tap_detune_1", pct);
+                let out = render(&mut plug, &sine(hz, 3.0), |_, _| {});
+                let cents = pct * range;
+                let want = hz * 2f32.powf(cents / 1200.0);
+                let got = pitch(&out, 1.0, 2.8);
+                let off = 1200.0 * (got / want).log2();
+                assert!(off.abs() < 3.0, "q{quality} {ms} ms, {cents:.0} ct: {got:.2} Hz, {off:.1} cents off");
+                assert!(out.iter().all(|s| s.0.is_finite() && s.0.abs() < 1.0));
+            }
+        }
+    }
+
+    /// A 5 ms noise burst at 0.1 s, then silence.
+    fn burst(secs: f32) -> Vec<(f32, f32)> {
+        let mut seed = 1u32;
+        (0..(secs * SR) as usize)
+            .map(|i| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let v = if (4800..5040).contains(&i) { 0.5 * (seed as f32 / u32::MAX as f32 * 2.0 - 1.0) } else { 0.0 };
+                (v, v)
+            })
+            .collect()
+    }
+
+    /// How much later (ms) each of `b`'s repeats sits than `a`'s: the
+    /// energy centres within ±`half_s` of each of `a`'s peaks after `from`
+    /// seconds, compared.
+    fn repeat_offsets_ms(a: &[(f32, f32)], b: &[(f32, f32)], from: f32, half_s: f32) -> Vec<f32> {
+        let e = |x: &[(f32, f32)], i: usize| x[i].0 * x[i].0 + x[i].1 * x[i].1;
+        let half = (half_s * SR) as usize;
+        let top = (0..a.len()).map(|i| e(a, i)).fold(0.0, f32::max);
+        let mut out = Vec::new();
+        let mut i = (from * SR) as usize;
+        while i + half < a.len() {
+            let w = i.saturating_sub(half)..i + half;
+            if e(a, i) > 1e-4 * top && w.clone().all(|j| e(a, j) <= e(a, i)) {
+                let centre = |x: &[(f32, f32)]| {
+                    let (num, den) = w.clone().fold((0.0f64, 0.0f64), |(n, d), j| (n + j as f64 * e(x, j) as f64, d + e(x, j) as f64));
+                    num / den.max(1e-30)
+                };
+                out.push(((centre(b) - centre(a)) / SR as f64 * 1000.0) as f32);
+                i += half;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn diffuse_in_the_loop_keeps_the_cycle() {
+        // A burst round a 400 ms loop at 70 %: with Diffuse in it (Colour on
+        // FB, or Cross → Diffuse) the first three passes land where they do
+        // without (v2.46's chain put 179 ms on each pass at 60 %), within
+        // 1 ms a pass (the drift moves each pass's centre a little).
+        let run = |cfg: &[(&str, f32)]| {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "base_time_l", 400f32.ln() / 2000f32.ln());
+            set(&plug, "feedback", 0.7);
+            for &(id, v) in cfg {
+                set(&plug, id, v);
+            }
+            render(&mut plug, &burst(2.6), |_, _| {})
+        };
+        let plain = run(&[]);
+        for cfg in [
+            &[("diffuse_routing", 1.0), ("diffuse_amount", 0.6)][..],
+            &[("diffuse_routing", 1.0), ("diffuse_amount", 1.0)],
+            &[("diffuse_routing", 1.0), ("diffuse_amount", 0.6), ("diffuse_size", 2.0)],
+            &[("crossfeed_mode", 2.0), ("crossfeed", 1.0)],
+        ] {
+            // the first offset is the tap itself, before any pass
+            let offs = repeat_offsets_ms(&plain, &run(cfg), 0.4, 0.19);
+            assert!(offs.len() >= 4, "{offs:?}");
+            let ok = offs[..4].iter().enumerate().all(|(k, o)| o.abs() <= 0.5 + 1.0 * k as f32);
+            assert!(ok, "{cfg:?}: repeats off by {offs:?} ms");
+        }
+    }
+
+    #[test]
+    fn diffuse_in_the_loop_at_0_is_the_plain_loop() {
+        // Colour on FB at Amount 0 is the chain's delay, taken back by the read
+        let run = |routing: f32| {
+            let mut plug = plugin(&[-0.5, 0.5]);
+            set(&plug, "feedback", 0.8);
+            set(&plug, "diffuse_routing", routing);
+            render(&mut plug, &held_tone(), |_, _| {})
+        };
+        let (off, fb) = (run(2.0), run(1.0));
+        let worst = off.iter().zip(&fb).map(|(a, b)| (a.0 - b.0).abs().max((a.1 - b.1).abs())).fold(0.0, f32::max);
+        assert!(worst < 1e-5, "{worst}");
+    }
+
+    #[test]
+    fn turning_diffuse_size_does_not_click() {
+        let input = held_tone();
+        let n = input.len();
+        let sharpest = |sweep: bool| {
+            let mut plug = plugin(&[-0.5, 0.7, 0.0]);
+            set(&plug, "feedback", 0.6);
+            set(&plug, "diffuse_routing", 1.0);
+            set(&plug, "diffuse_amount", 0.6);
+            sharpest_bend(&render(&mut plug, &input, |at, plug| {
+                if sweep {
+                    set(plug, "diffuse_size", 1.0 + 0.6 * (at as f32 / n as f32 * 9.0).sin());
+                }
+            }))
+            .0
+        };
+        let (still, moving) = (sharpest(false), sharpest(true));
+        assert!(moving < 1.5 * still, "{:.2}×", moving / still);
+    }
+
+    #[test]
+    fn diffuse_widens_a_mono_source() {
+        // a centred tap, Diffuse on Out at 100 %: the sides come apart
+        let corr = |amount: f32| {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "feedback", 0.0);
+            set(&plug, "diffuse_routing", 2.0);
+            set(&plug, "diffuse_amount", amount);
+            let out = render(&mut plug, &burst(1.0), |_, _| {});
+            let (mut lr, mut ll, mut rr) = (0.0f64, 0.0f64, 0.0f64);
+            for s in &out {
+                lr += (s.0 * s.1) as f64;
+                ll += (s.0 * s.0) as f64;
+                rr += (s.1 * s.1) as f64;
+            }
+            lr / (ll * rr).sqrt()
+        };
+        assert!(corr(0.0) > 0.99);
+        assert!(corr(1.0) < 0.5, "{}", corr(1.0));
+    }
+
+    #[test]
+    fn in_and_out_sit_at_0_db_on_the_knob_top() {
+        let plug = Mooltitwap::default();
+        for g in [&plug.params.input_gain, &plug.params.output_gain] {
+            for (db, n) in [(-24.0, 0.0), (-12.0, 0.25), (0.0, 0.5), (6.0, 0.75), (12.0, 1.0)] {
+                assert!((g.preview_normalized(db) - n).abs() < 1e-5, "{db} dB at {}", g.preview_normalized(db));
+            }
         }
     }
 

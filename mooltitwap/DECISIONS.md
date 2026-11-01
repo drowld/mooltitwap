@@ -2,6 +2,83 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-01 · Diffuse rebuilt: six short drifting allpasses (v2.47.0, SOF-199)
+
+Owner: "do C", from the listening test (`spikes/diffuse/`). v2.46.0 was never
+installed; v2.47.0 carries it too.
+- **Why the old chain went** (measured in the spike): eight allpasses of
+  12.5–53 ms made separate echoes, not a wash (echo density 0.22 at every
+  Amount); their energy sat 40–263 ms after the input, so in the loop each
+  pass came round up to a quarter second late; both sides were the same (no
+  width). Cross → Diffuse ran the same chain at 100 % in the loop.
+- **The chain** (`diffusion.rs`): six allpasses of 1.3–11 ms, different on
+  each side with the same sum (31 ms × Size), each delay drifting ±0.12 ms ×
+  Size at 0.4–1.3 Hz (scaled by Amount). Amount is the allpass gain (0 →
+  0.75), not a dry blend. Size glides (30 ms): turning it no longer clicks.
+- **The loops read early by the chain's delay** (Colour on FB, Cross →
+  Diffuse, both loops), so the cycle you set is the cycle you hear (tested:
+  the first three passes within 1 ms a pass; v2.46's put 179 ms on each pass
+  at 60 %). On FB the chain stays in the loop even at Amount 0, where it's a
+  pure delay taken back: bit-exact with Diffuse off (tested), and Motion
+  sweeping Colour through 0 never moves the loop's timing. A cycle shorter
+  than the chain (31 ms × Size) can't be read early enough and runs that
+  long. Rejected: switching the chain out at 0 (every crossing would move
+  the loop by 31 ms).
+- **In and Out can't be read early**: Amount's first 20 % fades the chain in
+  from dry (a short, quiet doubling at the bottom of the knob) rather than
+  jumping the wet 31 ms when it leaves 0.
+- **Cross → Diffuse**: Cross is now the chain's density (was a blend with an
+  undiffused copy). Its chain is fed for 80 ms (input fading in) before the
+  20 ms crossfade starts, as its 31 ms delay is longer than the crossfade
+  (the mode-switch click test caught 18× the steady tone's bend without it).
+- **The moving delays read through a first-order allpass (Thiran)**, not
+  Lagrange: the spike's Lagrange read took about half an impulse's energy
+  (the top) on every pass, which in a loop darkens the tail pass after pass.
+  Now the chain keeps the energy (tested: 1.000) and sits within 1 ms of its
+  delay. Whole-sample reads use a new `DelayLine::back`, and the drift turns
+  a rotating oscillator, not a `sin` a stage a sample: 40 ns a stereo sample
+  (0.19 % of a core at 48 kHz), from 194 ns before those two changes.
+- **Measured, not heard**: width (L/R correlation of a centred tap under
+  0.5 at 100 %), no click turning Size, the mode switches as before. The
+  mono sum of a wide Diffuse colours by 5–11 dB at 1/6 octave (as a stereo
+  reverb does). The factory presets that use Diffuse now sound different
+  (SOF-147).
+
+## 2026-11-01 · Owner notes on v2.45: Detune Range, In/Out at 0 dB, full-page presets (v2.46.0, SOF-84)
+
+Owner's notes; built with my picks (owner: "Build with your picks").
+- **Detune Range, 1–12 semitones (default 1), every tap's.** A tap's Detune
+  is now a % of the range (id `tap_detune` kept, ±100): at the default it is
+  v2.45's cents exactly, so nothing saved changes. A stepper beside the knob
+  in the Tap tab; values read in cents under a semitone, semitones above
+  ("+7.5 st"); the field's grid in cents at Range 1, semitones from 2.
+  Rejected: one ±12-semitone knob (cents get fiddly), a range per tap (no
+  need shown). Still not stacking per repeat: an octave up stays an octave up
+  each pass (a rising shimmer would be a shift inside the loop: another
+  feature).
+- **Light gives short taps the look-back it needs**: a tap shorter than the
+  grain's travel plus the splice search (~21 ms at a semitone, ~41 ms at an
+  octave) sounds that little bit late instead of reading ahead of the write.
+  This also fixes v2.45: taps under ~20 ms detuned upward came out wrong
+  (measured at 10 ms: +100 ct read +14 ct, +58 ct didn't shift at all).
+  Clean already had its own floor (`Pv::min_delay`, ~107 ms an octave up,
+  ~128 ms down) and falls back to Light below it.
+- **Measured**: pitch within 3 cents at ±12 and +7 st on Light and Clean
+  (300 ms tap), and on Light at a 10 ms tap (±12 and ±1 st). Renders:
+  `spikes/detune-range/` (±5, ±7, ±12 st; not committed). Not measured: CPU
+  at large shifts (the same work per sample; Clean makes frames faster
+  upward), the sound at an octave (owner's ears).
+- **In and Out: 0 dB at the knob's top**, −24…0 dB on the left half, 0…+12
+  on the right, each linear in dB (`SymmetricalSkewed`, centre 0). An
+  untouched knob shows no fill. Values saved in sessions load the same; old
+  host automation of In/Out would replay shifted (nothing released yet).
+- **The preset sheet covers the whole page under the header**, the cards'
+  column too (v2.40 kept the cards in view while trying presets; "In this
+  preset" lists what they hold). The inspector widens with it (up to 300 px).
+- **The accent ring is drawn inside its swatch's cell** (24 px cells, 18 px
+  dots): drawn past it, it was clipped square. Morpheus, merge, cumulus,
+  phasma and y-flanger draw theirs the same way and are not fixed here.
+
 ## 2026-11-01 · Per-tap detune, Light and Clean (v2.45.0, SOF-156)
 
 Owner: "Build detune", after liking both WSOLA and the phase vocoder in the
