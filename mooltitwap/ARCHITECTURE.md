@@ -51,8 +51,7 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
   holds, plain floats, the Time/Cross facets, the factory bank, the old
   `Mooltitwap/presets` folder, `migrate::preset` on read); `Library` = the crate's
   (factory from the binary + user files in `Soft Systems/Afterecho/Presets`,
-  `library.json`). Keeps its own grid-aware `matches` (edited) and wrappers for the old
-  editors. `PresetSession` (the crate's `PresetRef`) is persisted with the host.
+  `library.json`). Wrappers for the old editors. `PresetSession` (the crate's `PresetRef`) is persisted with the host.
   `NOT_STORED` (Freeze, Ear guard) stays out of presets and A/B. `factory.rs` — the factory set as changes
   from Init.
 - `gui.rs` — `create_editor` (routes to the scope page when `SCOPE_PAGE`),

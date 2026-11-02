@@ -20,7 +20,8 @@ file is read instead of at every load and compare).
 - **Kept in Afterecho:** the edited check (`matches`) compares floats on their
   step grid. The crate's doesn't: after editing a tap's Q, Init read as edited
   (Q's default 0.707 snaps to 0.70 once set; tested). Asked the hub to fold it
-  into the crate; drop ours when it lands. The Time/Cross filters stay under
+  into the crate; it did (nice-plug 780e520), and Afterecho's `matches` now
+  calls the crate's. The Time/Cross filters stay under
   Afterecho's own `time`/`cross` keys in `library.json` (the crate keeps fields
   it doesn't know). The sheet is still Afterecho's (the shared one comes with
   softsystems-ui, SOF-224).

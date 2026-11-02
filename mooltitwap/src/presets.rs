@@ -149,30 +149,12 @@ pub(crate) fn load_into(params: &PetalParams, snap: &BTreeMap<String, f32>) {
     }
 }
 
-/// True if the live params still match `snap` within 1e-4 (§7.11), compared
-/// in the stored domain. A param the snapshot doesn't list is expected at its
-/// default, as `apply` left it. Floats compare on their step grid: a stepped
-/// param whose default is off the grid (the taps' Q, 0.707) lands on the
-/// grid once set, and that's still the same sound. (The shared store's
-/// `matches` doesn't snap yet; this stays until it does.)
+/// True if the live params still match `snap` within 1e-4 (§7.11). A param
+/// the snapshot doesn't list is expected at its default, as `apply` left it.
+/// Floats compare on their step grid (the taps' Q default, 0.707, lands on
+/// the grid once set: still the same sound).
 pub fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>) -> bool {
-    params.param_map().into_iter().filter(|(id, _, _)| Store::stored(id)).all(|(id, ptr, _group)| {
-        // SAFETY: ptr comes from these params and outlives the call.
-        let (live, want) = unsafe {
-            let plain = ptr.step_count().is_some() || PLAIN_FLOATS.contains(&id.as_str());
-            let want_n = match snap.get(&id) {
-                Some(&v) if v.is_finite() => to_normalized(&id, ptr, v),
-                _ => ptr.default_normalized_value(),
-            };
-            if plain {
-                (ptr.unmodulated_plain_value(), ptr.preview_plain(want_n))
-            } else {
-                let grid = |n: f32| ptr.preview_normalized(ptr.preview_plain(n));
-                (grid(ptr.unmodulated_normalized_value()), grid(want_n))
-            }
-        };
-        (live - want).abs() <= 1e-4
-    })
+    softsystems_presets::matches::<Store>(params, snap, VALUES_FORMAT_PLAIN)
 }
 
 /// Every param's default in the stored form: what a missing id stands for.
