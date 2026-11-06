@@ -2,6 +2,37 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-06 · Afterecho on the shared Soft Systems UI (v2.49.0, SOF-224)
+
+Owner: "Start it now" (the frame and the shared preset system go into every
+plug-in, hub chat 2026-11-06). Branch `ui/softsystems-ui`.
+- **Look:** the theme is softsystems-ui's. Afterecho's Mono / Paper is its own
+  palette (`presets::AFTERECHO`), the default; Soft Systems is the other.
+  Light / Dark / OLED. The old look file is read once: dark stays, the OLED
+  variant becomes OLED, Cool / Warm / Ink / Mono take Afterecho's palette, the
+  text size is converted. The Karla and Plex font choices are gone (Hanken).
+- **Accent row:** Afterecho, Green, Cyan, Blue, Amber, Violet, then the user's
+  own colour (Hue, Shade). Seven swatches is what the ☰ panel's row holds; on
+  import Mint → Cyan, Slate → Blue, Mono → Afterecho. My pick, easy to change.
+  Data hues keep their hue under any accent (owner, 2026-11-02).
+- **Frame:** page margin 16, block gap 12 (was 20 / 14); radii 16 / 9 / 7,
+  controls 28; segments are the well kind, buttons the chip, the Taps title a
+  dropdown, Repeats the shared stepper (its value still drags), the sun / moon
+  icon, the ☰ Options panel (Theme, Palette, Text size, Size, then Accent,
+  Sound → Detune, Presets → the folder).
+- **Preset sheet:** the shared one, over the box round all the cards. "In this
+  preset" sits under the list (owner's pick A): Afterecho's six lines joined
+  into the two it shows. Afterecho's own filters carry over once into the sheet's `facet`.
+- **Lists by length** (owner, via the hub, 2026-11-06): the long ones (the Y
+  axis, 8; the LFO shape, 6) are dropdowns; Spacing (4) is the crate's
+  vertical segment; segments that grey single options (Pan in Mono) are its
+  `seg_live`. Every segment and list is now the crate's.
+- **Contrast** (migration step 11, a test over both palettes × 3 themes × 6
+  accents): in light the later taps faded toward white (down to 1.4:1), so
+  they now darken toward ink; source colours as text fell to 4.41–4.50:1 on the
+  cards, so text under 4.5:1 is drawn in ink.
+- Previews never write the look (nor import the old one).
+
 ## 2026-11-01 · Presets on the shared softsystems-presets crate (v2.48.0, SOF-205)
 
 Owner: "Yes, start it". The store (file, folders, factory serving,

@@ -24,10 +24,7 @@ use softsystems_presets::{FacetSpec, Facets, Plugin, Sound, Values};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub use softsystems_presets::{
-    identity, sanitize, Error, Kind, PresetRef as PresetSession, Sent, Unreadable, NAME_MAX, READ_ONLY, TAGS_MAX, TAG_LEN_MAX,
-    VALUES_FORMAT_PLAIN,
-};
+pub use softsystems_presets::{identity, Kind, PresetRef as PresetSession, Sent, VALUES_FORMAT_PLAIN};
 
 /// The CLAP id (`lib.rs`; kept from the Mooltitwap days so sessions recall
 /// the plug-in): a file from another plug-in is refused.
@@ -182,13 +179,6 @@ impl Time {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Time::Sync => "Sync",
-            Time::Free => "Free",
-        }
-    }
-
     fn from_word(w: &str) -> Option<Time> {
         Time::ALL.into_iter().find(|t| t.word() == w)
     }
@@ -217,14 +207,6 @@ impl Cross {
             Cross::Mix => "mix",
             Cross::Ping => "ping",
             Cross::Diffuse => "diffuse",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Cross::Mix => "Mix",
-            Cross::Ping => "Ping",
-            Cross::Diffuse => "Diffuse",
         }
     }
 
@@ -568,8 +550,8 @@ pub(crate) mod tests {
         let t = TempDir::new("factory");
         let mut lib = open(&t);
         let s = sound(&PetalParams::default());
-        assert_eq!(lib.save("ping garden", s).unwrap_err().to_string(), READ_ONLY);
-        assert_eq!(lib.delete("ping garden").unwrap_err().to_string(), READ_ONLY);
+        assert_eq!(lib.save("ping garden", s).unwrap_err().to_string(), softsystems_presets::READ_ONLY);
+        assert_eq!(lib.delete("ping garden").unwrap_err().to_string(), softsystems_presets::READ_ONLY);
         assert!(files(&t.0).iter().all(|f| f == "library.json"), "nothing written but the library state");
         assert_eq!(lib.duplicate("ping garden").unwrap(), "Ping Garden copy");
         assert_eq!(lib.get("ping garden copy").unwrap().kind(), Kind::User);

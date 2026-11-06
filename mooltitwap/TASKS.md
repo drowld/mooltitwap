@@ -3,6 +3,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 
 ## In Progress
 - [ ] **Owner hand test (v2.34–v2.47)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), v2.42 (Repeats, the Motion matrix, Hanken Grotesk) and v2.43 (Time view, Grid, two Steps with Glide, ear safety), v2.44 (fractional delay reads: Repitch glides, cycles a sample tighter), v2.45 (per-tap detune, Light/Clean), v2.46 (Detune Range, In/Out at 0 dB, full-page presets), v2.47 (Diffuse rebuilt; Cross → Diffuse with it), v2.48 (presets on the shared store: browse, Try/Back, Save as… once). v2.47.0 installed 2026-11-01. Step clicks: owner confirmed fixed (2026-11-01). Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
+- [ ] **v2.49: Afterecho on softsystems-ui** (owner's go 2026-11-06, branch `ui/softsystems-ui`, uncommitted): shared theme, fonts, ☰ Options panel, 16/12 frame, controls, the shared preset sheet, the contrast rule in a test. Lists by length are in (Y axis and LFO shape dropdowns, Spacing the vertical segment). "In this preset" is back, under the sheet's list. Left: owner check, then merge on his word. Linear SOF-224.
 - [ ] **Factory presets: tune by ear** — the 18 approved presets (v2.41.0, `factory.rs`) are written and tested against their descriptions; none heard yet. Linear SOF-147.
 
 ## Next
@@ -10,6 +11,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 2. [ ] iPad: install v2.47.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving and with detune (Light and Clean, 16 taps). Linear SOF-85.
 3. [ ] Second spacing pass (owner: "spacing still not perfect"; Tall Time group loose). Linear SOF-86.
 4. [ ] Restyle the Settings menu to the new look (still old epo chips). **On hold:** the ☰ panel will come from softsystems-ui (below). Linear SOF-87.
+5. [ ] Matrix audit (crates hub, 2026-11-05, read from code, nothing run; 7 bugs, none high): cell drag sticks on slow drags (no accumulator, `gui_scope.rs:2211`); no clear on iPad cells; negative Gain depth / Polarity < 0 silent on Gain with no hint; the Motion tick grid restarts every block, so Step Glide runs fast with block sizes not a multiple of 32 (`lib.rs:1048`); Amount/Polarity unsmoothed; the grid shows raw cells, not the depth heard; a hidden Env LFO shape is dead. Most go with the shared routing (after Vortex); owner (2026-11-05): wait for the shared routing, fix none before. List: the hub's `matrix-audit-bugs-by-plugin.md`. Linear SOF-244.
 5. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
 6. [ ] Retire the old editors: `gui.rs` v2 drawing, `gui_v3.rs`, `palette_v3.rs` glue, `V3_PREVIEW` (Phase 3). Linear SOF-89.
 7. [ ] Phase 5: hosts (AUM, Drambo, Logic iPad, Cubasis; Ableton, Reaper, Bitwig, FL; pluginval), release list (bundle IDs, App Group, 60 fps cap), licences (RE-DEEMER notice, GPL vs Soft Systems plan). Linear SOF-90.
@@ -23,7 +25,6 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 
 ## Blocked
 - iPad installs: devicectl refuses while the iPad is locked or "not unlocked recently" — unlock first.
-- Move the UI onto the shared softsystems-ui crate (owner-approved, one for all plug-ins: tokens, Hanken, seg/stepper/chip/dropdown/menu, the ☰ panel): after the Vortex pilot, when its session sends migration notes. Until then, **no new ☰, palette or font work** here; crate changes go through that session. Crate: nice-plug `crates/softsystems-ui`, branch `claude/softsystems-ui-3c86fa`, `docs/softsystems-ui.md`. When moving: depend with `default-features = false` until the licence is wired; follow migration steps 10–11 (tests set the theme; data colours checked at 4.5:1 on well and inset); Afterecho's preset gets `c.inset` = its old inset (= its well) (hub, nice-plug fd74c71). Linear SOF-224.
 
 ## Done (recent)
 - [x] v2.48.0 Presets on the shared softsystems-presets crate (`presets.rs` 1,533 → ~530 lines); parity-checked on copies of the real folders; loads send only changed params; factory `author` "Soft Systems". Not committed, not installed. The edited check is the crate's since its float-grid fix (nice-plug 780e520). (SOF-205)

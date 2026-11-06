@@ -10,7 +10,7 @@
 //! functions come next.
 #![allow(deprecated)]
 
-use egui::{Align2, Color32, FontId, Id, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Vec2};
 use nice_plug::prelude::*;
 use nice_plug_egui::EguiState;
 use std::path::PathBuf;
@@ -24,7 +24,10 @@ use crate::params::{ChannelMode, CrossfeedMode, FilterSlope, FilterType, MotionS
 use crate::topology;
 use crate::ui::epo;
 use crate::ui::theme::{self, G, INK, INK2, INSET, PANEL, PAPER, SOFT};
-use crate::ui::tokens as tk;
+use softsystems_ui::controls;
+use softsystems_ui::options::{self, Env, Product, Zoom};
+use softsystems_ui::tokens::{accents, presets as ss_presets, Accent, CustomAccent};
+use softsystems_ui::{Appearance, Theme};
 
 mod preset_sheet;
 
@@ -33,11 +36,11 @@ mod preset_sheet;
 pub(crate) mod g {
     pub const HEAD_Y: f32 = 16.0;
     pub const HEAD_H: f32 = 38.0;
-    pub const R_CARD: f32 = 10.0;
-    pub const R_CTL: f32 = 6.0;
+    pub const R_CARD: f32 = softsystems_ui::tokens::R_CARD;
+    pub const R_CTL: f32 = softsystems_ui::tokens::R_CTL;
     /// A control cell: its name, the control band, then its value. A knob
     /// fills the band; pills (`CTL_H`) sit centred in it.
-    pub const CTL_H: f32 = 30.0;
+    pub const CTL_H: f32 = softsystems_ui::tokens::CTL_H;
     pub const LBL_H: f32 = 13.0;
     /// Knob diameter, between Tide's 28 and the τόπος sheet's 48. On touch a
     /// knob answers within 44 px of its centre whatever its size.
@@ -94,20 +97,22 @@ pub struct Layout {
 }
 
 /// Desktop, and iPad in short host panels. Cards are sized to their rows,
-/// as tight as Tide's.
+/// as tight as Tide's. The shared frame (owner, 2026-11-02): a 16 px page
+/// margin round the outer blocks (the header strip is one) and 12 px between
+/// blocks.
 const WIDE: Layout = Layout {
     w: 1366.0,
     h: 660.0,
-    pad: 20.0,
+    pad: 16.0,
     // the field ends with the Time card, the lane starts with Colour
-    picture: (20.0, 70.0, 800.0, 318.0),
-    lane: (20.0, 400.0, 800.0, 244.0),
+    picture: (16.0, 66.0, 806.0, 320.0),
+    lane: (16.0, 398.0, 806.0, 246.0),
     lane_stacked: false,
     right_x: 834.0,
-    right_w: 512.0,
-    time: (70.0, 318.0),
-    colour: (400.0, 117.0),
-    output: (529.0, 115.0),
+    right_w: 516.0,
+    time: (66.0, 320.0),
+    colour: (398.0, 117.0),
+    output: (527.0, 117.0),
     tabs_w: 220.0,
     preset_w: 270.0,
 };
@@ -117,37 +122,42 @@ const WIDE: Layout = Layout {
 const TALL: Layout = Layout {
     w: 1050.0,
     h: 780.0,
-    pad: 18.0,
-    picture: (18.0, 70.0, 560.0, 392.0),
-    lane: (18.0, 474.0, 560.0, 288.0),
+    pad: 16.0,
+    picture: (16.0, 66.0, 562.0, 394.0),
+    lane: (16.0, 472.0, 562.0, 292.0),
     lane_stacked: true,
-    right_x: 592.0,
-    right_w: 440.0,
-    time: (70.0, 392.0),
-    colour: (474.0, 140.0),
-    output: (626.0, 136.0),
+    right_x: 590.0,
+    right_w: 444.0,
+    time: (66.0, 394.0),
+    colour: (472.0, 140.0),
+    output: (624.0, 140.0),
     tabs_w: 200.0,
     preset_w: 220.0,
 };
 
-/// Default text-size steps (Settings → Text size); one step is 6 %.
-const FONT_STEPS_DEFAULT: i32 = 4;
-const FONT_SCALE_DEFAULT: f32 = 1.0 + 0.06 * FONT_STEPS_DEFAULT as f32;
-/// Afterecho's look: the Mono page (Paper when light) with its signature
-/// accent (Tide is warm + slate), indices into the theme's variants and accent
-/// hues.
-const DARK_VARIANT_DEFAULT: u8 = 4;
-const ACCENT_DEFAULT: u8 = 8;
-/// Raised when the look's defaults change. A saved look from before 2 takes
-/// the new palette and accent once, and one from before 3 Hanken Grotesk
-/// (v2.42); its light/dark choice and text size stay.
-const LOOK_VERSION: u8 = 3;
-/// Settings → Font: 0 Karla · 1 Plex · 2 Hanken (the default).
-const FONT_DEFAULT: u8 = 2;
+/// Afterecho, as the shared Soft Systems UI sees it: its own palette (Mono
+/// dark, Paper light) after Soft Systems, its accent, dark first.
+pub const PRODUCT: Product = Product {
+    name: "Afterecho",
+    slug: "afterecho",
+    version: env!("CARGO_PKG_VERSION"),
+    accent: accents::AFTERECHO,
+    presets: &[ss_presets::AFTERECHO],
+    dark_default: true,
+    manual: None,
+    support: None,
+};
 
-/// Text size: `px` at the default text-size setting, following Settings → Text size.
+/// ☰ → Size: the page zooms (desktop; the window follows).
+const ZOOMS: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+/// ☰ → Accent: Afterecho's own first, then five of the shared ones; the
+/// user's own colour is the seventh swatch.
+const ACCENTS: [Accent; 6] = [accents::AFTERECHO, accents::GREEN, accents::CYAN, accents::BLUE, accents::AMBER, accents::VIOLET];
+
+/// Text size: `px` at the design text size, following ☰ → Text size.
 fn fs(px: f32, s: f32) -> f32 {
-    px * s * theme::font_scale() / FONT_SCALE_DEFAULT
+    px * s * softsystems_ui::t().text
 }
 
 fn r(o: Pos2, s: f32, x: f32, y: f32, w: f32, h: f32) -> Rect {
@@ -166,61 +176,23 @@ fn mono(p: &egui::Painter, pos: Pos2, align: Align2, t: &str, px: f32, s: f32, c
 // State
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The look, saved once per device (not with the project), so a new instance
-/// in any host opens in the look last picked.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Debug)]
+/// The accent picked in ☰ (an index into `ACCENTS`, or `ACCENTS.len()` for the
+/// user's own colour), saved per device beside the shared `appearance.json`.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 #[serde(default)]
-struct Appearance {
-    dark: bool,
-    dark_variant: u8,
-    accent: u8,
-    font_face: u8,
-    font_steps: i32,
-    /// The look version it was saved under (0 before the field existed).
-    #[serde(default)]
-    look: u8,
+struct AccentPick {
+    on: usize,
+    custom: CustomAccent,
 }
 
-impl Default for Appearance {
-    fn default() -> Self {
-        Self {
-            dark: true,
-            dark_variant: DARK_VARIANT_DEFAULT,
-            accent: ACCENT_DEFAULT,
-            font_face: FONT_DEFAULT,
-            font_steps: FONT_STEPS_DEFAULT,
-            look: LOOK_VERSION,
-        }
-    }
-}
-
-impl Appearance {
-    /// Next to the presets folder, not inside it.
+impl AccentPick {
     fn file() -> PathBuf {
-        crate::presets::legacy_root().join("appearance.json")
+        softsystems_ui::appearance::product_dir(&PRODUCT).join("accent.json")
     }
 
-    /// The saved choices, or the defaults when there's no (readable) file.
-    fn load() -> Self {
-        let mut a: Self = std::fs::read_to_string(Self::file())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        if a.look < 2 {
-            a.dark_variant = DARK_VARIANT_DEFAULT;
-            a.accent = ACCENT_DEFAULT;
-        }
-        if a.look < 3 {
-            a.font_face = FONT_DEFAULT;
-        }
-        a.look = LOOK_VERSION;
-        Self {
-            dark_variant: a.dark_variant.min(theme::DARK_VARIANTS - 1),
-            accent: a.accent.min(theme::ACCENTS - 1),
-            font_face: a.font_face.min(2),
-            font_steps: a.font_steps.clamp(-5, 10),
-            ..a
-        }
+    fn read() -> Option<Self> {
+        let a: Self = serde_json::from_str(&std::fs::read_to_string(Self::file()).ok()?).ok()?;
+        Some(Self { on: a.on.min(ACCENTS.len()), ..a })
     }
 
     fn save(&self) {
@@ -234,17 +206,67 @@ impl Appearance {
     }
 }
 
+/// The look Afterecho saved before v2.49 (`Mooltitwap/appearance.json`): read
+/// once, into the shared appearance and the accent pick.
+#[derive(serde::Deserialize, Clone, Copy, Debug)]
+#[serde(default)]
+struct OldLook {
+    dark: bool,
+    dark_variant: u8,
+    accent: u8,
+    font_steps: i32,
+}
+
+impl Default for OldLook {
+    fn default() -> Self {
+        Self { dark: true, dark_variant: 4, accent: 8, font_steps: 4 }
+    }
+}
+
+impl OldLook {
+    fn read() -> Option<Self> {
+        let path = crate::presets::legacy_root().join("appearance.json");
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    }
+
+    /// Its dark variants were Cool, Warm, Ink, OLED and Mono: OLED stays
+    /// OLED; the rest take Afterecho's own palette (Mono / Paper).
+    fn appearance(self) -> Appearance {
+        Appearance { dark: self.dark, oled: self.dark_variant == 3, palette: 1, text_pct: softsystems_ui::appearance::text_pct_from_steps(self.font_steps) }
+    }
+
+    /// GREEN CYAN MINT BLUE AMBER VIOLET SLATE MONO AFTERECHO → today's row;
+    /// Mint goes to Cyan, Slate to Blue, Mono to Afterecho's.
+    fn accent(self) -> AccentPick {
+        let on = match self.accent {
+            0 => 1,
+            1 | 2 => 2,
+            3 | 6 => 3,
+            4 => 4,
+            5 => 5,
+            _ => 0,
+        };
+        AccentPick { on, ..Default::default() }
+    }
+}
+
+/// A fresh install's look: Afterecho's own palette, dark.
+fn default_look() -> Appearance {
+    Appearance { palette: 1, ..Appearance::default_for(&PRODUCT) }
+}
+
 /// Editor-only state of this page (lives in [`EditorState`]).
 #[derive(Default)]
 pub struct ScopeState {
     inited: bool,
+    /// The shared look (theme, palette, text size) and Afterecho's accent.
     look: Appearance,
-    look_saved: Option<Appearance>,
-    font_applied: Option<u8>,
+    accent: AccentPick,
+    /// A preview run (`AFTERECHO_PREVIEW`): the look is never saved.
+    preview: bool,
+    /// The ☰ Options panel.
+    options: options::Panel,
     shape: Shape,
-    show_menu: bool,
-    /// Hamburger hit rect — a click there doesn't count as "outside the menu".
-    hamb_rect: Option<Rect>,
     /// Param id of the control last touched. Nothing reads it since the
     /// last-touched card went (v2.42); the cells still record it.
     focus: Option<String>,
@@ -329,6 +351,22 @@ fn pattern_values(axis: Axis, shape: PatShape, flip: bool, n: usize, seed: u32, 
 }
 
 impl ScopeState {
+    /// The look at page zoom `s`: the palette and text size picked in ☰, with
+    /// the accent picked there (one of `ACCENTS`, or the user's own colour).
+    fn theme(&self, s: f32) -> Theme {
+        match ACCENTS.get(self.accent.on) {
+            Some(&accent) => Theme::of(&Product { accent, ..PRODUCT }, &self.look, s),
+            None => Theme::of_custom(&PRODUCT, &self.look, &self.accent.custom, s),
+        }
+    }
+
+    /// Save the look (never in a preview).
+    fn save_look(&self) {
+        if !self.preview {
+            let _ = self.look.save(&PRODUCT);
+        }
+    }
+
     /// Select tap `i` and show all its parameters in the lane.
     fn open_tap(&mut self, i: usize) {
         self.sel = Some(i);
@@ -366,8 +404,24 @@ pub fn frame(
         let sc = &mut st.scope;
         if !sc.inited {
             sc.inited = true;
-            sc.look = Appearance::load();
-            sc.look_saved = Some(sc.look);
+            sc.preview = !ios && std::env::var_os("AFTERECHO_PREVIEW").is_some();
+            let file = softsystems_ui::appearance::file(&PRODUCT);
+            if sc.preview {
+                // a preview reads the look but never writes it (nor imports the old one)
+                sc.look = Appearance::read(&file).or_else(|| OldLook::read().map(OldLook::appearance)).unwrap_or_else(default_look);
+                sc.accent = AccentPick::read().or_else(|| OldLook::read().map(OldLook::accent)).unwrap_or_default();
+            } else {
+                let first = Appearance::read(&file).is_none();
+                sc.look = Appearance::load_or_import(&PRODUCT, || Some(OldLook::read().map_or_else(default_look, OldLook::appearance)));
+                sc.accent = match AccentPick::read() {
+                    Some(a) => a,
+                    None => {
+                        let a = if first { OldLook::read().map(OldLook::accent).unwrap_or_default() } else { AccentPick::default() };
+                        a.save();
+                        a
+                    }
+                };
+            }
             // Desktop previews, to check a state without clicking to it:
             // AFTERECHO_PREVIEW=tall,bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
             // saveas|trying|deleting (with AFTERECHO_PRESET_DIR, a folder of presets to show)
@@ -386,7 +440,7 @@ pub fn frame(
                         "type" => sc.y_axis = 4,
                         "slope" => sc.y_axis = 5,
                         "detune" => sc.y_axis = 6,
-                        "menu" => sc.show_menu = true,
+                        "menu" => sc.options.set_open(true),
                         "pattern" => (sc.pat_open, sc.pat_demo) = (true, true),
                         "tap" => sc.lane_tab = 2,
                         "motion" => sc.lane_tab = 1,
@@ -408,41 +462,16 @@ pub fn frame(
                         }
                     }
                 }
-                sc.look_saved = Some(sc.look);
                 // a preview's presets live in their own folder, never the user's
                 if let Some(d) = std::env::var_os("AFTERECHO_PRESET_DIR") {
                     sc.presets.dir = Some((PathBuf::from(d), None));
                 }
             }
         }
-        if sc.look_saved != Some(sc.look) {
-            sc.look.save();
-            sc.look_saved = Some(sc.look);
-        }
     }
     if open_presets {
         st.preset_open = true;
     }
-    {
-        let sc = &mut st.scope;
-        theme::set_font_scale((1.0 + 0.06 * sc.look.font_steps as f32).clamp(0.7, 1.6));
-        if sc.font_applied != Some(sc.look.font_face) {
-            sc.font_applied = Some(sc.look.font_face);
-            let choice = match sc.look.font_face {
-                0 => theme::FontChoice::KarlaInconsolata,
-                1 => theme::FontChoice::PlexDidot,
-                _ => theme::FontChoice::Hanken,
-            };
-            theme::apply_fonts(ui.ctx(), choice);
-        }
-        // Theme, variant and accent live in process-wide atomics that every
-        // instance in the host shares, so publish this instance's look every
-        // frame (plain stores) — otherwise a second Afterecho repaints this one.
-        theme::set_theme(sc.look.dark);
-        theme::set_dark_variant(sc.look.dark_variant);
-        theme::set_accent(sc.look.accent);
-    }
-
     // Desktop: zoom follows the window width and the height keeps the page's
     // aspect. iOS/AUv3: the host sizes the view (`with_host_resize`), so pick
     // the shape whose controls come out biggest there, then fit and centre it.
@@ -456,7 +485,8 @@ pub fn frame(
     } else {
         (egui_state.size().0 as f32 / lay.w).clamp(0.5, 2.5)
     };
-    theme::apply_zoom(ui.ctx(), zoom);
+    // The shared theme, first thing: palette, accent, text size, zoom.
+    softsystems_ui::theme::begin_frame(ui.ctx(), st.scope.theme(zoom));
     if !ios {
         let (w, h) = egui_state.size();
         let want_h = (w as f32 * lay.h / lay.w).round() as u32;
@@ -473,6 +503,7 @@ pub fn frame(
         vp.min
     };
     page(ui, o, s, lay, params, setter, st, tempo);
+    options_panel(ui, o, s, lay, params, setter, &mut st.scope, egui_state, zoom);
     ui.ctx().request_repaint();
 }
 
@@ -494,8 +525,7 @@ fn page(
     st.scope.presets.track(st.preset_open);
     let presets_open = st.preset_open;
     if presets_open {
-        let tall = st.scope.shape == Shape::Tall;
-        preset_sheet::sheet(ui, o, s, l, tall, params, setter, st);
+        preset_sheet::sheet(ui, o, s, l, params, setter, st);
     } else {
         picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
         lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
@@ -503,7 +533,6 @@ fn page(
         colour_card(ui, o, s, l, params, setter, &mut st.scope);
         output_card(ui, o, s, l, params, setter, &mut st.scope.focus);
     }
-    settings_menu(ui, o, s, l, params, setter, &mut st.scope);
     if !presets_open {
         taps_menu(ui, s, params, setter, &mut st.scope);
     }
@@ -525,8 +554,8 @@ fn enum_index<E: Enum + PartialEq>(p: &EnumParam<E>, n: usize) -> usize {
 }
 
 /// Segmented control filling `rect`; returns the newly clicked index.
-pub(crate) fn seg(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32, enabled: bool) -> Option<usize> {
-    seg_ex(ui, rect, labels, active, salt, s, px, &[enabled; 8][..labels.len()])
+pub(crate) fn seg(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, enabled: bool) -> Option<usize> {
+    seg_ex(ui, rect, labels, active, salt, &[enabled; 8][..labels.len()])
 }
 
 /// [`seg`] with each option enabled on its own. Every option is laid out as
@@ -534,89 +563,73 @@ pub(crate) fn seg(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize,
 /// own before it's touched.
 #[allow(clippy::too_many_arguments)]
 fn seg_ex(
-    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32, enabled: &[bool],
+    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, enabled: &[bool],
 ) -> Option<usize> {
-    seg_draw(ui, rect, labels, Some(active), salt, s, px, enabled, false)
+    seg_draw(ui, rect, labels, Some(active), salt, enabled, false)
 }
 
 /// [`seg`] for actions (the pattern menu's shapes): nothing need be picked,
 /// and a click on the pick counts too (Alternate flips, Random re-rolls).
-fn seg_again(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: Option<usize>, salt: &str, s: f32, px: f32) -> Option<usize> {
-    seg_draw(ui, rect, labels, active, salt, s, px, &[], true)
+fn seg_again(ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: Option<usize>, salt: &str) -> Option<usize> {
+    seg_draw(ui, rect, labels, active, salt, &[], true)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn seg_draw(
-    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: Option<usize>, salt: &str, s: f32, px: f32, enabled: &[bool],
-    again: bool,
+    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: Option<usize>, salt: &str, enabled: &[bool], again: bool,
 ) -> Option<usize> {
-    let p = ui.painter().clone();
-    p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0 * s, theme::line()));
-    let w = rect.width() / labels.len().max(1) as f32;
-    let mut picked = None;
-    for (i, l) in labels.iter().enumerate() {
-        let b = Rect::from_min_size(Pos2::new(rect.left() + i as f32 * w, rect.top()), Vec2::new(w, rect.height()));
-        let resp = ui.interact(b, ui.id().with((salt, i)), Sense::click());
-        let enabled = enabled.get(i).copied().unwrap_or(true);
-        let alpha = if enabled { 255 } else { 90 };
-        let on = Some(i) == active;
-        if on {
-            let bar = Rect::from_min_max(Pos2::new(b.left() + 3.0 * s, b.bottom() - 2.0 * s), Pos2::new(b.right() - 3.0 * s, b.bottom()));
-            p.rect_filled(bar, 0.0, theme::with_alpha(INK(), alpha));
-        }
-        let col = if on { INK() } else if enabled && resp.hovered() { INK2() } else { SOFT() };
-        text(&p, b.center(), Align2::CENTER_CENTER, l, px, s, theme::with_alpha(col, alpha));
-        if enabled && epo::tap_or_click(ui, &resp) && (again || !on) {
-            picked = Some(i);
-        }
-    }
-    picked
-}
-
-/// [`seg`] standing up: options stacked on a hairline, the pick ink with a bar
-/// on its left.
-#[allow(clippy::too_many_arguments)]
-fn seg_v(
-    ui: &mut egui::Ui, rect: Rect, labels: &[&str], active: usize, salt: &str, s: f32, px: f32, enabled: &[bool],
-) -> Option<usize> {
-    let p = ui.painter().clone();
-    p.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0 * s, theme::line()));
-    let h = rect.height() / labels.len().max(1) as f32;
-    let mut picked = None;
-    for (i, l) in labels.iter().enumerate() {
-        let b = Rect::from_min_size(Pos2::new(rect.left(), rect.top() + i as f32 * h), Vec2::new(rect.width(), h));
-        let resp = ui.interact(b, ui.id().with((salt, i)), Sense::click());
-        let on = i == active;
-        let enabled = enabled.get(i).copied().unwrap_or(true);
-        if on {
-            p.rect_filled(Rect::from_min_max(Pos2::new(b.left(), b.top() + 3.0 * s), Pos2::new(b.left() + 2.0 * s, b.bottom() - 3.0 * s)), 0.0, INK());
-        }
-        let col = if on { INK() } else if enabled && resp.hovered() { INK2() } else { SOFT() };
-        let col = theme::with_alpha(col, if enabled { 255 } else { 90 });
-        text(&p, Pos2::new(b.left() + 12.0 * s, b.center().y), Align2::LEFT_CENTER, l, px, s, col);
-        if enabled && epo::tap_or_click(ui, &resp) && !on {
-            picked = Some(i);
-        }
-    }
-    picked
-}
-
-/// A flat button; `on` = pressed: outlined when off, filled with ink when on.
-/// Returns its response (click via tap_or_click).
-fn button(ui: &mut egui::Ui, rect: Rect, label: &str, on: bool, salt: &str, s: f32, px: f32) -> egui::Response {
-    let resp = ui.interact(rect, ui.id().with(("btn", salt)), Sense::click());
-    outline(ui.painter(), rect, on, s);
-    let col = if on { PAPER() } else if resp.hovered() { INK() } else { INK2() };
-    text(ui.painter(), rect.center(), Align2::CENTER_CENTER, label, px, s, col);
-    resp
-}
-
-/// The frame every button shares: a hairline outline, or an ink fill when on.
-fn outline(p: &egui::Painter, rect: Rect, on: bool, s: f32) {
-    if on {
-        p.rect_filled(rect, g::R_CTL * s, INK());
+    let id = ui.id().with(("seg", salt));
+    let active_i = active.unwrap_or(usize::MAX);
+    let live = enabled.first().copied().unwrap_or(true);
+    // the shared well segment; it returns the current one too
+    let picked = if enabled.iter().all(|&e| e == live) {
+        controls::seg(ui, rect, labels, active_i, id, live)
     } else {
-        p.rect_stroke(rect, g::R_CTL * s, Stroke::new(1.0 * s, theme::line2()), egui::StrokeKind::Inside);
+        controls::seg_live(ui, rect, labels, active_i, id, enabled)
+    };
+    picked.filter(|&i| again || Some(i) != active)
+}
+
+/// A button (the shared chip): outlined on the card colour, filled when `on`.
+/// True when tapped.
+fn button(ui: &mut egui::Ui, rect: Rect, label: &str, on: bool, salt: &str) -> bool {
+    controls::chip(ui, rect, label, on, ui.id().with(("btn", salt)))
+}
+
+/// A long list as a dropdown and its menu (the shared ones), the open state
+/// in egui's memory; `live[i]` false greys row `i` (a missing entry is live).
+/// Returns a newly picked row.
+fn list_pick(ui: &mut egui::Ui, rect: Rect, salt: &str, names: &[&str], cur: usize, live: &[bool]) -> Option<usize> {
+    let id = ui.id().with(("list", salt));
+    let mut open = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
+    if controls::dropdown(ui, rect, names.get(cur).copied().unwrap_or(""), open, id) {
+        open = !open;
+    }
+    let mut picked = None;
+    if open {
+        let rows: Vec<controls::MenuRow> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| controls::MenuRow::new(*n).on(i == cur).live(live.get(i).copied().unwrap_or(true)))
+            .collect();
+        let out = controls::menu(ui, id.with("menu"), rect, ui.ctx().content_rect(), 1, &rows);
+        picked = out.picked.filter(|&i| i != cur);
+        if out.picked.is_some() || out.dismissed {
+            open = false;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, open));
+    picked
+}
+
+/// The frame a chip has, for boxes that draw their own content (the light/dark
+/// icon, the drag readouts): the card colour with an outline, or `on`'s fill.
+fn outline(p: &egui::Painter, rect: Rect, on: bool, s: f32) {
+    let c = softsystems_ui::t().c;
+    if on {
+        p.rect_filled(rect, g::R_CTL * s, c.on);
+    } else {
+        p.rect_filled(rect, g::R_CTL * s, c.panel);
+        p.rect_stroke(rect, g::R_CTL * s, Stroke::new(1.0, c.line2), egui::StrokeKind::Inside);
     }
 }
 
@@ -705,8 +718,7 @@ fn toggle_cell(
     let (ctl, lab, _) = cell_parts(cell, s);
     let b = Rect::from_center_size(ctl.center(), Vec2::new((cell.width() - 6.0 * s).min(96.0 * s), g::CTL_H * s));
     let on = param.value();
-    let resp = button(ui, b, if on { on_txt } else { off_txt }, on, id, s, 12.0);
-    if epo::tap_or_click(ui, &resp) {
+    if button(ui, b, if on { on_txt } else { off_txt }, on, id) {
         setter.begin_set_parameter(param);
         setter.set_parameter(param, !on);
         setter.end_set_parameter(param);
@@ -734,7 +746,7 @@ fn enum_cell_ex<E: Enum + PartialEq + Copy + 'static>(
     let b = Rect::from_center_size(ctl.center(), Vec2::new(cell.width() - 8.0 * s, g::CTL_H * s));
     let n = names.len();
     let cur = enum_index(param, n);
-    if let Some(i) = seg_ex(ui, b, names, cur, id, s, 12.0, enabled) {
+    if let Some(i) = seg_ex(ui, b, names, cur, id, enabled) {
         set_norm(setter, param, i as f32 / (n - 1) as f32);
         *focus = Some(id.to_string());
     }
@@ -767,12 +779,6 @@ fn paint_diamond(p: &egui::Painter, c: Pos2, rad: f32, stroke: Stroke) {
     p.add(egui::Shape::closed_line(pts, stroke));
 }
 
-fn paint_cross(p: &egui::Painter, c: Pos2, rad: f32, col: Color32, s: f32) {
-    let st = Stroke::new(1.5 * s, col);
-    p.line_segment([c + Vec2::new(-rad, -rad), c + Vec2::new(rad, rad)], st);
-    p.line_segment([c + Vec2::new(-rad, rad), c + Vec2::new(rad, -rad)], st);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Header: ☰ · wordmark · channel modes · preset · A/B · light/dark
 // ─────────────────────────────────────────────────────────────────────────────
@@ -785,33 +791,20 @@ fn header(
 
     // ☰ settings
     let hb = r(o, s, l.pad, y, 38.0, h);
-    let hresp = ui.interact(hb, ui.id().with("sc_hamb"), Sense::click());
-    let open = st.scope.show_menu;
-    outline(ui.painter(), hb, open, s);
-    for k in [-1.0f32, 0.0, 1.0] {
-        let yy = hb.center().y + k * 5.0 * s;
-        ui.painter().line_segment(
-            [Pos2::new(hb.center().x - 8.0 * s, yy), Pos2::new(hb.center().x + 8.0 * s, yy)],
-            Stroke::new(1.6 * s, if open { PAPER() } else if hresp.hovered() { INK() } else { INK2() }),
-        );
-    }
-    if epo::tap_or_click(ui, &hresp) {
-        st.scope.show_menu = !open;
-    }
-    st.scope.hamb_rect = Some(hb);
+    st.scope.options.button(ui, hb, ui.id().with("sc_hamb"));
 
-    // wordmark (its own family, so the UI font can change without it)
+    // wordmark, in Hanken's SemiBold
     ui.painter().text(
         o + Vec2::new(l.pad + 52.0, y + h * 0.5) * s,
         Align2::LEFT_CENTER,
         "Afterecho",
-        FontId::new(22.0 * s, egui::FontFamily::Name(theme::WORDMARK.into())),
+        FontId::new(22.0 * s, softsystems_ui::fonts::semibold()),
         INK(),
     );
 
     // channel modes
     let cm = enum_index(&params.channel_mode, 3);
-    if let Some(i) = seg(ui, r(o, s, l.pad + 176.0, y, l.tabs_w, h), &["Stereo", "M/S", "Mono"], cm, "sc_chan", s, 13.0, true) {
+    if let Some(i) = seg(ui, r(o, s, l.pad + 176.0, y, l.tabs_w, h), &["Stereo", "M/S", "Mono"], cm, "sc_chan", true) {
         set_norm(setter, &params.channel_mode, i as f32 / 2.0);
     }
 
@@ -820,22 +813,20 @@ fn header(
 
     // A / B
     let ab_x = l.w - l.pad - 38.0 - 10.0 - 80.0;
-    if let Some(i) = seg(ui, r(o, s, ab_x, y, 80.0, h), &["A", "B"], st.ab_active as usize, "sc_ab", s, 13.0, true) {
+    if let Some(i) = seg(ui, r(o, s, ab_x, y, 80.0, h), &["A", "B"], st.ab_active as usize, "sc_ab", true) {
         crate::gui_v3::ab_switch(st, params, setter, i as u8);
     }
 
     // Freeze: a performance switch, so it sits up here in reach whatever the
     // lane shows. Ink when it holds.
     let frozen = params.freeze.value();
-    let fresp = button(ui, r(o, s, ab_x - 16.0 - 96.0, y, 96.0, h), "Freeze", frozen, "sc_freeze", s, 13.0);
-    if epo::tap_or_click(ui, &fresp) {
+    if button(ui, r(o, s, ab_x - 16.0 - 96.0, y, 96.0, h), "Freeze", frozen, "sc_freeze") {
         setter.begin_set_parameter(&params.freeze);
         setter.set_parameter(&params.freeze, !frozen);
         setter.end_set_parameter(&params.freeze);
     }
     // Clear (v2.43): empty the delay now — the panic button.
-    let cresp = button(ui, r(o, s, ab_x - 16.0 - 96.0 - 8.0 - 72.0, y, 72.0, h), "Clear", false, "sc_clear", s, 13.0);
-    if epo::tap_or_click(ui, &cresp) {
+    if button(ui, r(o, s, ab_x - 16.0 - 96.0 - 8.0 - 72.0, y, 72.0, h), "Clear", false, "sc_clear") {
         params.clear_request.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -844,14 +835,10 @@ fn header(
     let tresp = ui.interact(tb, ui.id().with("sc_theme"), Sense::click());
     outline(ui.painter(), tb, false, s);
     let col = if tresp.hovered() { INK() } else { INK2() };
-    let c = tb.center();
-    ui.painter().circle_stroke(c, 4.0 * s, Stroke::new(1.4 * s, col));
-    for i in 0..8 {
-        let (sa, ca) = (i as f32 * std::f32::consts::TAU / 8.0).sin_cos();
-        ui.painter().line_segment([c + Vec2::new(sa, ca) * 6.4 * s, c + Vec2::new(sa, ca) * 8.6 * s], Stroke::new(1.4 * s, col));
-    }
+    softsystems_ui::paint::theme_icon(ui.painter(), tb.center(), col);
     if epo::tap_or_click(ui, &tresp) {
-        st.scope.look.dark = !st.scope.look.dark;
+        st.scope.look.toggle_dark();
+        st.scope.save_look();
     }
 }
 
@@ -1169,8 +1156,17 @@ fn n_active(params: &PetalParams) -> usize {
 fn tap_col(i: usize, n: usize) -> Color32 {
     let t = if n <= 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
     let c = G();
-    let f = |v: u8| (v as f32 + (255.0 - v as f32) * 0.5 * t).round() as u8;
-    Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
+    // later taps step away from the page: lighter on dark, darker on light,
+    // so every tap keeps 3:1 on the page, the cards and the wells
+    let (to, k) = if theme::is_dark() { (Color32::WHITE, 0.5 * t) } else { (INK(), 0.15 + 0.35 * t) };
+    let f = |v: u8, w: u8| (v as f32 + (w as f32 - v as f32) * k).round() as u8;
+    Color32::from_rgb(f(c.r(), to.r()), f(c.g(), to.g()), f(c.b(), to.b()))
+}
+
+/// A data colour as text on `ground`: itself when it reads at 4.5:1 there,
+/// else ink (the shared contrast rule, migration step 11).
+fn readable(col: Color32, ground: Color32) -> Color32 {
+    if softsystems_ui::tokens::contrast(col, ground) >= 4.5 { col } else { INK() }
 }
 
 /// A rounded label (a dot's value, the time on an axis, a handle's readout),
@@ -1341,18 +1337,15 @@ fn picture(
     // The title opens the Taps menu (pattern tools; values only, so not in
     // the Time view); the chevron says so.
     let tb = r(o, s, x + 10.0, y + 10.0, 74.0, 28.0);
-    let tresp = ui.interact(tb, ui.id().with("sc_taps_menu"), Sense::click());
     if sc.time_view {
         sc.pat_open = false;
     }
-    outline(&p, tb, sc.pat_open, s);
-    let tcol = if sc.pat_open { PAPER() } else if sc.time_view { theme::with_alpha(INK2(), 90) } else if tresp.hovered() { INK() } else { INK2() };
-    text(&p, Pos2::new(tb.left() + 12.0 * s, tb.center().y), Align2::LEFT_CENTER, "Taps", 12.0, s, tcol);
-    let cv = Pos2::new(tb.right() - 16.0 * s, tb.center().y + 1.5 * s);
-    let chev = Stroke::new(1.4 * s, tcol);
-    p.line_segment([cv + Vec2::new(-4.0, -2.5) * s, cv], chev);
-    p.line_segment([cv, cv + Vec2::new(4.0, -2.5) * s], chev);
-    if !sc.time_view && epo::tap_or_click(ui, &tresp) {
+    let tapped = controls::dropdown(ui, tb, "Taps", sc.pat_open, ui.id().with("sc_taps_menu"));
+    if sc.time_view {
+        // greyed: the pattern tools set values, which the Time view doesn't show
+        p.rect_filled(tb, g::R_CTL * s, theme::with_alpha(PANEL(), 150));
+    }
+    if !sc.time_view && tapped {
         sc.pat_open = !sc.pat_open;
     }
     sc.pat_btn = Some(tb);
@@ -1368,21 +1361,20 @@ fn picture(
     // header, right to left: Field / Bars (the value views'), then in the
     // Time view Snap and its grid, so the view switch stays put
     let right = x + w - 12.0;
-    if let Some(i) = seg(ui, r(o, s, right - 112.0, y + 10.0, 112.0, 28.0), &["Field", "Bars"], sc.view, "sc_view", s, 12.0, !sc.time_view) {
+    if let Some(i) = seg(ui, r(o, s, right - 112.0, y + 10.0, 112.0, 28.0), &["Field", "Bars"], sc.view, "sc_view", !sc.time_view) {
         sc.view = i;
     }
     if sc.time_view {
         let xr = o.x + (right - 122.0) * s;
         rule(ui.painter(), Pos2::new(xr, o.y + (y + 14.0) * s), Pos2::new(xr, o.y + (y + 34.0) * s), s);
         let snap = params.tap_snap.value();
-        let resp = button(ui, r(o, s, right - 188.0, y + 10.0, 56.0, 28.0), "Snap", snap, "sc_snap", s, 12.0);
-        if epo::tap_or_click(ui, &resp) {
+        if button(ui, r(o, s, right - 188.0, y + 10.0, 56.0, 28.0), "Snap", snap, "sc_snap") {
             setter.begin_set_parameter(&params.tap_snap);
             setter.set_parameter(&params.tap_snap, !snap);
             setter.end_set_parameter(&params.tap_snap);
         }
         let grid = (params.tap_grid.value() - 1).clamp(0, 3) as usize;
-        if let Some(i) = seg(ui, r(o, s, right - 340.0, y + 10.0, 144.0, 28.0), &["1", "1/2", "1/3", "1/4"], grid, "sc_grid", s, 12.0, snap) {
+        if let Some(i) = seg(ui, r(o, s, right - 340.0, y + 10.0, 144.0, 28.0), &["1", "1/2", "1/3", "1/4"], grid, "sc_grid", snap) {
             setter.begin_set_parameter(&params.tap_grid);
             setter.set_parameter(&params.tap_grid, i as i32 + 1);
             setter.end_set_parameter(&params.tap_grid);
@@ -1395,9 +1387,10 @@ fn picture(
     let axis_i = if mono && sc.y_axis == 0 { 1 } else { sc.y_axis };
     let mut names = vec!["Time"];
     names.extend(Axis::ALL.map(Axis::name));
-    let list = r(o, s, x + 14.0, y + 56.0, 64.0, 26.0 * names.len() as f32);
     let cur = if sc.time_view { 0 } else { axis_i + 1 };
-    if let Some(i) = seg_v(ui, list, &names, cur, "sc_y", s, 12.0, &[true, !mono, true, true, true, true, true, true]) {
+    let live = [true, !mono, true, true, true, true, true, true];
+    // a long list: a dropdown (owner, 2026-11-06)
+    if let Some(i) = list_pick(ui, r(o, s, x + 14.0, y + 56.0, 92.0, g::CTL_H), "sc_y", &names, cur, &live) {
         sc.time_view = i == 0;
         if i > 0 {
             sc.y_axis = i - 1;
@@ -1760,7 +1753,7 @@ fn lane(
     }
     let shown = sc.sel.unwrap_or(sc.last_tap).min(n - 1);
     let tap_tab = format!("Tap {}", shown + 1);
-    if let Some(i) = seg(ui, r(o, s, x + 14.0, y + 7.0, 210.0, 26.0), &["Echo", "Motion", &tap_tab], sc.lane_tab, "sc_lane", s, 13.0, true) {
+    if let Some(i) = seg(ui, r(o, s, x + 14.0, y + 7.0, 210.0, 26.0), &["Echo", "Motion", &tap_tab], sc.lane_tab, "sc_lane", true) {
         if i == 2 {
             sc.open_tap(shown);
         } else {
@@ -1798,7 +1791,7 @@ fn lane(
             // Frozen, the loop keeps its length, so the choice waits.
             let locked = params.feedback_time_locked.value();
             let free = !params.freeze.value();
-            if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 140.0, 26.0), &["Auto", "Manual"], if locked { 0 } else { 1 }, "sc_cycle", s, 12.0, free) {
+            if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 140.0, 26.0), &["Auto", "Manual"], if locked { 0 } else { 1 }, "sc_cycle", free) {
                 setter.begin_set_parameter(&params.feedback_time_locked);
                 setter.set_parameter(&params.feedback_time_locked, i == 0);
                 setter.end_set_parameter(&params.feedback_time_locked);
@@ -1816,10 +1809,9 @@ fn lane(
             // ‹ Tap 3 of 8 › steps through the live taps, wrapping.
             let (bw, lw) = (30.0, 92.0);
             let nx = x + w - 14.0 - bw;
-            let prev = button(ui, r(o, s, nx - lw - bw, y + 7.0, bw, 26.0), "‹", false, "sc_tap_prev", s, 15.0);
-            let next = button(ui, r(o, s, nx, y + 7.0, bw, 26.0), "›", false, "sc_tap_next", s, 15.0);
+            let back = button(ui, r(o, s, nx - lw - bw, y + 7.0, bw, 26.0), "‹", false, "sc_tap_prev");
+            let fwd = button(ui, r(o, s, nx, y + 7.0, bw, 26.0), "›", false, "sc_tap_next");
             text(&p, r(o, s, nx - lw, y + 7.0, lw, 26.0).center(), Align2::CENTER_CENTER, &format!("Tap {} of {n}", t + 1), 12.0, s, INK2());
-            let (back, fwd) = (epo::tap_or_click(ui, &prev), epo::tap_or_click(ui, &next));
             let step = fwd as i32 - back as i32;
             if step != 0 {
                 t = (t as i32 + step).rem_euclid(n as i32) as usize;
@@ -1897,7 +1889,7 @@ fn feedback_cell(ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, pa
         p.add(egui::Shape::line(arc, Stroke::new(3.0 * s, theme::with_alpha(theme::accent(1), alpha))));
     }
     text(p, lab, Align2::CENTER_CENTER, "Feedback", 11.0, s, theme::with_alpha(INK2(), alpha));
-    let col = if param.value() > 1.0 { theme::accent(1) } else { INK() };
+    let col = if param.value() > 1.0 { readable(theme::accent(1), PANEL()) } else { INK() };
     mono(p, val, Align2::CENTER_CENTER, &param.normalized_value_to_string(n, true), 11.5, s, theme::with_alpha(col, alpha));
 }
 
@@ -1914,33 +1906,25 @@ fn stepper_cell(
     let (ctl, lab, val) = cell_parts(cell, s);
     let w = (cell.width() - 4.0 * s).min(76.0 * s);
     let pill = Rect::from_center_size(ctl.center(), Vec2::new(w, g::CTL_H * s));
-    outline(ui.painter(), pill, false, s);
-    let aw = 20.0 * s;
     let (lo, hi) = (param.range().unnormalize(0.0), param.range().unnormalize(1.0));
     let v = param.value();
-    for (dir, rect, glyph) in [
-        (-1, Rect::from_min_size(pill.min, Vec2::new(aw, pill.height())), "‹"),
-        (1, Rect::from_min_size(Pos2::new(pill.right() - aw, pill.top()), Vec2::new(aw, pill.height())), "›"),
-    ] {
-        let resp = ui.interact(rect, ui.id().with(("step", id, dir)), Sense::click());
-        let to = (v + dir).clamp(lo, hi);
-        let col = if to == v { theme::with_alpha(INK2(), 90) } else if resp.hovered() { INK() } else { INK2() };
-        text(ui.painter(), rect.center(), Align2::CENTER_CENTER, glyph, 15.0, s, col);
-        if to != v && epo::tap_or_click(ui, &resp) {
-            setter.begin_set_parameter(param);
-            setter.set_parameter(param, to);
-            setter.end_set_parameter(param);
-            *focus = Some(id.to_string());
-        }
+    let shown = param.normalized_value_to_string(param.unmodulated_normalized_value(), false);
+    // the shared stepper: ‹ › step, an end's arrow goes at the end
+    let ends = controls::Ends { down: v > lo, up: v < hi };
+    if let controls::Step::By(d) = controls::stepper(ui, pill, &shown, ui.id().with(("step", id)), ends, true) {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, (v + d).clamp(lo, hi));
+        setter.end_set_parameter(param);
+        *focus = Some(id.to_string());
     }
-    let mid = Rect::from_min_max(Pos2::new(pill.left() + aw, pill.top()), Pos2::new(pill.right() - aw, pill.bottom()));
+    // and the value drags up and down, like a knob
+    let zone = softsystems_ui::tokens::STEP_ZONE * s;
+    let mid = Rect::from_min_max(Pos2::new(pill.left() + zone, pill.top()), Pos2::new(pill.right() - zone, pill.bottom()));
     let resp = ui.interact(mid, ui.id().with(("step_drag", id)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
     if epo::knob_drive(ui, setter, param, mid, &resp) {
         *focus = Some(id.to_string());
     }
     let p = ui.painter();
-    let shown = param.normalized_value_to_string(param.unmodulated_normalized_value(), false);
-    mono(p, mid.center(), Align2::CENTER_CENTER, &shown, 15.0, s, INK());
     text(p, lab, Align2::CENTER_CENTER, label, 11.0, s, INK2());
     text(p, val, Align2::CENTER_CENTER, sub, 11.0, s, SOFT());
 }
@@ -1961,7 +1945,7 @@ fn motion_panel(
     // where there's room for them (the grid's row names pick them too).
     let pills = r(o, s, x + w - 14.0 - 168.0, y + 7.0, 168.0, 26.0);
     if !l.lane_stacked {
-        if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 372.0, 26.0), &matrix::SRC_NAMES, src, "sc_mx_src", s, 12.0, true) {
+        if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 372.0, 26.0), &matrix::SRC_NAMES, src, "sc_mx_src", true) {
             sc.mx_src = i;
         }
     }
@@ -2028,7 +2012,7 @@ fn lfo_editor(
         let (ctl, _, _) = cell_parts(c(0, 4), s);
         (Rect::from_center_size(ctl.center(), Vec2::new(ctl.width(), 26.0 * s)), None, [c(4, 1), c(5, 2), c(7, 1)])
     } else {
-        let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(64.0 * s, 6.0 * 22.0 * s));
+        let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(96.0 * s, g::CTL_H * s));
         let right = Rect::from_min_max(Pos2::new(list.right() + 14.0 * s, ed.top()), ed.max);
         let wave = Rect::from_min_size(right.min + Vec2::new(0.0, 2.0 * s), Vec2::new(right.width(), 52.0 * s));
         let row = Rect::from_min_max(Pos2::new(right.left(), wave.bottom() + 4.0 * s), right.max);
@@ -2036,9 +2020,9 @@ fn lfo_editor(
         (list, Some(wave), [c(0), c(1), c(2)])
     };
     let pick = if stacked {
-        seg_ex(ui, list, &SHAPES, cur.min(6), &format!("sc_lfo_shape{k}"), s, 11.0, &[true; 6])
+        seg_ex(ui, list, &SHAPES, cur.min(6), &format!("sc_lfo_shape{k}"), &[true; 6])
     } else {
-        seg_v(ui, list, &SHAPES, cur.min(6), &format!("sc_lfo_shape{k}"), s, 12.0, &[])
+        list_pick(ui, list, &format!("sc_lfo_shape{k}"), &SHAPES, cur.min(6), &[])
     };
     if let Some(i) = pick {
         set_norm(setter, &lfo.shape, i as f32 / 6.0);
@@ -2078,7 +2062,7 @@ fn bool_seg_cell(
 ) {
     let (ctl, lab, _) = cell_parts(cell, s);
     let b = Rect::from_center_size(ctl.center(), Vec2::new((cell.width() - 8.0 * s).min(84.0 * s), g::CTL_H * s));
-    if let Some(i) = seg(ui, b, &names, param.value() as usize, id, s, 12.0, true) {
+    if let Some(i) = seg(ui, b, &names, param.value() as usize, id, true) {
         setter.begin_set_parameter(param);
         setter.set_parameter(param, i == 1);
         setter.end_set_parameter(param);
@@ -2197,7 +2181,7 @@ fn mx_grid(
             let v = cell.value();
             if v.abs() > 1e-4 {
                 p.rect_filled(c, 3.0 * s, theme::with_alpha(src_col, 40));
-                mono_text(&p, c.center(), &format!("{:+.0}", v * 100.0), s, src_col);
+                mono_text(&p, c.center(), &format!("{:+.0}", v * 100.0), s, readable(src_col, PANEL()));
             } else {
                 p.rect_filled(c, 3.0 * s, INSET());
             }
@@ -2598,7 +2582,8 @@ fn time_card(
     text(&p, Pos2::new(taps.center().x, sp_top + g::LBL_H * 0.5 * s), Align2::CENTER_CENTER, "Spacing", 11.0, s, INK2());
     let list = Rect::from_min_max(Pos2::new(taps.left() + 8.0 * s, sp_top + (g::LBL_H + 4.0) * s), Pos2::new(taps.right(), inner.bottom()));
     let cur = enum_index(&params.spacing_mode, 4);
-    if let Some(i) = seg_v(ui, list, &["Lin", "Exp", "Log", "Euclid"], cur, "spacing_mode", s, 12.0, &[]) {
+    let picked = controls::seg_v(ui, list, &["Lin", "Exp", "Log", "Euclid"], cur, ui.id().with(("seg", "spacing_mode")), &[]);
+    if let Some(i) = picked.filter(|&i| i != cur) {
         set_norm(setter, &params.spacing_mode, i as f32 / 3.0);
         *focus = Some("spacing_mode".into());
     }
@@ -2751,7 +2736,7 @@ fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Peta
     let rect = r(o, s, l.right_x, l.colour.0, l.right_w, l.colour.1);
     let inner = card(ui, rect, "Colour", s);
     let tabs = Rect::from_min_size(Pos2::new(rect.right() - 254.0 * s, rect.top() + 7.0 * s), Vec2::new(240.0, 26.0) * s);
-    if let Some(i) = seg(ui, tabs, &["Diffuse", "Tape", "Saturate"], sc.colour_tab, "sc_colour", s, 12.0, true) {
+    if let Some(i) = seg(ui, tabs, &["Diffuse", "Tape", "Saturate"], sc.colour_tab, "sc_colour", true) {
         sc.colour_tab = i;
     }
     // each stage's on/off dot sits just after its name
@@ -2803,7 +2788,7 @@ fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Peta
     let down = f32::from_bits(params.guard_db.load(std::sync::atomic::Ordering::Relaxed));
     if params.ear_guard.value() && down > 0.1 {
         let (_, _, val) = cell_parts(c(3), s);
-        mono(ui.painter(), val, Align2::CENTER_CENTER, &format!("−{down:.1} dB"), 11.5, s, theme::accent(1));
+        mono(ui.painter(), val, Align2::CENTER_CENTER, &format!("−{down:.1} dB"), 11.5, s, readable(theme::accent(1), PANEL()));
     }
     let xr = c(4).left() - 4.0 * s;
     rule(ui.painter(), Pos2::new(xr, inner.top() + 8.0 * s), Pos2::new(xr, inner.bottom() - 4.0 * s), s);
@@ -2871,7 +2856,7 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
             group_head(&p, at(16.0, 42.0, 100.0, 12.0).left_center(), Align2::LEFT_CENTER, "Shape", s);
             let cur = sc.pat_shape.and_then(|sh| PatShape::ALL.iter().position(|&x| x == sh));
             let labels = ["Alternate", "Ramp down", "Ramp up", "Random"];
-            if let Some(i) = seg_again(ui, at(16.0, 50.0, 298.0, 28.0), &labels, cur, "sc_pat_shape", s, 12.0) {
+            if let Some(i) = seg_again(ui, at(16.0, 50.0, 298.0, 28.0), &labels, cur, "sc_pat_shape") {
                 let shape = PatShape::ALL[i];
                 match shape {
                     PatShape::Alternate => sc.pat_flip = sc.pat_shape == Some(shape) && !sc.pat_flip,
@@ -2924,8 +2909,7 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
             mono(&p, at(164.0, 130.0, 150.0, 16.0).right_center(), Align2::RIGHT_CENTER, &end(range[1]), 12.0, s, INK2());
 
             rule(&p, at(16.0, 158.0, 0.0, 0.0).min, at(314.0, 158.0, 0.0, 0.0).min, s);
-            let reset = button(ui, at(16.0, 168.0, 76.0, 26.0), "Reset", false, "sc_pat_reset", s, 12.0);
-            if epo::tap_or_click(ui, &reset) {
+            if button(ui, at(16.0, 168.0, 76.0, 26.0), "Reset", false, "sc_pat_reset") {
                 pattern_keep(params, sc, ai);
                 for tap in params.taps.iter().take(n) {
                     axis.set(setter, tap, axis.neutral());
@@ -2933,8 +2917,8 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
                 sc.pat_shape = None;
             }
             let can_undo = !sc.pat_undo[ai].is_empty();
-            let undo = button(ui, at(100.0, 168.0, 76.0, 26.0), "Undo", false, "sc_pat_undo", s, 12.0);
-            if epo::tap_or_click(ui, &undo) {
+            let undo = at(100.0, 168.0, 76.0, 26.0);
+            if button(ui, undo, "Undo", false, "sc_pat_undo") {
                 if let Some(vals) = sc.pat_undo[ai].pop() {
                     for (tap, v) in params.taps.iter().zip(vals) {
                         axis.set(setter, tap, v);
@@ -2943,7 +2927,7 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
                 }
             }
             if !can_undo {
-                p.rect_filled(undo.rect, 6.0 * s, theme::with_alpha(PANEL(), 150));
+                p.rect_filled(undo, g::R_CTL * s, theme::with_alpha(PANEL(), 150));
             }
             text(&p, at(184.0, 168.0, 130.0, 26.0).right_center(), Align2::RIGHT_CENTER, "every tap, this axis", 11.0, s, SOFT());
         });
@@ -2959,135 +2943,49 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
 // radius, fixed 8 px row gaps)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn settings_menu(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState) {
-    if !sc.show_menu {
-        return;
+/// The ☰ Options panel (softsystems-ui): Theme, Palette, Text size and Size,
+/// then Afterecho's own rows: Accent, the Detune quality, the preset folder.
+#[allow(clippy::too_many_arguments)]
+fn options_panel(
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState,
+    egui_state: &EguiState, zoom: f32,
+) {
+    let ios = cfg!(target_os = "ios");
+    let at = o + Vec2::new(l.pad, g::HEAD_Y + g::HEAD_H + 8.0) * s;
+    let burger = r(o, s, l.pad, g::HEAD_Y, 38.0, g::HEAD_H);
+    let mut accent_changed = false;
+    let mut reveal = false;
+    let ScopeState { look, accent, options, .. } = sc;
+    let env = Env { product: &PRODUCT, look, zoom: (!ios).then_some(Zoom { now: zoom, steps: &ZOOMS }), licence: None };
+    let out = options.show(ui, at, burger, env, |rows| {
+        let colors: Vec<Color32> = ACCENTS.iter().map(|a| a.get(softsystems_ui::t().dark)).collect();
+        accent_changed = rows.accent("Accent", &colors, &mut accent.on, &mut accent.custom);
+        rows.section("Sound");
+        // how detuned taps are shifted (v2.45): saved with the sound
+        let clean = params.detune_quality.value() == crate::params::DetuneQuality::Clean;
+        if let Some(i) = rows.seg("Detune", &["Light", "Clean · 3× CPU"], clean as usize) {
+            if (i == 1) != clean {
+                set_norm(setter, &params.detune_quality, i as f32);
+            }
+        }
+        // the preset folder lives inside the app sandbox on iPad: nothing to reveal there
+        if !ios {
+            rows.section("Presets");
+            reveal = rows.button("Folder", "Open preset folder");
+        }
+    });
+    if out.look_changed {
+        sc.save_look();
     }
-    let anchor = o + Vec2::new(l.pad, g::HEAD_Y + g::HEAD_H + 8.0) * s;
-    let fsc = theme::font_scale();
-    let area = egui::Area::new(Id::new("afterecho_settings"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(anchor)
-        .show(ui.ctx(), |ui| {
-            egui::Frame::new()
-                .fill(PANEL())
-                .stroke(Stroke::new(tk::stroke_outline() * s, theme::line2()))
-                .corner_radius(16.0 * s)
-                .inner_margin(egui::Margin::symmetric((16.0 * s) as i8, (14.0 * s) as i8))
-                .show(ui, |ui| {
-                    ui.set_width(300.0 * s);
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0 * s, 8.0 * s);
-
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Settings").size(tk::font_label() * s * fsc).color(INK()));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (rr, resp) = ui.allocate_exact_size(Vec2::splat(18.0 * s), Sense::click());
-                            let col = if resp.hovered() { INK() } else { SOFT() };
-                            paint_cross(ui.painter(), rr.center(), 4.0 * s, col, s);
-                            if epo::tap_or_click(ui, &resp) {
-                                sc.show_menu = false;
-                            }
-                        });
-                    });
-
-                    menu_section(ui, "Appearance", s);
-                    menu_rows(ui, s, |ui| {
-                        menu_row(ui, "Theme", s, |ui| {
-                            ui.horizontal(|ui| {
-                                for (i, name) in [(4u8, "Mono"), (0, "Cool"), (1, "Warm"), (2, "Ink"), (3, "OLED")] {
-                                    if epo::chip(ui, name, sc.look.dark_variant == i) {
-                                        sc.look.dark_variant = i;
-                                    }
-                                }
-                            });
-                        });
-                        menu_row(ui, "Accent", s, |ui| {
-                            ui.horizontal(|ui| {
-                                // Each swatch's cell holds its ring (v2.46): a ring
-                                // drawn past the cell was clipped square.
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                for i in std::iter::once(theme::ACCENTS - 1).chain(0..theme::ACCENTS - 1) {
-                                    let sz = 24.0 * s;
-                                    let (rr, resp) = ui.allocate_exact_size(Vec2::splat(sz), Sense::click());
-                                    let p = ui.painter();
-                                    p.circle_filled(rr.center(), 9.0 * s, theme::accent_swatch(i as usize));
-                                    if sc.look.accent == i {
-                                        p.circle_stroke(rr.center(), 10.5 * s, Stroke::new(1.5 * s, INK()));
-                                    }
-                                    if epo::tap_or_click(ui, &resp.on_hover_text(theme::ACCENT_NAMES[i as usize])) {
-                                        sc.look.accent = i;
-                                    }
-                                }
-                            });
-                        });
-                        menu_row(ui, "Font", s, |ui| {
-                            ui.horizontal(|ui| {
-                                if epo::chip(ui, "Hanken", sc.look.font_face == 2) {
-                                    sc.look.font_face = 2;
-                                }
-                                if epo::chip(ui, "Karla", sc.look.font_face == 0) {
-                                    sc.look.font_face = 0;
-                                }
-                                if epo::chip(ui, "Plex", sc.look.font_face == 1) {
-                                    sc.look.font_face = 1;
-                                }
-                            });
-                        });
-                        menu_row(ui, "Text size", s, |ui| {
-                            match menu_stepper(ui, s, &format!("{:+}", sc.look.font_steps), sc.look.font_steps == FONT_STEPS_DEFAULT) {
-                                Step::Dec => sc.look.font_steps = (sc.look.font_steps - 1).max(-5),
-                                Step::Inc => sc.look.font_steps = (sc.look.font_steps + 1).min(10),
-                                Step::Reset => sc.look.font_steps = FONT_STEPS_DEFAULT,
-                                Step::None => {}
-                            }
-                        });
-                    });
-
-                    menu_section(ui, "Sound", s);
-                    menu_rows(ui, s, |ui| {
-                        // how detuned taps are shifted (v2.45): saved with the sound
-                        menu_row(ui, "Detune", s, |ui| {
-                            ui.horizontal(|ui| {
-                                let clean = params.detune_quality.value() == crate::params::DetuneQuality::Clean;
-                                for (name, want) in [("Light", false), ("Clean · 3× CPU", true)] {
-                                    if epo::chip(ui, name, clean == want) && clean != want {
-                                        setter.begin_set_parameter(&params.detune_quality);
-                                        setter.set_parameter_normalized(&params.detune_quality, if want { 1.0 } else { 0.0 });
-                                        setter.end_set_parameter(&params.detune_quality);
-                                    }
-                                }
-                            });
-                        });
-                    });
-
-                    // The preset folder lives inside the app sandbox on iPad, so
-                    // there is no folder to reveal there.
-                    if !cfg!(target_os = "ios") {
-                        menu_section(ui, "Presets", s);
-                        if epo::chip(ui, "Open preset folder", false) {
-                            reveal_presets();
-                            sc.show_menu = false;
-                        }
-                    }
-
-                    ui.add_space(2.0 * s);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(concat!("Afterecho ", env!("CARGO_PKG_VERSION")))
-                                .size(tk::font_body() * 0.9 * s * fsc)
-                                .color(theme::FAINT()),
-                        );
-                    });
-                });
-        });
-    // A click outside the panel closes it — except on the hamburger, which owns
-    // open/close itself (a position test; egui can re-run a frame's passes).
-    let on_hamburger = ui
-        .ctx()
-        .input(|i| i.pointer.interact_pos())
-        .is_some_and(|pos| sc.hamb_rect.is_some_and(|hr| hr.contains(pos)));
-    if !on_hamburger && area.response.clicked_elsewhere() {
-        sc.show_menu = false;
+    if accent_changed && !sc.preview {
+        sc.accent.save();
+    }
+    if let Some(z) = out.zoom {
+        egui_state.set_requested_size(((l.w * z).round() as u32, (l.h * z).round() as u32));
+    }
+    if reveal {
+        reveal_presets();
+        sc.options.set_open(false);
     }
 }
 
@@ -3100,76 +2998,58 @@ fn reveal_presets() {
     }
 }
 
-/// Section header: small soft caps with a hairline above it.
-fn menu_section(ui: &mut egui::Ui, t: &str, s: f32) {
-    ui.add_space(4.0 * s);
-    let (rr, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0 * s), Sense::hover());
-    ui.painter().line_segment([rr.left_center(), rr.right_center()], Stroke::new(tk::stroke_outline() * s, theme::line()));
-    ui.add_space(2.0 * s);
-    ui.label(
-        RichText::new(t.to_uppercase())
-            .size(tk::font_body() * 0.85 * s * theme::font_scale())
-            .extra_letter_spacing(0.8 * s)
-            .color(SOFT()),
-    );
-}
-
-/// One menu section's rows, stacked with a uniform gap.
-fn menu_rows(ui: &mut egui::Ui, s: f32, body: impl FnOnce(&mut egui::Ui)) {
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 8.0 * s;
-        body(ui);
-    });
-}
-
-/// A `label · control` row; the label sits in a fixed-width slot so every row's
-/// control starts on the same x. (Not an `egui::Grid`: a Grid requests a
-/// discard pass on first layout, which replays the hamburger click.)
-fn menu_row(ui: &mut egui::Ui, t: &str, s: f32, control: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        let (rr, _) = ui.allocate_exact_size(Vec2::new(100.0 * s, tk::ctl_h() * s), Sense::hover());
-        ui.painter().text(rr.left_center(), Align2::LEFT_CENTER, t, FontId::proportional(tk::font_body() * s * theme::font_scale()), INK2());
-        control(ui);
-    });
-}
-
-enum Step {
-    None,
-    Dec,
-    Inc,
-    Reset,
-}
-
-/// `[−] value [+]  Reset` — the value sits in a fixed-width slot so the row never
-/// reflows as it changes; Reset fades out when already at the default.
-fn menu_stepper(ui: &mut egui::Ui, s: f32, value: &str, at_default: bool) -> Step {
-    let mut out = Step::None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0 * s;
-        if epo::chip(ui, "−", false) {
-            out = Step::Dec;
-        }
-        let (rr, _) = ui.allocate_exact_size(Vec2::new(38.0 * s, tk::ctl_h() * s), Sense::hover());
-        ui.painter().text(rr.center(), Align2::CENTER_CENTER, value, FontId::proportional(tk::font_body() * s * theme::font_scale()), INK());
-        if epo::chip(ui, "+", false) {
-            out = Step::Inc;
-        }
-        ui.add_space(4.0 * s);
-        ui.add_enabled_ui(!at_default, |ui| {
-            if at_default {
-                ui.multiply_opacity(0.35);
-            }
-            if epo::chip_sm(ui, "Reset", false) {
-                out = Step::Reset;
-            }
-        });
-    });
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every palette, theme and accent Afterecho offers, as the theme each sets.
+    fn every_theme() -> Vec<(String, Theme)> {
+        let mut out = Vec::new();
+        for palette in [0u8, 1] {
+            for th in 0..3 {
+                for (k, accent) in ACCENTS.iter().enumerate() {
+                    let mut look = Appearance { palette, ..Appearance::default_for(&PRODUCT) };
+                    look.set_theme(th);
+                    let t = Theme::of(&Product { accent: *accent, ..PRODUCT }, &look, 1.0);
+                    out.push((format!("palette {palette} theme {th} accent {k}"), t));
+                }
+            }
+        }
+        out
+    }
+
+    /// The shared contrast rule (owner, 2026-11-02; migration step 11): a
+    /// data colour reads at 3:1 as a mark (the taps, the sources' dots,
+    /// lines and bars) and 4.5:1 as text (a matrix cell's value), on the
+    /// grounds it's drawn on.
+    #[test]
+    fn data_colours_read_on_their_grounds() {
+        use softsystems_ui::tokens::contrast;
+        let mut bad = Vec::new();
+        for (name, th) in every_theme() {
+            th.make_current();
+            let c = th.c;
+            let marks: Vec<(String, Color32)> = (0..6)
+                .map(|i| (format!("hue {i}"), th.hue(i)))
+                .chain([(String::from("first tap"), tap_col(0, 16)), (String::from("last tap"), tap_col(15, 16))])
+                .collect();
+            for (what, col) in &marks {
+                for (ground, g) in [("page", c.page), ("card", c.panel), ("well", c.well)] {
+                    let k = contrast(*col, g);
+                    if k < 3.0 {
+                        bad.push(format!("{name}: {what} on {ground} {k:.2}"));
+                    }
+                }
+            }
+            for i in 0..6 {
+                let k = contrast(readable(th.hue(i), c.panel), c.panel);
+                if k < 4.5 {
+                    bad.push(format!("{name}: hue {i} as text on card {k:.2}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} short:\n{}", bad.len(), bad.join("\n"));
+    }
 
     #[test]
     fn picks_the_shape_with_the_bigger_controls() {

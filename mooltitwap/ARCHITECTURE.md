@@ -5,8 +5,11 @@ _As of v2.47.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece 
 ## Overview
 16-tap multitap delay (VST3 + CLAP + standalone on desktop, AUv3 on iPad) on **nice-plug**
 (nih-plug fork, `../../Dev/nice-plug`) with an **egui 0.34** editor. The live page is the
-scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`: `epo`,
-`theme`, `tokens`); the old v2/v3 editors still compile (epoche-ui) and are to be retired.
+scope-first page (`gui_scope.rs`) on the shared Soft Systems UI (nice-plug `softsystems-ui`,
+v2.49: theme, Hanken, controls, the ☰ Options panel, the preset sheet). `src/ui/` is what's
+left of Tide's layer: `theme` names the shared palette's colours for the page's painters,
+`epo` keeps the knob drive and touch helpers. The old v2/v3 editors still compile
+(epoche-ui) and are to be retired.
 
 ## Data flow (`lib.rs::process`, per sample)
 1. Encode channel mode (Stereo / M-S / Mono) → In gain → input colour (Diffuse/Tape/Saturate on In).
@@ -59,9 +62,13 @@ scope-first page (`gui_scope.rs`) on a local copy of Tide's UI layer (`src/ui/`:
 - `gui_scope.rs` — the page: header (Freeze, A/B), the field/Bars with the Y list and the
   Taps menu (pattern tools), the lane (Echo with Repeats and Loop rows; Motion, the
   matrix, across the whole lane; Tap), the Time card (Time | Pattern, Euclid ring,
-  Swing), Colour, Output (Duck), Settings.
-  `gui_scope/preset_sheet.rs` — the header's preset box and the preset sheet, drawn in
-  place of everything under the header while open (v2.46; state in `PresetUi`: Try, edited, session).
+  Swing), Colour, Output (Duck), the ☰ Options panel's own rows (Accent, Detune, the preset
+  folder). `PRODUCT` describes Afterecho to the shared UI; the look is saved in
+  `Soft Systems/Afterecho/appearance.json` (+ `accent.json`), imported once from
+  `Mooltitwap/appearance.json`.
+  `gui_scope/preset_sheet.rs` — the shared preset box and sheet (`softsystems_ui::preset_sheet`),
+  over the box round all the cards while open; `PresetUi` keeps the library, the store's
+  `Session` and the sheet's view, and syncs the host-session field.
 
 ## Layout and scaling
 Two page shapes, absolute layouts in logical px: Wide 1366×660 and Tall 1050×780

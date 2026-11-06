@@ -5,7 +5,15 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.48.0 · 2026-11-01 · branch `ui/scope-first`
+## ⭐ CURRENT STATE — v2.49.0 · 2026-11-06 · branch `ui/softsystems-ui`
+
+**v2.49.0 (uncommitted, not installed):** Afterecho moved onto the shared Soft Systems UI
+(SOF-224; DECISIONS has the details): shared theme, ☰ Options panel, 16/12 frame,
+controls, the shared preset sheet, a contrast test. Unit tests pass; iOS checks;
+screenshots Wide/Tall, dark/light. Every segment and list is the crate's (lists by length); "In this
+preset" sits under the sheet's list. 106 tests pass. Merges on the owner's word.
+
+## (before) v2.48.0 · 2026-11-01 · branch `ui/scope-first`
 
 **v2.48.0 (later the same day, not committed or installed):** presets moved onto the
 shared nice-plug crate `softsystems-presets` (SOF-205; DECISIONS has the parity check
