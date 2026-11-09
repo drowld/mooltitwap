@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::delay::{ChannelTaps, DelayLine, ReadLine, SlewedTime};
 use crate::detune::{Pv, Wsola};
 use crate::diffusion::Diffusion;
-use crate::filter::{soft_clip, DcBlock, LoopTone, PeakLimiter, Svf, ToneCoefs};
+use crate::filter::{soft_clip, svf_tick, DcBlock, LoopTone, PeakLimiter, Svf, ToneCoefs};
 use crate::matrix::{SOURCES, TAP_TARGETS};
 use crate::params::{
     ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, PetalParams, TapeType, NUM_TAPS, REPEATS_LOOP,
@@ -423,8 +423,8 @@ impl Default for Mooltitwap {
             wet_diff_on: false,
             x_feed: 0.0,
             x_warm: 0,
-            tap_svf_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
-            tap_svf_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
+            tap_svf_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
+            tap_svf_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
             tap_gain_mid: [0.0; NUM_TAPS],
             tap_gain_now: [0.0; NUM_TAPS],
             tap_pan_mid: [(1.0, 1.0); NUM_TAPS],
@@ -434,8 +434,8 @@ impl Default for Mooltitwap {
             tap_type_now: [crate::params::FilterType::LowPass; NUM_TAPS],
             tap_type_old: [crate::params::FilterType::LowPass; NUM_TAPS],
             tap_type_xf: [1.0; NUM_TAPS],
-            tap_svf_old_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
-            tap_svf_old_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::new())),
+            tap_svf_old_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
+            tap_svf_old_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
             diff_l: Diffusion::new(0),
             diff_r: Diffusion::new(1),
             diff_wet_l: Diffusion::new(0),
@@ -811,17 +811,18 @@ impl Plugin for Mooltitwap {
                 self.tap_type_now[i] = ty;
                 self.tap_type_xf[i] = 1.0;
             } else if ty != self.tap_type_now[i] {
-                self.tap_svf_old_l[i] = self.tap_svf_l[i].clone();
-                self.tap_svf_old_r[i] = self.tap_svf_r[i].clone();
+                self.tap_svf_old_l[i] = self.tap_svf_l[i];
+                self.tap_svf_old_r[i] = self.tap_svf_r[i];
                 self.tap_type_old[i] = self.tap_type_now[i];
                 self.tap_type_now[i] = ty;
                 self.tap_type_xf[i] = 0.0;
             }
             for st in 0..4 {
                 self.tap_svf_l[i][st].set(self.tap_cut[i].now, self.tap_q[i].now, sr);
-                self.tap_svf_r[i][st].copy_coefs(&self.tap_svf_l[i][st]);
-                self.tap_svf_old_l[i][st].copy_coefs(&self.tap_svf_l[i][st]);
-                self.tap_svf_old_r[i][st].copy_coefs(&self.tap_svf_l[i][st]);
+                let (g, k) = (self.tap_svf_l[i][st].g(), self.tap_svf_l[i][st].k());
+                self.tap_svf_r[i][st].set_gk(g, k);
+                self.tap_svf_old_l[i][st].set_gk(g, k);
+                self.tap_svf_old_r[i][st].set_gk(g, k);
             }
             tap_filter_stages[i] = match tap.filter_slope.value() {
                 crate::params::FilterSlope::Db12 => 1,
@@ -1676,27 +1677,28 @@ impl Plugin for Mooltitwap {
                 let stages = tap_filter_stages[i];
                 let moved = self.tap_cut[i].step(tap_cut[i], tap_glide) | self.tap_q[i].step(tap_q[i], tap_glide);
                 if moved {
-                    let mut c = Svf::new();
+                    let mut c = Svf::default();
                     c.set(self.tap_cut[i].now, self.tap_q[i].now, sr);
                     for st in 0..4 {
-                        self.tap_svf_l[i][st].copy_coefs(&c);
-                        self.tap_svf_r[i][st].copy_coefs(&c);
-                        self.tap_svf_old_l[i][st].copy_coefs(&c);
-                        self.tap_svf_old_r[i][st].copy_coefs(&c);
+                        let (g, k) = (c.g(), c.k());
+                        self.tap_svf_l[i][st].set_gk(g, k);
+                        self.tap_svf_r[i][st].set_gk(g, k);
+                        self.tap_svf_old_l[i][st].set_gk(g, k);
+                        self.tap_svf_old_r[i][st].set_gk(g, k);
                     }
                 }
                 let ty = self.tap_type_now[i];
                 let (dry_l, dry_r) = (sl, sr_s);
                 for st in 0..stages {
-                    sl = self.tap_svf_l[i][st].process(sl, ty);
-                    sr_s = self.tap_svf_r[i][st].process(sr_s, ty);
+                    sl = svf_tick(&mut self.tap_svf_l[i][st], sl, ty);
+                    sr_s = svf_tick(&mut self.tap_svf_r[i][st], sr_s, ty);
                 }
                 // a new filter type: the old one (a copy, still running) fades out
                 if self.tap_type_xf[i] < 1.0 {
                     let (old, mut ol, mut or) = (self.tap_type_old[i], dry_l, dry_r);
                     for st in 0..stages {
-                        ol = self.tap_svf_old_l[i][st].process(ol, old);
-                        or = self.tap_svf_old_r[i][st].process(or, old);
+                        ol = svf_tick(&mut self.tap_svf_old_l[i][st], ol, old);
+                        or = svf_tick(&mut self.tap_svf_old_r[i][st], or, old);
                     }
                     let w = s_curve(self.tap_type_xf[i]);
                     sl = ol + (sl - ol) * w;

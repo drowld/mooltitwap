@@ -1,6 +1,6 @@
 [package]
 name = "mooltitwap"
-version = "2.52.0"
+version = "2.54.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Emmanuel Bussien"]
@@ -26,6 +26,7 @@ softsystems-presets = { path = "../../Dev/nice-plug/crates/softsystems-presets" 
 # The licence section comes once the licence is wired.
 softsystems-ui = { path = "../../Dev/nice-plug/crates/softsystems-ui", default-features = false, features = ["presets", "mod"] }
 softsystems-mod = { path = "../../Dev/nice-plug/crates/softsystems-mod" }
+softsystems-fx = { path = "../../Dev/nice-plug/crates/softsystems-fx", features = ["filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Detune's Clean quality (phase vocoder, v2.45).

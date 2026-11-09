@@ -2,6 +2,30 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-09 · Crate adoption pass 5: the tap filter is the crate's SVF (v2.54.0)
+
+The per-tap filter (Cutoff, Q, type, 12/24/48 dB) runs on `softsystems-fx`'s
+`filter::svf::Svf`. It's the same Zavalishin TPT filter, so nothing should be
+heard: on noise, at every type, slope and setting tried, the two differ by at
+most −54 dB (20 Hz, Q 16, 48 dB), and there the crate's is the closer to a
+64-bit reference (−98 dB against −54). Its clamps (10 Hz, Q 0.05) sit outside
+everything Afterecho reaches, modulation included (20 Hz–20 kHz, Q 0.1–16). It
+flushes denormals. Cost: it divides once a sample instead of keeping three
+precomputed gains, +11 % on the filters, 0.81 % of a core with every tap at
+48 dB, stereo (was 0.73 %). The loop tone and the DC blockers stay Afterecho's
+own one-poles (the crate's `OnePole` has no shared-coefficient form).
+Rejected: keeping our copy, which is less accurate at low cutoffs.
+
+## 2026-11-09 · Air in the control cells; the shape list aligned (v2.53.0)
+
+Owner: "the knobs don't breathe", text sat right against them. The crate's v1
+leaves the knob and the cell grammar (name, control, value) to each
+plug-in, so the cramp was Afterecho's own: 1 px between the name, the dial
+and the value. Now `g::AIR` = 6 px each side (a cell 74 px tall, was 64);
+every card still holds its rows (the layout test). The LFO shape list's icons
+start where the list's words start (the crate's fix, nice-plug main: an icon's
+box was centred in its segment).
+
 ## 2026-11-09 · Crate adoption pass 2: cards and the LFO shape list (v2.52.0)
 
 - **Cards** are the crate's `paint::card`: the panel fill and its title (12 px

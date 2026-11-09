@@ -1,56 +1,17 @@
 use crate::params::FilterType;
 
-/// TPT state-variable filter (Vadim Zavalishin form). Stable up to Nyquist.
-#[derive(Default, Clone)]
-pub struct Svf {
-    s1: f32,
-    s2: f32,
-    g: f32,
-    k: f32,
-    a1: f32,
-    a2: f32,
-    a3: f32,
-}
+/// The tap filter (crate adoption pass 5, v2.54): the shared TPT
+/// state-variable filter from `softsystems-fx`, with Afterecho's three outputs.
+pub use softsystems_fx::filter::svf::Svf;
 
-impl Svf {
-    pub fn new() -> Self { Self::default() }
-
-    pub fn reset(&mut self) {
-        self.s1 = 0.0;
-        self.s2 = 0.0;
-    }
-
-    pub fn set(&mut self, cutoff_hz: f32, q: f32, sample_rate: f32) {
-        let f = (cutoff_hz / sample_rate).clamp(1.0e-5, 0.49);
-        let g = (core::f32::consts::PI * f).tan();
-        let k = 1.0 / q.max(0.01);
-        let a1 = 1.0 / (1.0 + g * (g + k));
-        let a2 = g * a1;
-        let a3 = g * a2;
-        self.g = g;
-        self.k = k;
-        self.a1 = a1;
-        self.a2 = a2;
-        self.a3 = a3;
-    }
-
-    /// Take another filter's coefficients, not its state.
-    pub fn copy_coefs(&mut self, from: &Svf) {
-        (self.g, self.k, self.a1, self.a2, self.a3) = (from.g, from.k, from.a1, from.a2, from.a3);
-    }
-
-    #[inline]
-    pub fn process(&mut self, x: f32, kind: FilterType) -> f32 {
-        let v3 = x - self.s2;
-        let v1 = self.a1 * self.s1 + self.a2 * v3;
-        let v2 = self.s2 + self.a2 * self.s1 + self.a3 * v3;
-        self.s1 = 2.0 * v1 - self.s1;
-        self.s2 = 2.0 * v2 - self.s2;
-        match kind {
-            FilterType::LowPass => v2,
-            FilterType::BandPass => v1,
-            FilterType::HighPass => x - self.k * v1 - v2,
-        }
+/// One tick of `f`, the output `kind` picks.
+#[inline]
+pub fn svf_tick(f: &mut Svf, x: f32, kind: FilterType) -> f32 {
+    let o = f.process(x);
+    match kind {
+        FilterType::LowPass => o.lp,
+        FilterType::BandPass => o.bp,
+        FilterType::HighPass => o.hp,
     }
 }
 

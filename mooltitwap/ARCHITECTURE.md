@@ -40,7 +40,7 @@ went in v2.50, with every compatibility path (old sessions, old presets, the old
   `tap_delay_secs`, `cluster_span_secs`: one copy for engine and page.
 - `bounce.rs` — Ping placement (width, swing of panned taps). `motion.rs` — LFO shapes
   and the tap targets' maths. `matrix.rs` — the Motion matrix (LFO 1–3, Follow, Step 1–2 × targets, sums,
-  whole-echo conversions, Step). `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
+  whole-echo conversions, Step). `filter.rs` — the crate's `Svf` (softsystems-fx) and `svf_tick`, `LoopTone`, `soft_clip`, `PeakLimiter`.
 - `detune.rs` — per-tap detune (v2.45; a % of Detune Range, 1–12 st, v2.46): `Wsola`
   (Light: grains, a tap's sides spliced together) and `Pv` (Clean: phase vocoder, frames
   from the tap's lines), each with a `min_delay`; the engine crossfades plain ↔ shifted

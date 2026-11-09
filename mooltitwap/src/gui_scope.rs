@@ -46,7 +46,10 @@ pub(crate) mod g {
     /// knob answers within 44 px of its centre whatever its size.
     pub const DIAL: f32 = 36.0;
     pub const BAND: f32 = DIAL;
-    pub const CELL_H: f32 = BAND + 2.0 + 2.0 * LBL_H;
+    /// Air between the name, the control and the value (owner, 2026-11-09:
+    /// "the knobs don't breathe"; was 1 px).
+    pub const AIR: f32 = 6.0;
+    pub const CELL_H: f32 = BAND + 2.0 * AIR + 2.0 * LBL_H;
 }
 
 /// Where the regions sit on the page (logical px). Rects are
@@ -508,10 +511,10 @@ fn outline(p: &egui::Painter, rect: Rect, on: bool, s: f32) {
 fn cell_parts(cell: Rect, s: f32) -> (Rect, Pos2, Pos2) {
     let lab = Pos2::new(cell.center().x, cell.top() + g::LBL_H * 0.5 * s);
     let ctl = Rect::from_min_size(
-        Pos2::new(cell.left(), cell.top() + (g::LBL_H + 1.0) * s),
+        Pos2::new(cell.left(), cell.top() + (g::LBL_H + g::AIR) * s),
         Vec2::new(cell.width(), g::BAND * s),
     );
-    let val = Pos2::new(cell.center().x, ctl.bottom() + (1.0 + g::LBL_H * 0.5) * s);
+    let val = Pos2::new(cell.center().x, ctl.bottom() + (g::AIR + g::LBL_H * 0.5) * s);
     (ctl, lab, val)
 }
 
@@ -1843,7 +1846,8 @@ const LFO_SHAPES: [softsystems_mod::Shape; 6] = {
 /// A segment's painter, as `SegItem::Icon` takes it.
 type SegPaint = Box<dyn Fn(&egui::Painter, Rect, Color32)>;
 
-/// A shape's segment: the crate's icon, then its name.
+/// A shape's segment: the crate's icon, then its name, from the box the crate
+/// gives (it starts where the list's words do).
 fn shape_item(shape: softsystems_mod::Shape) -> SegPaint {
     use softsystems_ui::modulation::curve::{shape_icon, shape_name};
     Box::new(move |p, r, col| {

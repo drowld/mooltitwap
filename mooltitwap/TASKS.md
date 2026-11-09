@@ -6,10 +6,10 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 - [ ] **v2.49: Afterecho on softsystems-ui** (owner's go 2026-11-06, branch `ui/softsystems-ui`, uncommitted): shared theme, fonts, ☰ Options panel, 16/12 frame, controls, the shared preset sheet, the contrast rule in a test. Lists by length are in (Y axis and LFO shape dropdowns, Spacing the vertical segment). "In this preset" is back, under the sheet's list. Left: owner check, then merge on his word. Linear SOF-224.
 - [ ] **Crate adoption, 10 passes** (owner via the crates hub, 2026-11-09; one pass at a time, each tested and shown, committed on the owner's word). Branch `ui/softsystems-ui`.
   1. [x] Remove the compatibility paths: old editors, epoche-ui, migrations, the old look and preset folders, deprecated params (v2.50.0, 7014573).
-  2. [x] UI leftovers: cards on `paint::card` (picture and lane were on `frame`), LFO shapes as icon + name (`seg_v_items`) (v2.52.0). Quirks page: the hub keeps it, told.
-  3. [ ] Saturate: listening test of the crate's TUBE / TAPE / AMP / GRIT / TRANSFO against tanh, keep two; PolSat531 against the loop's soft clip (loop only, never a Saturate choice).
-  4. [ ] Diffuse: listening test of the crate's DIFFUSION and SPACES ROOM / VAULT against v2.47's chain, keep two.
-  5. [ ] Filter: the crate's shared SVF (clamps differ at the extremes).
+  2. [x] UI leftovers: cards on `paint::card` (picture and lane were on `frame`), LFO shapes as icon + name (`seg_v_items`) (v2.52.0, da07e71); air in the knob cells, shape list aligned (v2.53.0). Quirks page: the hub keeps it, told.
+  3. [ ] **In progress:** reels and metrics ready (`spikes/saturate/`); waiting for the owner's ears. Saturate: listening test of the crate's TUBE / TAPE / AMP / GRIT / TRANSFO against tanh, keep two; PolSat531 against the loop's soft clip (loop only, never a Saturate choice).
+  4. [ ] **Waiting for ears:** reels and metrics ready (`spikes/diffuse-crate/`). Diffuse: the crate's DIFFUSION (S, M) and SPACES ROOM / VAULT against v2.47's chain. Numbers (not heard): DIFFUSION flutters at this size (echo density 0.10–0.27); SPACES is dense but lands 77–92 ms late in the loop and rings; it's a candidate for Out / In only.
+  5. [x] Filter: the tap filter is the crate's SVF (v2.54.0): differences ≤ −54 dB, more accurate, +0.08 % of a core; 100 tests, iOS check. Not committed.
   6. [ ] Modulation engine: LFO 1–3, Follow, Step 1–2 on softsystems-mod; taps as voices with `set_voice_offset` (Scatter).
   7. [ ] The matrix: targets, routes, Depth / Time (replaces SOF-244's bugs).
   8. [ ] Grid, halo, knob menu, tiles.
