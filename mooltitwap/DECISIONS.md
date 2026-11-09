@@ -2,6 +2,19 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-09 · One page shape: Tall removed (v2.51.0)
+
+Owner: Afterecho runs on the iPad but never standalone, so always in a host's
+panel; the full-screen Tall page (1050 × 780) isn't needed. The page is the
+1366 × 660 layout everywhere: desktop zooms with the window, an iPad host
+panel fits and centres it. Gone with Tall: `Shape` and `Shape::pick`, the
+stacked lane (controls under the curves), the Tap tab taking the whole lane,
+the one-row LFO and Step editors, the short echo readout, the `tall` preview.
+- Cost: an iPad host panel close to 4:3 shows the page smaller (about 0.8×
+  in a full 1112 × 834 view, against 1.06× for Tall), with bands above and
+  below. Hosts' plug-in panels are rarely that shape.
+- Rejected: keeping Tall. Every spacing pass and new control was laid out twice.
+
 ## 2026-11-09 · No backward compatibility before release (v2.50.0, pass 1 of the crate adoption)
 
 Owner, through the crates hub: "get everything from the crate", passes one at a

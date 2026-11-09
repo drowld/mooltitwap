@@ -49,34 +49,7 @@ pub(crate) mod g {
     pub const CELL_H: f32 = BAND + 2.0 + 2.0 * LBL_H;
 }
 
-/// The page shapes. Controls and text are the same size on both, so the
-/// narrower `Tall` page simply gets a bigger zoom on a tablet. Desktop always
-/// uses `Wide`; on iOS the editor picks one every frame from the space the
-/// host gives it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Shape {
-    #[default]
-    Wide,
-    Tall,
-}
-
-impl Shape {
-    pub fn layout(self) -> &'static Layout {
-        match self {
-            Shape::Wide => &WIDE,
-            Shape::Tall => &TALL,
-        }
-    }
-
-    /// The shape whose controls come out biggest in a `space`-sized view: the
-    /// tall page on an iPad full screen, the wide one in short host panels.
-    pub fn pick(space: Vec2) -> Shape {
-        let zoom = |l: &Layout| (space.x / l.w).min(space.y / l.h);
-        if zoom(&TALL) > zoom(&WIDE) { Shape::Tall } else { Shape::Wide }
-    }
-}
-
-/// Where the regions sit on one page shape (logical px). Rects are
+/// Where the regions sit on the page (logical px). Rects are
 /// `(x, y, w, h)`; the right-column cards are `(y, h)` at `right_x`.
 pub struct Layout {
     pub w: f32,
@@ -84,8 +57,6 @@ pub struct Layout {
     pad: f32,
     picture: (f32, f32, f32, f32),
     lane: (f32, f32, f32, f32),
-    /// The lane's controls sit under its curves instead of beside them.
-    lane_stacked: bool,
     right_x: f32,
     right_w: f32,
     time: (f32, f32),
@@ -96,18 +67,18 @@ pub struct Layout {
     preset_w: f32,
 }
 
-/// Desktop, and iPad in short host panels. Cards are sized to their rows,
+/// The one page, on desktop and in iPad host panels (owner, 2026-11-09:
+/// Afterecho always runs in a host, never full screen). Cards are sized to their rows,
 /// as tight as Tide's. The shared frame (owner, 2026-11-02): a 16 px page
 /// margin round the outer blocks (the header strip is one) and 12 px between
 /// blocks.
-const WIDE: Layout = Layout {
+const LAYOUT: Layout = Layout {
     w: 1366.0,
     h: 660.0,
     pad: 16.0,
     // the field ends with the Time card, the lane starts with Colour
     picture: (16.0, 66.0, 806.0, 320.0),
     lane: (16.0, 398.0, 806.0, 246.0),
-    lane_stacked: false,
     right_x: 834.0,
     right_w: 516.0,
     time: (66.0, 320.0),
@@ -115,24 +86,6 @@ const WIDE: Layout = Layout {
     output: (527.0, 117.0),
     tabs_w: 220.0,
     preset_w: 270.0,
-};
-
-/// iPad full screen: narrower, so it gets a bigger zoom. Close to 4:3, the
-/// shape of most iPads (the 10.5" one included), so it fills the screen.
-const TALL: Layout = Layout {
-    w: 1050.0,
-    h: 780.0,
-    pad: 16.0,
-    picture: (16.0, 66.0, 562.0, 394.0),
-    lane: (16.0, 472.0, 562.0, 292.0),
-    lane_stacked: true,
-    right_x: 590.0,
-    right_w: 444.0,
-    time: (66.0, 394.0),
-    colour: (472.0, 140.0),
-    output: (624.0, 140.0),
-    tabs_w: 200.0,
-    preset_w: 220.0,
 };
 
 /// Afterecho, as the shared Soft Systems UI sees it: its own palette (Mono
@@ -222,7 +175,6 @@ pub struct ScopeState {
     preview: bool,
     /// The ☰ Options panel.
     options: options::Panel,
-    shape: Shape,
     /// Param id of the control last touched. Nothing reads it since the
     /// last-touched card went (v2.42); the cells still record it.
     focus: Option<String>,
@@ -371,16 +323,15 @@ pub fn frame(
                 sc.accent = AccentPick::read().unwrap_or_default();
             }
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=tall,bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
+            // AFTERECHO_PREVIEW=bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
             // saveas|trying|deleting (with AFTERECHO_PRESET_DIR, a folder of presets to show)
-            // (the iPad page, the Bars view, the Time view or a Y axis, a selected
+            // (the Bars view, the Time view or a Y axis, a selected
             // tap, the Tap or Motion tab and its source, the preset browser, the light page, Colour's Tape
             // tab, the Taps menu with Ramp down applied). A preview never saves
             // the look it shows.
             if let (false, Ok(v)) = (ios, std::env::var("AFTERECHO_PREVIEW")) {
                 for t in v.split(',').map(str::trim) {
                     match t {
-                        "tall" => sc.shape = Shape::Tall,
                         "bars" => sc.view = 1,
                         "gain" => sc.y_axis = 1,
                         "cutoff" => sc.y_axis = 2,
@@ -421,13 +372,10 @@ pub fn frame(
         st.preset_open = true;
     }
     // Desktop: zoom follows the window width and the height keeps the page's
-    // aspect. iOS/AUv3: the host sizes the view (`with_host_resize`), so pick
-    // the shape whose controls come out biggest there, then fit and centre it.
+    // aspect. iOS/AUv3: the host sizes the view (`with_host_resize`); the
+    // page is fitted and centred in it.
     let vp = ui.ctx().screen_rect();
-    if ios {
-        st.scope.shape = Shape::pick(vp.size());
-    }
-    let lay = st.scope.shape.layout();
+    let lay = &LAYOUT;
     let zoom = if ios {
         (vp.width() / lay.w).min(vp.height() / lay.h).clamp(0.3, 3.0)
     } else {
@@ -1270,14 +1218,12 @@ fn picture(
         sc.pat_open = !sc.pat_open;
     }
     sc.pat_btn = Some(tb);
-    if !l.lane_stacked {
-        let hint = match (sc.time_view, sc.view) {
-            (true, _) => "drag a dot left or right",
-            (false, 0) => "drag a dot up or down",
-            _ => "drag across the bars",
-        };
-        text(&p, rect.min + Vec2::new(96.0, 24.0) * s, Align2::LEFT_CENTER, hint, 12.0, s, SOFT());
-    }
+    let hint = match (sc.time_view, sc.view) {
+        (true, _) => "drag a dot left or right",
+        (false, 0) => "drag a dot up or down",
+        _ => "drag across the bars",
+    };
+    text(&p, rect.min + Vec2::new(96.0, 24.0) * s, Align2::LEFT_CENTER, hint, 12.0, s, SOFT());
 
     // header, right to left: Field / Bars (the value views'), then in the
     // Time view Snap and its grid, so the view switch stays put
@@ -1687,22 +1633,13 @@ fn lane(
         [o + Vec2::new(x, y + 40.0) * s, o + Vec2::new(x + w, y + 40.0) * s],
         Stroke::new(1.0 * s, theme::line()),
     );
-    let (curves, ctl, cols) = if l.lane_stacked {
-        (r(o, s, x, y + 40.0, w, 136.0), r(o, s, x + 14.0, y + 176.0, w - 28.0, h - 180.0), 11)
-    } else {
-        (r(o, s, x, y + 40.0, 400.0, h - 40.0), r(o, s, x + 420.0, y + 44.0, w - 434.0, h - 48.0), 4)
-    };
-    // The Motion tab takes the whole lane (its grid needs the width); on the
-    // tall page the Tap tab does too (its controls need two full rows). The
+    let (curves, ctl, cols) = (r(o, s, x, y + 40.0, 400.0, h - 40.0), r(o, s, x + 420.0, y + 44.0, w - 434.0, h - 48.0), 4);
+    // The Motion tab takes the whole lane (its grid needs the width). The
     // loop's own controls come back with Echo.
-    let whole = sc.lane_tab == 1 || (l.lane_stacked && sc.lane_tab == 2);
-    // The loop's controls stand apart from the tab above or beside them.
-    let div = if l.lane_stacked {
-        [Pos2::new(ctl.left(), curves.bottom()), Pos2::new(ctl.right(), curves.bottom())]
-    } else {
-        let xm = curves.right() + 6.0 * s;
-        [Pos2::new(xm, curves.top() + 10.0 * s), Pos2::new(xm, curves.bottom() - 10.0 * s)]
-    };
+    let whole = sc.lane_tab == 1;
+    // The loop's controls stand apart from the tab beside them.
+    let xm = curves.right() + 6.0 * s;
+    let div = [Pos2::new(xm, curves.top() + 10.0 * s), Pos2::new(xm, curves.bottom() - 10.0 * s)];
     if !whole {
         p.line_segment(div, Stroke::new(1.0 * s, theme::line()));
     }
@@ -1723,7 +1660,7 @@ fn lane(
             let n_rep = params.repeats.value();
             let cap = if n_rep < REPEATS_LOOP { (n_rep as usize).min(6) } else { 3 };
             let viz = crate::gui::compute_viz_data_ex(params, tempo, cap);
-            text(&p, o + Vec2::new(x + w - 14.0, y + 20.0) * s, Align2::RIGHT_CENTER, &echo_readout(&viz, l.lane_stacked), 12.0, s, INK2());
+            text(&p, o + Vec2::new(x + w - 14.0, y + 20.0) * s, Align2::RIGHT_CENTER, &echo_readout(&viz), 12.0, s, INK2());
             echo(ui, curves, s, params, setter, &mut sc.focus, &viz, tempo);
         }
         1 => motion_panel(ui, o, s, l, params, setter, sc),
@@ -1750,14 +1687,9 @@ fn lane(
     }
 
     // the loop's controls (the cycle is the lane's own handle; Feedback is
-    // one too, and a knob). Under the curves they share one row; beside
-    // them, two (Repeats, Loop).
+    // one too, and a knob): two rows beside the curves (Repeats, Loop).
     let finite = params.repeats.value() < REPEATS_LOOP;
-    let (c_rep, c_fb, c_curve, c_tone, c_xf, c_mode) = if l.lane_stacked {
-        // narrow knobs, so the stepper and the three-way choices get room
-        let c = |col, span| cell_at(ctl, cols, 1, 0, col, span, s);
-        (c(0, 2), c(2, 1), c(3, 3), c(6, 1), c(7, 1), c(8, 3))
-    } else {
+    let (c_rep, c_fb, c_curve, c_tone, c_xf, c_mode) = {
         let title_w = 64.0 * s;
         let cells = Rect::from_min_max(ctl.min + Vec2::new(title_w, 0.0), ctl.max);
         let c = |row, col, span| cell_at(cells, cols, 2, row, col, span, s);
@@ -1848,8 +1780,7 @@ fn stepper_cell(
 
 /// The Motion tab (v2.42), the whole lane: the sources across the top (and
 /// down the grid's side), the picked one's controls on the left, the matrix
-/// on the right. Beside the tall page's narrower lane the controls sit above
-/// the grid. The picture shows the taps moving.
+/// on the right. The picture shows the taps moving.
 fn motion_panel(
     ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState,
 ) {
@@ -1861,23 +1792,15 @@ fn motion_panel(
     // Amount and Polarity scale every route; the sources sit beside the tabs
     // where there's room for them (the grid's row names pick them too).
     let pills = r(o, s, x + w - 14.0 - 168.0, y + 7.0, 168.0, 26.0);
-    if !l.lane_stacked {
-        if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 372.0, 26.0), &matrix::SRC_NAMES, src, "sc_mx_src", true) {
-            sc.mx_src = i;
-        }
+    if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 372.0, 26.0), &matrix::SRC_NAMES, src, "sc_mx_src", true) {
+        sc.mx_src = i;
     }
     let half = Vec2::new(pills.width() * 0.5 - 4.0 * s, pills.height());
     pill_drag(ui, Rect::from_min_size(pills.min, half), s, setter, &params.mx_amount, "mx_amount", "Amt", &mut sc.focus);
     pill_drag(ui, Rect::from_min_size(pills.min + Vec2::new(pills.width() * 0.5 + 4.0 * s, 0.0), half), s, setter, &params.mx_pol, "mx_pol", "Pol", &mut sc.focus);
 
     let body = r(o, s, x + 14.0, y + 46.0, w - 28.0, h - 52.0);
-    let (ed, grid) = if l.lane_stacked {
-        let ed_h = g::CELL_H * s + 6.0 * s;
-        (
-            Rect::from_min_size(body.min, Vec2::new(body.width(), ed_h)),
-            Rect::from_min_max(Pos2::new(body.left(), body.top() + ed_h + 8.0 * s), body.max),
-        )
-    } else {
+    let (ed, grid) = {
         let ed_w = 302.0 * s;
         let ed = Rect::from_min_size(body.min, Vec2::new(ed_w, body.height()));
         let xm = ed.right() + 12.0 * s;
@@ -1885,7 +1808,7 @@ fn motion_panel(
         (ed, Rect::from_min_max(Pos2::new(xm + 12.0 * s, body.top()), body.max))
     };
     match src {
-        0..=2 => lfo_editor(ui, ed, s, l.lane_stacked, params, setter, src, &mut sc.focus),
+        0..=2 => lfo_editor(ui, ed, s, params, setter, src, &mut sc.focus),
         matrix::FOLLOW => {
             let p = ui.painter();
             let at = ed.left_top() + Vec2::new(0.0, 14.0 * s);
@@ -1893,7 +1816,7 @@ fn motion_panel(
             text(p, at + Vec2::new(0.0, 22.0 * s), Align2::LEFT_CENTER, "Louder moves its routes up, quiet down.", 12.0, s, INK2());
             text(p, at + Vec2::new(0.0, 40.0 * s), Align2::LEFT_CENTER, "10 ms up, 200 ms down.", 12.0, s, SOFT());
         }
-        _ => step_editor(ui, ed, s, l.lane_stacked, params, setter, src - matrix::STEP, &mut sc.focus),
+        _ => step_editor(ui, ed, s, params, setter, src - matrix::STEP, &mut sc.focus),
     }
     if let Some(i) = mx_grid(ui, grid, s, params, setter, src, &mut sc.focus) {
         sc.mx_src = i;
@@ -1916,7 +1839,7 @@ fn pill_drag(ui: &mut egui::Ui, rect: Rect, s: f32, setter: &ParamSetter, param:
 /// synced), Free / Sync and Scatter.
 #[allow(clippy::too_many_arguments)]
 fn lfo_editor(
-    ui: &mut egui::Ui, ed: Rect, s: f32, stacked: bool, params: &Arc<PetalParams>, setter: &ParamSetter, k: usize,
+    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, k: usize,
     focus: &mut Option<String>,
 ) {
     let lfo = params.lfos()[k];
@@ -1924,28 +1847,20 @@ fn lfo_editor(
     let id = |what: &str| format!("{prefix}_{what}");
     const SHAPES: [&str; 6] = ["Sine", "Tri", "Ramp", "Square", "S&H", "Glide"];
     let cur = enum_index(&lfo.shape, 7);
-    let (list, wave, cells) = if stacked {
-        let c = |col, span| cell_at(ed, 8, 1, 0, col, span, s);
-        let (ctl, _, _) = cell_parts(c(0, 4), s);
-        (Rect::from_center_size(ctl.center(), Vec2::new(ctl.width(), 26.0 * s)), None, [c(4, 1), c(5, 2), c(7, 1)])
-    } else {
+    let (list, wave, cells) = {
         let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(72.0 * s, 6.0 * 22.0 * s));
         let right = Rect::from_min_max(Pos2::new(list.right() + 14.0 * s, ed.top()), ed.max);
         let wave = Rect::from_min_size(right.min + Vec2::new(0.0, 2.0 * s), Vec2::new(right.width(), 52.0 * s));
         let row = Rect::from_min_max(Pos2::new(right.left(), wave.bottom() + 4.0 * s), right.max);
         let c = |col| cell_at(row, 3, 1, 0, col, 1, s);
-        (list, Some(wave), [c(0), c(1), c(2)])
+        (list, wave, [c(0), c(1), c(2)])
     };
-    let pick = if stacked {
-        seg_ex(ui, list, &SHAPES, cur.min(6), &format!("sc_lfo_shape{k}"), &[true; 6])
-    } else {
-        controls::seg_v(ui, list, &SHAPES, cur.min(6), ui.id().with(("seg", format!("sc_lfo_shape{k}"))), &[]).filter(|&i| i != cur.min(6))
-    };
+    let pick = controls::seg_v(ui, list, &SHAPES, cur.min(6), ui.id().with(("seg", format!("sc_lfo_shape{k}"))), &[]).filter(|&i| i != cur.min(6));
     if let Some(i) = pick {
         set_norm(setter, &lfo.shape, i as f32 / 6.0);
         *focus = Some(id("shape"));
     }
-    if let Some(wave) = wave {
+    {
         let p = ui.painter();
         p.rect_filled(wave, g::R_CTL * s, INSET());
         let inner = wave.shrink2(Vec2::new(8.0, 8.0) * s);
@@ -1993,17 +1908,13 @@ fn bool_seg_cell(
 /// Length, Scatter and Glide. `j`: Step 1 or 2 (0, 1).
 #[allow(clippy::too_many_arguments)]
 fn step_editor(
-    ui: &mut egui::Ui, ed: Rect, s: f32, stacked: bool, params: &Arc<PetalParams>, setter: &ParamSetter, j: usize,
+    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, j: usize,
     focus: &mut Option<String>,
 ) {
     let st = params.steps()[j];
     let prefix = if j == 0 { "step" } else { "step2" };
     let id = |what: &str| format!("{prefix}_{what}");
-    let (bars, cells) = if stacked {
-        let c = |col, span| cell_at(ed, 9, 1, 0, col, span, s);
-        let b = c(0, 3);
-        (Rect::from_min_max(b.min + Vec2::new(0.0, 2.0 * s), b.max - Vec2::new(0.0, 2.0 * s)), [c(3, 1), c(4, 2), c(6, 1), c(7, 1), c(8, 1)])
-    } else {
+    let (bars, cells) = {
         let bars = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(ed.width(), 70.0 * s));
         let row = Rect::from_min_max(Pos2::new(ed.left(), bars.bottom() + 4.0 * s), ed.max);
         let c = |col, span| cell_at(row, 6, 1, 0, col, span, s);
@@ -2193,10 +2104,10 @@ fn tap_panel(
 /// "Feedback 60 % · −4.4 dB per repeat · 13 to −60 dB", from the same
 /// per-cycle levels the lane draws (they follow the FB curve); a count, "4
 /// repeats · flat · stops after 212 ms"; frozen, "Frozen · holds a 53 ms loop".
-fn echo_readout(viz: &VizData, short: bool) -> String {
+fn echo_readout(viz: &VizData) -> String {
     if viz.frozen {
         let cycle = secs_text(viz.fb_cycle_norm * viz.grid_range_secs);
-        return if short { format!("Frozen · {cycle}") } else { format!("Frozen · holds a {cycle} loop") };
+        return format!("Frozen · holds a {cycle} loop");
     }
     // a count: "4 repeats · −6.0 dB each · stops after 212 ms"
     if let Some(n) = viz.repeats {
@@ -2210,7 +2121,7 @@ fn echo_readout(viz: &VizData, short: bool) -> String {
             format!("{} each", db_text(20.0 * viz.feedback.log10()))
         };
         let last = secs_text(n as f32 * viz.fb_cycle_norm * viz.grid_range_secs);
-        return if short { format!("{word} · {each}") } else { format!("{word} · {each} · stops after {last}") };
+        return format!("{word} · {each} · stops after {last}");
     }
     let fb = format!("Feedback {:.0} %", viz.feedback * 100.0);
     if viz.feedback < 1e-3 {
@@ -2218,12 +2129,9 @@ fn echo_readout(viz: &VizData, short: bool) -> String {
     }
     let g1 = viz.cycle_gains[1];
     if g1 >= 0.999 {
-        return format!("{fb} · {}", if short { "holds" } else { "repeats hold · self-oscillates" });
+        return format!("{fb} · repeats hold · self-oscillates");
     }
     let db = db_text(20.0 * g1.max(1e-6).log10());
-    if short {
-        return format!("{fb} · {db}");
-    }
     // compute_viz_data stops counting at 64 cycles
     let reps = if viz.n_echo_cycles >= 64 { "64+".to_string() } else { viz.n_echo_cycles.to_string() };
     format!("{fb} · {db} per repeat · {reps} to −60 dB")
@@ -2969,18 +2877,9 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_shape_with_the_bigger_controls() {
-        // iPad full screen, landscape and portrait: tall.
-        assert_eq!(Shape::pick(Vec2::new(1112.0, 834.0)), Shape::Tall);
-        assert_eq!(Shape::pick(Vec2::new(834.0, 1112.0)), Shape::Tall);
-        // Desktop-shaped and short host panels: wide.
-        assert_eq!(Shape::pick(Vec2::new(1366.0, 720.0)), Shape::Wide);
-        assert_eq!(Shape::pick(Vec2::new(1112.0, 500.0)), Shape::Wide);
-    }
-
-    #[test]
-    fn layouts_fit_their_page_without_overlapping() {
-        for l in [&WIDE, &TALL] {
+    fn the_layout_fits_its_page_without_overlapping() {
+        {
+            let l = &LAYOUT;
             let rect = |(x, y, w, h): (f32, f32, f32, f32)| Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, h));
             let right = |(y, h): (f32, f32)| rect((l.right_x, y, l.right_w, h));
             let regions = [
@@ -2999,16 +2898,11 @@ mod tests {
             }
             // every card holds its rows of cells: Time & taps three, Colour
             // (under its tabs) and Output one, the lane's controls two (one
-            // under the curves), and the Tap tab two (on the tall page it
-            // takes the whole lane)
+            // beside the curves), and the Tap tab two
             let fits = |room: f32, rows: f32| room >= rows * g::CELL_H;
             assert!(fits(l.time.1 - 38.0, 3.0), "Time & taps, {}×{}", l.w, l.h);
             assert!(fits(l.colour.1 - 41.0, 1.0) && fits(l.output.1 - 38.0, 1.0));
-            let (lane_h, ctl_rows, ctl_h, tap_h) = if l.lane_stacked {
-                (l.lane.3, 1.0, l.lane.3 - 180.0, l.lane.3 - 48.0)
-            } else {
-                (l.lane.3, 2.0, l.lane.3 - 48.0, l.lane.3 - 48.0)
-            };
+            let (lane_h, ctl_rows, ctl_h, tap_h) = (l.lane.3, 2.0, l.lane.3 - 48.0, l.lane.3 - 48.0);
             assert!(fits(ctl_h, ctl_rows) && fits(tap_h, 2.0), "lane {lane_h}, {}×{}", l.w, l.h);
             // header: tabs end before the preset box, which ends before A/B
             let tabs_end = l.pad + 176.0 + l.tabs_w;

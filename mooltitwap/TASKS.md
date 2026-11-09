@@ -5,7 +5,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 - [ ] **Owner hand test (v2.34–v2.47)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), v2.42 (Repeats, the Motion matrix, Hanken Grotesk) and v2.43 (Time view, Grid, two Steps with Glide, ear safety), v2.44 (fractional delay reads: Repitch glides, cycles a sample tighter), v2.45 (per-tap detune, Light/Clean), v2.46 (Detune Range, In/Out at 0 dB, full-page presets), v2.47 (Diffuse rebuilt; Cross → Diffuse with it), v2.48 (presets on the shared store: browse, Try/Back, Save as… once). v2.47.0 installed 2026-11-01. Step clicks: owner confirmed fixed (2026-11-01). Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
 - [ ] **v2.49: Afterecho on softsystems-ui** (owner's go 2026-11-06, branch `ui/softsystems-ui`, uncommitted): shared theme, fonts, ☰ Options panel, 16/12 frame, controls, the shared preset sheet, the contrast rule in a test. Lists by length are in (Y axis and LFO shape dropdowns, Spacing the vertical segment). "In this preset" is back, under the sheet's list. Left: owner check, then merge on his word. Linear SOF-224.
 - [ ] **Crate adoption, 10 passes** (owner via the crates hub, 2026-11-09; one pass at a time, each tested and shown, committed on the owner's word). Branch `ui/softsystems-ui`.
-  1. [x] Remove the compatibility paths: old editors, epoche-ui, migrations, the old look and preset folders, deprecated params (v2.50.0, not committed).
+  1. [x] Remove the compatibility paths: old editors, epoche-ui, migrations, the old look and preset folders, deprecated params (v2.50.0, 7014573).
   2. [ ] UI leftovers: cards on `paint::card`, LFO shapes as icons (`seg_v_items`), quirks page.
   3. [ ] Saturate: listening test of the crate's TUBE / TAPE / AMP / GRIT / TRANSFO against tanh, keep two; PolSat531 against the loop's soft clip (loop only, never a Saturate choice).
   4. [ ] Diffuse: listening test of the crate's DIFFUSION and SPACES ROOM / VAULT against v2.47's chain, keep two.
@@ -22,7 +22,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 ## Next
 1. [ ] Fold in the hand-test feedback. Linear SOF-84. First notes (2026-11-01) in v2.46/v2.47: preset sheet over the whole page, In/Out with 0 dB at the top, accent ring no longer cropped, Detune Range 1–12 st (and short detuned taps fixed), Diffuse rebuilt. Same ring crop in Morpheus, merge, cumulus, phasma, y-flanger (their own repos).
 2. [ ] iPad: install v2.47.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving and with detune (Light and Clean, 16 taps). Linear SOF-85.
-3. [ ] Second spacing pass (owner: "spacing still not perfect"; Tall Time group loose). Linear SOF-86.
+3. [ ] Second spacing pass (owner: "spacing still not perfect"). Linear SOF-86.
 4. [ ] Restyle the Settings menu to the new look (still old epo chips). **On hold:** the ☰ panel will come from softsystems-ui (below). Linear SOF-87.
 5. [ ] Matrix audit (crates hub, 2026-11-05, read from code, nothing run; 7 bugs, none high): cell drag sticks on slow drags (no accumulator, `gui_scope.rs:2211`); no clear on iPad cells; negative Gain depth / Polarity < 0 silent on Gain with no hint; the Motion tick grid restarts every block, so Step Glide runs fast with block sizes not a multiple of 32 (`lib.rs:1048`); Amount/Polarity unsmoothed; the grid shows raw cells, not the depth heard; a hidden Env LFO shape is dead. Most go with the shared routing (after Vortex); owner (2026-11-05): wait for the shared routing, fix none before. List: the hub's `matrix-audit-bugs-by-plugin.md`. Linear SOF-244.
 5. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
@@ -39,7 +39,8 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 - iPad installs: devicectl refuses while the iPad is locked or "not unlocked recently" — unlock first.
 
 ## Done (recent)
-- [x] v2.50.0 Old editors and every compatibility path removed (crate adoption pass 1); 101 tests, iOS check, screenshots. Not committed. (SOF-89)
+- [x] v2.51.0 One page shape: Tall removed (owner: Afterecho always runs in a host panel). 100 tests, iOS check, screenshots.
+- [x] v2.50.0 Old editors and every compatibility path removed (crate adoption pass 1); 101 tests, iOS check, screenshots. Commit 7014573. (SOF-89)
 - [x] v2.48.0 Presets on the shared softsystems-presets crate (`presets.rs` 1,533 → ~530 lines); parity-checked on copies of the real folders; loads send only changed params; factory `author` "Soft Systems". Not committed, not installed. The edited check is the crate's since its float-grid fix (nice-plug 780e520). (SOF-205)
 - [x] v2.47.0 Diffuse rebuilt from the listening test (candidate C): six short drifting allpasses, wide, the loops read early by its delay, Cross → Diffuse too (SOF-199); with v2.46: Detune Range 1–12 st, In/Out 0 dB at the top, full-page preset sheet, accent ring (SOF-84 notes)
 - [x] v2.45.0 Per-tap detune ±100 ct (Tap tab knob, Y axis), Settings → Sound → Detune Light (WSOLA) / Clean (phase vocoder) (SOF-156)

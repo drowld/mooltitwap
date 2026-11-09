@@ -50,7 +50,7 @@ factory presets by ear (SOF-147); then the iPad install with CPU/memory checks
 ignored tests (`SOF60_WAV=…`, `DETUNE_WAV=… cargo test … -- --ignored`), `detune_cpu`
 and `diffuse_cpu` for CPU; spikes are standalone crates (`spikes/<name>`, `cargo run
 --release`); previews:
-`AFTERECHO_PREVIEW=tall,bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,saveas|trying|deleting`
+`AFTERECHO_PREVIEW=bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,saveas|trying|deleting`
 with `AFTERECHO_PRESET_DIR=<scratch folder>` so a preview never touches the real
 presets. Old-build comparisons: a sibling worktree (`../afterecho-oldtree`, removed
 after) — a worktree in the scratchpad breaks the `../../Dev` path deps.

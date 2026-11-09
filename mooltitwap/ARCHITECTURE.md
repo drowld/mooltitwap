@@ -69,6 +69,6 @@ went in v2.50, with every compatibility path (old sessions, old presets, the old
   `Session` and the sheet's view, and syncs the host-session field.
 
 ## Layout and scaling
-Two page shapes, absolute layouts in logical px: Wide 1366×660 and Tall 1050×780
-(`Shape::pick` chooses on iPad). Zoom = window width ÷ page width; height keeps the
-aspect. The page repaints every frame.
+One page, an absolute layout in logical px: 1366×660 (`LAYOUT`; Tall went in v2.51).
+Desktop: zoom = window width ÷ page width; height keeps the aspect. iPad host panel:
+fitted and centred in the space the host gives. The page repaints every frame.
