@@ -483,11 +483,6 @@ pub struct PetalParams {
     #[persist = "editor"]
     pub editor_state: Arc<EguiState>,
 
-    /// Cosmetic: dark (true) / light (false) theme choice, persisted so the
-    /// editor reopens in the user's chosen theme.
-    #[persist = "theme-dark"]
-    pub theme_dark: Arc<std::sync::atomic::AtomicBool>,
-
     /// The loaded preset (name, kind, edited), saved with the host's session
     /// so a reopened project names it (the preset spec §10). GUI thread only.
     #[persist = "preset-session"]
@@ -576,11 +571,6 @@ pub struct PetalParams {
     /// anywhere regardless of where the taps sit.
     #[id = "feedback_time"]
     pub feedback_time: FloatParam,
-    /// DEPRECATED (v2.19.0): FB time now follows the main delay `sync_mode`
-    /// (synced delay → synced feedback divisions). Kept so old DAW sessions
-    /// restore without complaint; nothing reads it anymore.
-    #[id = "feedback_time_mode"]
-    pub feedback_time_mode: EnumParam<SyncMode>,
     /// When true, FB TIME is locked to the cluster span (= last active tap's delay).
     /// Unlock to set an independent FB TIME. Persisted so the DAW remembers the lock state.
     #[id = "fb_time_locked"]
@@ -686,11 +676,6 @@ pub struct PetalParams {
     // ---- I/O ----
     #[id = "input_gain"]
     pub input_gain: FloatParam,
-    /// DEPRECATED (v2.21.0): the input soft-clip toggle is superseded by the
-    /// SATURATE block routed to IN. Kept so old sessions restore; the DSP no
-    /// longer reads it (only the legacy v2 editor still shows it).
-    #[id = "soft_clip"]
-    pub soft_clip: BoolParam,
     #[id = "dry_wet"]
     pub dry_wet: FloatParam,
     #[id = "output_gain"]
@@ -849,13 +834,9 @@ impl Default for PetalParams {
     fn default() -> Self {
         let time_default = 0.25; // normalized → ~125 ms in Free mode, 1/4 in Sync mode
         Self {
-            // The scope page follows the host's bounds on iOS and picks its shape
-            // there (gui_scope.rs `Shape::pick`); the v3 canvas stays fixed.
-            editor_state: {
-                let st = EguiState::from_size(crate::gui::WINDOW_W, crate::gui::WINDOW_H);
-                if crate::gui::SCOPE_PAGE { st.with_host_resize() } else { st }
-            },
-            theme_dark: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            // The page follows the host's bounds on iOS and picks its shape
+            // there (gui_scope.rs `Shape::pick`).
+            editor_state: EguiState::from_size(crate::gui::WINDOW_W, crate::gui::WINDOW_H).with_host_resize(),
             preset_session: Arc::new(std::sync::Mutex::new(Default::default())),
             base_time_l: FloatParam::new(
                 "Base Time L",
@@ -935,7 +916,6 @@ impl Default for PetalParams {
                 FloatRange::Linear { min: 0.0, max: FEEDBACK_TIME_MAX },
             )
             .with_smoother(SmoothingStyle::Linear(50.0)),
-            feedback_time_mode: EnumParam::new("Feedback Time Mode", SyncMode::Sync),
             feedback_time_locked: BoolParam::new("Feedback Time Locked", true),
 
             crossfeed: FloatParam::new("Crossfeed", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -1051,7 +1031,6 @@ impl Default for PetalParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1))
             .with_smoother(SmoothingStyle::Linear(20.0)),
-            soft_clip: BoolParam::new("Soft Clip", false),
             dry_wet: FloatParam::new(
                 "Dry/Wet",
                 0.5,
@@ -1233,7 +1212,7 @@ impl PetalParams {
     /// Feedback delay time in seconds. Derives from `feedback_time` param
     /// (0..1 normalised), interpreted via the MAIN delay's `sync_mode`
     /// (v2.19.0: synced delay → synced feedback divisions, free delay →
-    /// free ms; the separate `feedback_time_mode` param is deprecated).
+    /// free ms).
     pub fn feedback_time_seconds(&self, tempo_bpm: f32) -> f32 {
         Self::feedback_time_seconds_mode(self.sync_mode.value(), self.feedback_time.value(), tempo_bpm)
     }
@@ -1267,22 +1246,6 @@ impl PetalParams {
                     .min_by(|a, b| (a.1 .0 - beats).abs().total_cmp(&(b.1 .0 - beats).abs()))
                     .map_or(0, |(i, _)| i);
                 nearest as f32 / (SYNC_DIVS.len() - 1) as f32
-            }
-        }
-    }
-
-    /// Human-readable feedback time string shown in the GUI footer.
-    pub fn format_feedback_time(&self, tempo_bpm: f32) -> String {
-        match self.sync_mode.value() {
-            SyncMode::Free => {
-                let ms = self.feedback_time_seconds(tempo_bpm) * 1000.0;
-                if ms < 100.0 { format!("{:.0}ms", ms) }
-                else if ms < 1000.0 { format!("{:.0}ms", ms) }
-                else { format!("{:.2}s", ms * 0.001) }
-            }
-            SyncMode::Sync => {
-                let (_, label) = fb_div(self.feedback_time.value());
-                label.to_string()
             }
         }
     }

@@ -2,6 +2,29 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-09 · No backward compatibility before release (v2.50.0, pass 1 of the crate adoption)
+
+Owner, through the crates hub: "get everything from the crate", passes one at a
+time; nothing ships yet, so keep no old param ids, preset formats or migration
+paths. Pass 1 removes them:
+- **Gone:** the v2 and v3 editors (`gui.rs`'s old page, `gui_v3.rs`,
+  `palette_v3.rs`, the root `tokens.rs`) and the epoche-ui dependency;
+  `migrate.rs` (old sessions' Repeats and v2.39 Motion; old presets' values);
+  the copy from the `Mooltitwap/presets` folder; the old look file's import
+  (`Mooltitwap/appearance.json` is no longer read); the browser's old Time /
+  Cross filters carried into the sheet; the deprecated `feedback_time_mode`
+  and `soft_clip` params and the unused `theme-dark` field.
+- **Kept on purpose:** the plug-in's ids (`com.bussien.mooltitwap`, the CLAP
+  and VST3 ids, the preset `plugin` id). Changing them is the rename (SOF-92),
+  the owner's call: a DAW wouldn't find the installed plug-in in a saved
+  project. `PLAIN_FLOATS` (feedback time stored plain) stays: it's how the
+  factory bank is written, not a migration. The LFO and matrix param ids go in
+  the modulation passes, where they're replaced anyway.
+- **Effect:** an old project or preset may open with Repeats on a count and
+  without its v2.39 Motion; a new install starts on the default look.
+- Rejected: keeping the paths until release. Nothing uses them, and every
+  later pass would have to carry them.
+
 ## 2026-11-06 · Afterecho on the shared Soft Systems UI (v2.49.0, SOF-224)
 
 Owner: "Start it now" (the frame and the shared preset system go into every
@@ -23,10 +46,11 @@ plug-in, hub chat 2026-11-06). Branch `ui/softsystems-ui`.
 - **Preset sheet:** the shared one, over the box round all the cards. "In this
   preset" sits under the list (owner's pick A): Afterecho's six lines joined
   into the two it shows. Afterecho's own filters carry over once into the sheet's `facet`.
-- **Lists by length** (owner, via the hub, 2026-11-06): the long ones (the Y
-  axis, 8; the LFO shape, 6) are dropdowns; Spacing (4) is the crate's
-  vertical segment; segments that grey single options (Pan in Mono) are its
-  `seg_live`. Every segment and list is now the crate's.
+- **Lists stay stacked** (owner, 2026-11-07, over the hub's "lists by length"
+  of 2026-11-06): the Y axis (8), the LFO shapes (6) and Spacing (4) are the
+  crate's vertical segment, so every choice stays in view; segments that grey
+  single options (Pan in Mono) are its `seg_live`. Every segment and list is
+  now the crate's.
 - **Contrast** (migration step 11, a test over both palettes × 3 themes × 6
   accents): in light the later taps faded toward white (down to 1.4:1), so
   they now darken toward ink; source colours as text fell to 4.41–4.50:1 on the

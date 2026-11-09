@@ -6,15 +6,11 @@ mod factory;
 mod filter;
 mod gui;
 mod gui_scope;
-mod gui_v3;
 mod matrix;
-mod migrate;
 mod motion;
-mod palette_v3;
 mod params;
 mod presets;
 mod tape;
-mod tokens;
 mod topology;
 mod ui;
 
@@ -586,11 +582,6 @@ impl Plugin for Mooltitwap {
 
     fn params(&self) -> Arc<dyn Params> { self.params.clone() }
 
-    /// Sessions from before v2.42 keep the feedback loop and their Motion.
-    fn filter_state(state: &mut PluginState) {
-        migrate::session(state);
-    }
-
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         gui::create_editor(
             self.params.clone(),
@@ -843,7 +834,6 @@ impl Plugin for Mooltitwap {
         let output_gain = nice_plug::util::db_to_gain(p.output_gain.value());
         let dry_wet = p.dry_wet.value();
         let feedback = p.feedback.value();
-        // (soft_clip param deprecated v2.21.0 — SATURATE routed to IN covers it)
         // Colour's amounts as set; Motion's Colour target scales them (below).
         let diffuse_base = p.diffuse_amount.value();
         let mut diffuse_amount = diffuse_base;

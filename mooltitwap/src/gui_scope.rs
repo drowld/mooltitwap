@@ -206,50 +206,6 @@ impl AccentPick {
     }
 }
 
-/// The look Afterecho saved before v2.49 (`Mooltitwap/appearance.json`): read
-/// once, into the shared appearance and the accent pick.
-#[derive(serde::Deserialize, Clone, Copy, Debug)]
-#[serde(default)]
-struct OldLook {
-    dark: bool,
-    dark_variant: u8,
-    accent: u8,
-    font_steps: i32,
-}
-
-impl Default for OldLook {
-    fn default() -> Self {
-        Self { dark: true, dark_variant: 4, accent: 8, font_steps: 4 }
-    }
-}
-
-impl OldLook {
-    fn read() -> Option<Self> {
-        let path = crate::presets::legacy_root().join("appearance.json");
-        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
-    }
-
-    /// Its dark variants were Cool, Warm, Ink, OLED and Mono: OLED stays
-    /// OLED; the rest take Afterecho's own palette (Mono / Paper).
-    fn appearance(self) -> Appearance {
-        Appearance { dark: self.dark, oled: self.dark_variant == 3, palette: 1, text_pct: softsystems_ui::appearance::text_pct_from_steps(self.font_steps) }
-    }
-
-    /// GREEN CYAN MINT BLUE AMBER VIOLET SLATE MONO AFTERECHO → today's row;
-    /// Mint goes to Cyan, Slate to Blue, Mono to Afterecho's.
-    fn accent(self) -> AccentPick {
-        let on = match self.accent {
-            0 => 1,
-            1 | 2 => 2,
-            3 | 6 => 3,
-            4 => 4,
-            5 => 5,
-            _ => 0,
-        };
-        AccentPick { on, ..Default::default() }
-    }
-}
-
 /// A fresh install's look: Afterecho's own palette, dark.
 fn default_look() -> Appearance {
     Appearance { palette: 1, ..Appearance::default_for(&PRODUCT) }
@@ -407,20 +363,12 @@ pub fn frame(
             sc.preview = !ios && std::env::var_os("AFTERECHO_PREVIEW").is_some();
             let file = softsystems_ui::appearance::file(&PRODUCT);
             if sc.preview {
-                // a preview reads the look but never writes it (nor imports the old one)
-                sc.look = Appearance::read(&file).or_else(|| OldLook::read().map(OldLook::appearance)).unwrap_or_else(default_look);
-                sc.accent = AccentPick::read().or_else(|| OldLook::read().map(OldLook::accent)).unwrap_or_default();
+                // a preview reads the look but never writes it
+                sc.look = Appearance::read(&file).unwrap_or_else(default_look);
+                sc.accent = AccentPick::read().unwrap_or_default();
             } else {
-                let first = Appearance::read(&file).is_none();
-                sc.look = Appearance::load_or_import(&PRODUCT, || Some(OldLook::read().map_or_else(default_look, OldLook::appearance)));
-                sc.accent = match AccentPick::read() {
-                    Some(a) => a,
-                    None => {
-                        let a = if first { OldLook::read().map(OldLook::accent).unwrap_or_default() } else { AccentPick::default() };
-                        a.save();
-                        a
-                    }
-                };
+                sc.look = Appearance::load_or_import(&PRODUCT, || Some(default_look()));
+                sc.accent = AccentPick::read().unwrap_or_default();
             }
             // Desktop previews, to check a state without clicking to it:
             // AFTERECHO_PREVIEW=tall,bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
@@ -464,7 +412,7 @@ pub fn frame(
                 }
                 // a preview's presets live in their own folder, never the user's
                 if let Some(d) = std::env::var_os("AFTERECHO_PRESET_DIR") {
-                    sc.presets.dir = Some((PathBuf::from(d), None));
+                    sc.presets.dir = Some(PathBuf::from(d));
                 }
             }
         }
@@ -519,7 +467,6 @@ fn page(
     tempo: f32,
 ) {
     header(ui, o, s, l, params, setter, st);
-    st.palette_top = o.y + (g::HEAD_Y + g::HEAD_H + 6.0) * s;
     // The preset browser covers the whole page under the header (v2.46;
     // before, the cards stayed in view beside it).
     st.scope.presets.track(st.preset_open);
@@ -593,32 +540,6 @@ fn seg_draw(
 /// True when tapped.
 fn button(ui: &mut egui::Ui, rect: Rect, label: &str, on: bool, salt: &str) -> bool {
     controls::chip(ui, rect, label, on, ui.id().with(("btn", salt)))
-}
-
-/// A long list as a dropdown and its menu (the shared ones), the open state
-/// in egui's memory; `live[i]` false greys row `i` (a missing entry is live).
-/// Returns a newly picked row.
-fn list_pick(ui: &mut egui::Ui, rect: Rect, salt: &str, names: &[&str], cur: usize, live: &[bool]) -> Option<usize> {
-    let id = ui.id().with(("list", salt));
-    let mut open = ui.data(|d| d.get_temp::<bool>(id).unwrap_or(false));
-    if controls::dropdown(ui, rect, names.get(cur).copied().unwrap_or(""), open, id) {
-        open = !open;
-    }
-    let mut picked = None;
-    if open {
-        let rows: Vec<controls::MenuRow> = names
-            .iter()
-            .enumerate()
-            .map(|(i, n)| controls::MenuRow::new(*n).on(i == cur).live(live.get(i).copied().unwrap_or(true)))
-            .collect();
-        let out = controls::menu(ui, id.with("menu"), rect, ui.ctx().content_rect(), 1, &rows);
-        picked = out.picked.filter(|&i| i != cur);
-        if out.picked.is_some() || out.dismissed {
-            open = false;
-        }
-    }
-    ui.data_mut(|d| d.insert_temp(id, open));
-    picked
 }
 
 /// The frame a chip has, for boxes that draw their own content (the light/dark
@@ -814,7 +735,7 @@ fn header(
     // A / B
     let ab_x = l.w - l.pad - 38.0 - 10.0 - 80.0;
     if let Some(i) = seg(ui, r(o, s, ab_x, y, 80.0, h), &["A", "B"], st.ab_active as usize, "sc_ab", true) {
-        crate::gui_v3::ab_switch(st, params, setter, i as u8);
+        crate::gui::ab_switch(st, params, setter, i as u8);
     }
 
     // Freeze: a performance switch, so it sits up here in reach whatever the
@@ -1389,8 +1310,10 @@ fn picture(
     names.extend(Axis::ALL.map(Axis::name));
     let cur = if sc.time_view { 0 } else { axis_i + 1 };
     let live = [true, !mono, true, true, true, true, true, true];
-    // a long list: a dropdown (owner, 2026-11-06)
-    if let Some(i) = list_pick(ui, r(o, s, x + 14.0, y + 56.0, 92.0, g::CTL_H), "sc_y", &names, cur, &live) {
+    // every axis in view, stacked, so a glance shows them all (owner, 2026-11-07)
+    let list = r(o, s, x + 14.0, y + 56.0, 72.0, 26.0 * names.len() as f32);
+    let picked = controls::seg_v(ui, list, &names, cur, ui.id().with(("seg", "sc_y")), &live);
+    if let Some(i) = picked.filter(|&i| i != cur) {
         sc.time_view = i == 0;
         if i > 0 {
             sc.y_axis = i - 1;
@@ -1909,19 +1832,13 @@ fn stepper_cell(
     let (lo, hi) = (param.range().unnormalize(0.0), param.range().unnormalize(1.0));
     let v = param.value();
     let shown = param.normalized_value_to_string(param.unmodulated_normalized_value(), false);
-    // the shared stepper: ‹ › step, an end's arrow goes at the end
+    // the shared stepper: ‹ › step (an end's arrow goes at the end) and the
+    // value drags up and down; a fast drag can move several steps at once
     let ends = controls::Ends { down: v > lo, up: v < hi };
     if let controls::Step::By(d) = controls::stepper(ui, pill, &shown, ui.id().with(("step", id)), ends, true) {
         setter.begin_set_parameter(param);
         setter.set_parameter(param, (v + d).clamp(lo, hi));
         setter.end_set_parameter(param);
-        *focus = Some(id.to_string());
-    }
-    // and the value drags up and down, like a knob
-    let zone = softsystems_ui::tokens::STEP_ZONE * s;
-    let mid = Rect::from_min_max(Pos2::new(pill.left() + zone, pill.top()), Pos2::new(pill.right() - zone, pill.bottom()));
-    let resp = ui.interact(mid, ui.id().with(("step_drag", id)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    if epo::knob_drive(ui, setter, param, mid, &resp) {
         *focus = Some(id.to_string());
     }
     let p = ui.painter();
@@ -2012,7 +1929,7 @@ fn lfo_editor(
         let (ctl, _, _) = cell_parts(c(0, 4), s);
         (Rect::from_center_size(ctl.center(), Vec2::new(ctl.width(), 26.0 * s)), None, [c(4, 1), c(5, 2), c(7, 1)])
     } else {
-        let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(96.0 * s, g::CTL_H * s));
+        let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(72.0 * s, 6.0 * 22.0 * s));
         let right = Rect::from_min_max(Pos2::new(list.right() + 14.0 * s, ed.top()), ed.max);
         let wave = Rect::from_min_size(right.min + Vec2::new(0.0, 2.0 * s), Vec2::new(right.width(), 52.0 * s));
         let row = Rect::from_min_max(Pos2::new(right.left(), wave.bottom() + 4.0 * s), right.max);
@@ -2022,7 +1939,7 @@ fn lfo_editor(
     let pick = if stacked {
         seg_ex(ui, list, &SHAPES, cur.min(6), &format!("sc_lfo_shape{k}"), &[true; 6])
     } else {
-        list_pick(ui, list, &format!("sc_lfo_shape{k}"), &SHAPES, cur.min(6), &[])
+        controls::seg_v(ui, list, &SHAPES, cur.min(6), ui.id().with(("seg", format!("sc_lfo_shape{k}"))), &[]).filter(|&i| i != cur.min(6))
     };
     if let Some(i) = pick {
         set_norm(setter, &lfo.shape, i as f32 / 6.0);

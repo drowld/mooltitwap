@@ -264,7 +264,7 @@ mod tests {
         let ids: Vec<String> = p.param_map().into_iter().map(|(id, _, _)| id).collect();
         let mut names = std::collections::HashSet::new();
         for r in RECIPES {
-            assert!(names.insert(crate::presets::identity(r.name)), "{} twice", r.name);
+            assert!(names.insert(softsystems_presets::identity(r.name)), "{} twice", r.name);
             for (id, _) in r.changes {
                 assert!(ids.iter().any(|x| x == id), "{}: unknown param {id}", r.name);
             }
@@ -276,7 +276,7 @@ mod tests {
     /// own reading of it ("In this preset" uses the same params).
     #[test]
     fn each_preset_is_what_it_says() {
-        use crate::presets::{Cross, PresetFacets, Time};
+        use crate::presets::{Cross, Time};
         let all = factory_presets();
         let get = |n: &str| all.iter().find(|p| p.name == n).unwrap_or_else(|| panic!("{n} missing"));
         let read = |n: &str| {
@@ -307,7 +307,7 @@ mod tests {
         ];
         assert_eq!(all.len(), want.len());
         for (n, t, c) in want {
-            assert_eq!((get(n).time(), get(n).cross()), (t, c), "{n}");
+            assert_eq!((Time::of(&get(n).values), Cross::of(&get(n).values)), (t, c), "{n}");
         }
         // the times the descriptions name
         let time = |n: &str| {

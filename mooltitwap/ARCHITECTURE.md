@@ -8,8 +8,8 @@ _As of v2.47.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece 
 scope-first page (`gui_scope.rs`) on the shared Soft Systems UI (nice-plug `softsystems-ui`,
 v2.49: theme, Hanken, controls, the ☰ Options panel, the preset sheet). `src/ui/` is what's
 left of Tide's layer: `theme` names the shared palette's colours for the page's painters,
-`epo` keeps the knob drive and touch helpers. The old v2/v3 editors still compile
-(epoche-ui) and are to be retired.
+`epo` keeps the knob drive and touch helpers. The old v2/v3 editors and epoche-ui
+went in v2.50, with every compatibility path (old sessions, old presets, the old look).
 
 ## Data flow (`lib.rs::process`, per sample)
 1. Encode channel mode (Stereo / M-S / Mono) → In gain → input colour (Diffuse/Tape/Saturate on In).
@@ -40,8 +40,7 @@ left of Tide's layer: `theme` names the shared palette's colours for the page's 
   `tap_delay_secs`, `cluster_span_secs`: one copy for engine and page.
 - `bounce.rs` — Ping placement (width, swing of panned taps). `motion.rs` — LFO shapes
   and the tap targets' maths. `matrix.rs` — the Motion matrix (LFO 1–3, Follow, Step 1–2 × targets, sums,
-  whole-echo conversions, Step). `migrate.rs` — old sessions (`filter_state`) and presets
-  into v2.42's params (Repeats ∞, v2.39 Motion → the matrix). `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
+  whole-echo conversions, Step). `filter.rs` — `Svf`, `LoopTone`, `soft_clip`, `PeakLimiter`.
 - `detune.rs` — per-tap detune (v2.45; a % of Detune Range, 1–12 st, v2.46): `Wsola`
   (Light: grains, a tap's sides spliced together) and `Pv` (Clean: phase vocoder, frames
   from the tap's lines), each with a `min_delay`; the engine crossfades plain ↔ shifted
@@ -51,14 +50,13 @@ left of Tide's layer: `theme` names the shared palette's colours for the page's 
   allpasses, L≠R; the loops read early by its `bulk` delay), `tape.rs` (RE-DEEMER port).
 - `presets.rs` — Afterecho's half of the shared preset store (nice-plug
   `softsystems-presets`, v2.48): `Store` implements its `Plugin` (which params a preset
-  holds, plain floats, the Time/Cross facets, the factory bank, the old
-  `Mooltitwap/presets` folder, `migrate::preset` on read); `Library` = the crate's
+  holds, plain floats, the Time/Cross facets, the factory bank); `Library` = the crate's
   (factory from the binary + user files in `Soft Systems/Afterecho/Presets`,
-  `library.json`). Wrappers for the old editors. `PresetSession` (the crate's `PresetRef`) is persisted with the host.
+  `library.json`). `PresetSession` (the crate's `PresetRef`) is persisted with the host.
   `NOT_STORED` (Freeze, Ear guard) stays out of presets and A/B. `factory.rs` — the factory set as changes
   from Init.
-- `gui.rs` — `create_editor` (routes to the scope page when `SCOPE_PAGE`),
-  `compute_viz_data_ex` (shared viz maths), the old v2 editor. `gui_v3.rs`, `palette_v3.rs` — old v3.
+- `gui.rs` — `create_editor` (the scope page), `EditorState`, A/B (`ab_switch`) and
+  `compute_viz_data_ex` (the timeline maths the page draws from).
 - `gui_scope.rs` — the page: header (Freeze, A/B), the field/Bars with the Y list and the
   Taps menu (pattern tools), the lane (Echo with Repeats and Loop rows; Motion, the
   matrix, across the whole lane; Tap), the Time card (Time | Pattern, Euclid ring,

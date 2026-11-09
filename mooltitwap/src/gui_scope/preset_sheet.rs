@@ -17,7 +17,7 @@ use softsystems_ui::preset_sheet::{self as shared, Ctx, PresetSheet, SummaryLine
 pub(crate) struct PresetUi {
     /// The library's folder and an old one to copy from once; None = the
     /// user's own (`presets::open_default`). Tests and previews set their own.
-    pub(super) dir: Option<(PathBuf, Option<PathBuf>)>,
+    pub(super) dir: Option<PathBuf>,
     pub(super) lib: Option<Library>,
     pub(super) session: Session<Store>,
     pub(super) sheet: PresetSheet<Store>,
@@ -38,19 +38,10 @@ impl PresetUi {
         if self.lib.is_some() {
             return;
         }
-        let mut lib = match &self.dir {
-            Some((d, old)) => Library::open(d.clone(), old.as_slice()),
+        let lib = match &self.dir {
+            Some(d) => Library::open(d.clone(), &[]),
             None => crate::presets::open_default(),
         };
-        if lib.state.facet.is_empty() {
-            let pairs: Vec<String> = ["time", "cross"]
-                .into_iter()
-                .filter_map(|k| Some(crate::presets::state_word(&lib, k)).filter(|v| !v.is_empty() && v != "any").map(|v| format!("{k}={v}")))
-                .collect();
-            if !pairs.is_empty() {
-                let _ = lib.update_state(|s| s.facet = pairs.join(","));
-            }
-        }
         self.lib = Some(lib);
         self.sheet.summary = Some(summary);
     }
@@ -260,7 +251,7 @@ mod tests {
 
     /// The binary's factory bank, user presets in a folder of the test's own.
     fn ui_in(t: &TempDir) -> PresetUi {
-        PresetUi { dir: Some((t.0.clone(), None)), ..Default::default() }
+        PresetUi { dir: Some(t.0.clone()), ..Default::default() }
     }
 
     /// The host session names the loaded preset, and a reopened editor
@@ -313,15 +304,6 @@ mod tests {
     }
 
     /// The filters Afterecho remembered before v2.49 carry over.
-    #[test]
-    fn old_filters_carry_over() {
-        let t = TempDir::new("ui-facets");
-        std::fs::write(t.join("library.json"), r#"{"time":"any","cross":"ping"}"#).unwrap();
-        let mut pu = ui_in(&t);
-        pu.ensure();
-        assert_eq!(pu.lib.as_ref().unwrap().state.facet, "cross=ping");
-    }
-
     #[test]
     fn the_sheet_shows_two_summary_lines() {
         let pg = crate::factory::factory_presets().into_iter().find(|p| p.name == "Ping Garden").unwrap();

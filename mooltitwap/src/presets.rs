@@ -3,8 +3,8 @@
 //! file, the library (factory presets served from the binary, user presets on
 //! disk, `library.json`) and the rules every operation keeps live there,
 //! written once for every Soft Systems plug-in. This module is Afterecho's
-//! half: which params a preset holds, its facets, its folders, the old values
-//! it migrates, and the names the editors have always used.
+//! half: which params a preset holds, its facets, its folder and its
+//! factory bank.
 //!
 //! Afterecho has no blobs: everything a preset holds is a parameter (§3.3).
 //! Its facets are Time (Sync | Free) and Cross (Mix | Ping | Diffuse), both
@@ -24,7 +24,7 @@ use softsystems_presets::{FacetSpec, Facets, Plugin, Sound, Values};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub use softsystems_presets::{identity, Kind, PresetRef as PresetSession, Sent, VALUES_FORMAT_PLAIN};
+pub use softsystems_presets::{Kind, PresetRef as PresetSession, Sent, VALUES_FORMAT_PLAIN};
 
 /// The CLAP id (`lib.rs`; kept from the Mooltitwap days so sessions recall
 /// the plug-in): a file from another plug-in is refused.
@@ -76,19 +76,6 @@ impl Plugin for Store {
 
     fn factory() -> Vec<Preset> {
         crate::factory::factory_presets()
-    }
-
-    fn previous_dirs() -> Vec<PathBuf> {
-        vec![old_dir()]
-    }
-
-    /// A preset saved before Repeats or the mod matrix (`migrate::preset`),
-    /// brought onto today's params once, when read. The store has already
-    /// made a `values_format` 0 file plain.
-    fn migrate(p: &mut Preset) {
-        if let std::borrow::Cow::Owned(v) = crate::migrate::preset(&p.values, p.values_format) {
-            p.values = v;
-        }
     }
 
     fn capture_blobs(_: &PetalParams) {}
@@ -146,14 +133,6 @@ pub(crate) fn load_into(params: &PetalParams, snap: &BTreeMap<String, f32>) {
     }
 }
 
-/// True if the live params still match `snap` within 1e-4 (§7.11). A param
-/// the snapshot doesn't list is expected at its default, as `apply` left it.
-/// Floats compare on their step grid (the taps' Q default, 0.707, lands on
-/// the grid once set: still the same sound).
-pub fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>) -> bool {
-    softsystems_presets::matches::<Store>(params, snap, VALUES_FORMAT_PLAIN)
-}
-
 /// Every param's default in the stored form: what a missing id stands for.
 fn stored_defaults() -> &'static BTreeMap<String, f32> {
     static D: std::sync::OnceLock<BTreeMap<String, f32>> = std::sync::OnceLock::new();
@@ -170,8 +149,6 @@ pub enum Time {
 }
 
 impl Time {
-    pub const ALL: [Time; 2] = [Time::Sync, Time::Free];
-
     pub fn word(self) -> &'static str {
         match self {
             Time::Sync => "sync",
@@ -179,12 +156,9 @@ impl Time {
         }
     }
 
-    fn from_word(w: &str) -> Option<Time> {
-        Time::ALL.into_iter().find(|t| t.word() == w)
-    }
 
     /// From stored values: `sync_mode` is an enum, stored plain (0 Free, 1 Sync).
-    fn of(values: &BTreeMap<String, f32>) -> Time {
+    pub(crate) fn of(values: &BTreeMap<String, f32>) -> Time {
         let v = values.get("sync_mode").or_else(|| stored_defaults().get("sync_mode")).copied().unwrap_or(0.0);
         if v >= 0.5 { Time::Sync } else { Time::Free }
     }
@@ -200,8 +174,6 @@ pub enum Cross {
 }
 
 impl Cross {
-    pub const ALL: [Cross; 3] = [Cross::Mix, Cross::Ping, Cross::Diffuse];
-
     pub fn word(self) -> &'static str {
         match self {
             Cross::Mix => "mix",
@@ -210,11 +182,8 @@ impl Cross {
         }
     }
 
-    fn from_word(w: &str) -> Option<Cross> {
-        Cross::ALL.into_iter().find(|c| c.word() == w)
-    }
 
-    fn of(values: &BTreeMap<String, f32>) -> Cross {
+    pub(crate) fn of(values: &BTreeMap<String, f32>) -> Cross {
         let v = values.get("crossfeed_mode").or_else(|| stored_defaults().get("crossfeed_mode")).copied().unwrap_or(0.0);
         match v.round() as i32 {
             1 => Cross::Ping,
@@ -222,30 +191,6 @@ impl Cross {
             _ => Cross::Mix,
         }
     }
-}
-
-/// A preset's Time and Cross: as written, else from the values (format-1
-/// files carry no facets).
-pub trait PresetFacets {
-    fn time(&self) -> Time;
-    fn cross(&self) -> Cross;
-}
-
-impl PresetFacets for Preset {
-    fn time(&self) -> Time {
-        self.facets.get("time").and_then(|w| Time::from_word(w)).unwrap_or_else(|| Time::of(&self.values))
-    }
-
-    fn cross(&self) -> Cross {
-        self.facets.get("cross").and_then(|w| Cross::from_word(w)).unwrap_or_else(|| Cross::of(&self.values))
-    }
-}
-
-/// The browser's remembered Time and Cross filters: Afterecho's own keys in
-/// library.json ("any" or a facet word), kept by the store as fields it
-/// doesn't know.
-pub fn state_word(lib: &Library, key: &str) -> String {
-    lib.state.extra.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
 }
 
 // ------------------------------------------------------------------ folders
@@ -268,62 +213,16 @@ pub fn open_default() -> Library {
     Library::open_default()
 }
 
-/// The folder of the Mooltitwap days, which still holds the look
-/// (`appearance.json`) beside the old `presets` folder.
-pub(crate) fn legacy_root() -> PathBuf {
-    match std::env::var_os("HOME") {
-        Some(h) => PathBuf::from(h).join("Library/Application Support/Mooltitwap"),
-        None => std::env::temp_dir().join("mooltitwap"),
-    }
-}
-
-/// The presets folder before v2.40, copied from once (§4).
-pub fn old_dir() -> PathBuf {
-    legacy_root().join("presets")
-}
-
-// ------------------------------------------------------------------ the old editors
-
-/// For the retiring v2 / v3 editors (SOF-89), which key presets by name.
-/// Remove with them.
-pub trait OldEditors {
-    fn load() -> Self;
-    fn names(&self) -> Vec<String>;
-    fn save_named(&mut self, name: &str, values: BTreeMap<String, f32>) -> bool;
-    fn toggle_favorite(&mut self, name: &str);
-}
-
-impl OldEditors for Library {
-    fn load() -> Library {
-        open_default()
-    }
-
-    fn names(&self) -> Vec<String> {
-        self.presets().map(|p| p.name.clone()).collect()
-    }
-
-    /// Their Save: over the user preset of that name, else a new one.
-    fn save_named(&mut self, name: &str, values: BTreeMap<String, f32>) -> bool {
-        let sound = Sound { values, blobs: () };
-        match self.entry(name) {
-            Some(e) if e.preset.kind() == Kind::User => self.save(&identity(name), sound).is_ok(),
-            Some(_) => false,
-            None => self.save_as(name, sound, None).is_ok(),
-        }
-    }
-
-    fn toggle_favorite(&mut self, name: &str) {
-        let id = identity(name);
-        let on = !self.is_favourite(&id);
-        let _ = self.set_favourite(&id, on);
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use serde_json::Value;
     use std::path::Path;
+
+    /// The live params still match `snap` (the crate's check, on the step grid).
+    fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>) -> bool {
+        softsystems_presets::matches::<Store>(params, snap, VALUES_FORMAT_PLAIN)
+    }
 
     /// Stand-in for the host's GUI context: a parameter gesture just sets the
     /// value, as the host would by the end of the gesture.
@@ -518,11 +417,11 @@ pub(crate) mod tests {
         let setter = ParamSetter::new(&TestGui);
         setter.set_parameter(&p.crossfeed_mode, crate::params::CrossfeedMode::PingPong);
         let ping = Preset::new::<Store>("x", sound(&p), Kind::User);
-        assert_eq!((ping.cross(), ping.facets["cross"].as_str()), (Cross::Ping, "ping"));
+        assert_eq!((Cross::of(&ping.values), ping.facets["cross"].as_str()), (Cross::Ping, "ping"));
         setter.set_parameter(&p.sync_mode, crate::params::SyncMode::Sync);
-        assert_eq!(Preset::new::<Store>("x", sound(&p), Kind::User).time(), Time::Sync);
+        assert_eq!(Preset::new::<Store>("x", sound(&p), Kind::User).facets["time"], "sync");
         setter.set_parameter(&p.sync_mode, crate::params::SyncMode::Free);
-        assert_eq!(Preset::new::<Store>("x", sound(&p), Kind::User).time(), Time::Free);
+        assert_eq!(Preset::new::<Store>("x", sound(&p), Kind::User).facets["time"], "free");
         // the store's facet list names what the sheet filters by
         let names: Vec<&str> = Store::FACETS.iter().map(|f| f.name).collect();
         assert_eq!(names, ["time", "cross"]);
@@ -557,46 +456,6 @@ pub(crate) mod tests {
         assert_eq!(lib.get("ping garden copy").unwrap().kind(), Kind::User);
     }
 
-    /// The files Afterecho wrote before v2.40 (no format, plugin or kind; a
-    /// build stamp and a favourite flag) load as user presets, their
-    /// favourites move into library.json once, and the values they predate
-    /// are migrated when read.
-    #[test]
-    fn format_1_files_still_load() {
-        let t = TempDir::new("fmt1");
-        let old = r#"{"name":"Old One","favorite":true,"build":"v2.30.0","tags":["dub"],"values_format":1,"values":{"feedback":0.7,"num_taps_active":3.0,"motion_pan":0.8,"sync_mode":1.0}}"#;
-        std::fs::write(t.join("Old One.json"), old).unwrap();
-        let lib = open(&t);
-        let p = lib.get("old one").unwrap();
-        assert_eq!(p.kind(), Kind::User);
-        assert_eq!(p.values["num_taps_active"], 3.0);
-        assert_eq!((p.time(), p.cross()), (Time::Sync, Cross::Mix));
-        assert!(lib.is_favourite("old one"));
-        assert!(lib.state.favourites_migrated);
-        // Motion's old depth became LFO 1's matrix cell; Repeats loops
-        assert!((p.values["mx_lfo1_pan"] - 0.9).abs() < 1e-6);
-        assert_eq!(p.values["repeats"], crate::params::REPEATS_LOOP as f32);
-        assert!(!p.values.contains_key("motion_pan"));
-    }
-
-    #[test]
-    fn old_folder_is_copied_once() {
-        let new = TempDir::new("new");
-        let old = TempDir::new("old");
-        std::fs::write(old.join("Mine.json"), r#"{"name":"Mine","values_format":1,"values":{}}"#).unwrap();
-        std::fs::write(old.join("Junk.json"), "nope").unwrap();
-        let mut lib = Library::open(new.0.clone(), &[old.0.clone()]);
-        assert!(lib.get("mine").is_some());
-        assert!(!new.join("Junk.json").exists(), "an unreadable file stays behind");
-        assert!(old.join("Mine.json").exists(), "the old folder is never touched");
-        // deleted here, it doesn't come back from the old folder
-        lib.delete("mine").unwrap();
-        let lib = Library::open(new.0.clone(), &[old.0.clone()]);
-        assert!(lib.get("mine").is_none());
-    }
-
-    /// Every param a preset can hold is captured, and a capture → apply round
-    /// trip is exact on a fresh instance.
     #[test]
     fn preset_coverage_audit() {
         let a = PetalParams::default();

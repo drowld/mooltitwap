@@ -1,6 +1,6 @@
 [package]
 name = "mooltitwap"
-version = "2.49.0"
+version = "2.50.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Emmanuel Bussien"]
@@ -19,7 +19,6 @@ path = "src/main.rs"
 # types unify; default_fonts so text renders before install_fonts runs.
 egui = { version = "0.34.1", default-features = false, features = ["bytemuck", "default_fonts"] }
 # The shared Epoché UI kit (theme + epo painted widgets + fonts + formatters).
-epoche-ui = { path = "../../Dev/epoche-ui" }
 crossbeam = "0.8"
 # The preset store every Soft Systems plug-in shares (nice-plug's workspace).
 softsystems-presets = { path = "../../Dev/nice-plug/crates/softsystems-presets" }
