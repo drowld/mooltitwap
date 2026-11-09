@@ -634,11 +634,9 @@ fn rule(p: &egui::Painter, a: Pos2, b: Pos2, s: f32) {
     p.line_segment([a, b], Stroke::new(1.0 * s, theme::line()));
 }
 
-/// A card: fill, title, and the inner rect for its cells.
+/// A card (the crate's: fill and title), and the inner rect for its cells.
 fn card(ui: &egui::Ui, rect: Rect, title: &str, s: f32) -> Rect {
-    let p = ui.painter();
-    p.rect_filled(rect, g::R_CARD * s, PANEL());
-    text(p, rect.min + Vec2::new(16.0, 10.0) * s, Align2::LEFT_TOP, title, 13.0, s, INK2());
+    softsystems_ui::paint::card(ui.painter(), rect, title);
     Rect::from_min_max(rect.min + Vec2::new(14.0, 30.0) * s, rect.max - Vec2::new(14.0, 8.0) * s)
 }
 
@@ -1202,7 +1200,7 @@ fn picture(
     let (x, y, w, h) = l.picture;
     let rect = r(o, s, x, y, w, h);
     let p = ui.painter().clone();
-    p.rect_filled(rect, g::R_CARD * s, theme::FRAME());
+    softsystems_ui::paint::card(&p, rect, "");
     // The title opens the Taps menu (pattern tools; values only, so not in
     // the Time view); the chevron says so.
     let tb = r(o, s, x + 10.0, y + 10.0, 74.0, 28.0);
@@ -1613,7 +1611,7 @@ fn lane(
     let (x, y, w, h) = l.lane;
     let rect = r(o, s, x, y, w, h);
     let p = ui.painter().clone();
-    p.rect_filled(rect, g::R_CARD * s, theme::FRAME());
+    softsystems_ui::paint::card(&p, rect, "");
     // Echo · Motion · Tap N. The Tap tab shows the selected tap (clicking a dot
     // opens it); picked with nothing selected, it selects the tap it last showed.
     let n = n_active(params);
@@ -1835,6 +1833,27 @@ fn pill_drag(ui: &mut egui::Ui, rect: Rect, s: f32, setter: &ParamSetter, param:
     text(ui.painter(), rect.center(), Align2::CENTER_CENTER, &format!("{label} {v}"), 11.5, s, INK());
 }
 
+/// The LFO shapes in `MotionShape`'s order (Env, the seventh, isn't one), as
+/// the shared modulation crate names and draws them: Ramp is its Saw.
+const LFO_SHAPES: [softsystems_mod::Shape; 6] = {
+    use softsystems_mod::Shape as S;
+    [S::Sine, S::Triangle, S::Saw, S::Square, S::SampleHold, S::Glide]
+};
+
+/// A segment's painter, as `SegItem::Icon` takes it.
+type SegPaint = Box<dyn Fn(&egui::Painter, Rect, Color32)>;
+
+/// A shape's segment: the crate's icon, then its name.
+fn shape_item(shape: softsystems_mod::Shape) -> SegPaint {
+    use softsystems_ui::modulation::curve::{shape_icon, shape_name};
+    Box::new(move |p, r, col| {
+        let icon = Rect::from_min_size(r.min, Vec2::new(r.height() * 1.6, r.height()));
+        shape_icon(p, icon, shape, col);
+        let at = Pos2::new(icon.right() + r.height() * 0.6, r.center().y);
+        softsystems_ui::paint::text(p, at, Align2::LEFT_CENTER, shape_name(shape), softsystems_ui::tokens::TXT, col);
+    })
+}
+
 /// An LFO's controls: its shape, the wave, Rate (Hz, or a note value when
 /// synced), Free / Sync and Scatter.
 #[allow(clippy::too_many_arguments)]
@@ -1845,17 +1864,19 @@ fn lfo_editor(
     let lfo = params.lfos()[k];
     let prefix = if k == 0 { "motion".to_string() } else { format!("lfo{}", k + 1) };
     let id = |what: &str| format!("{prefix}_{what}");
-    const SHAPES: [&str; 6] = ["Sine", "Tri", "Ramp", "Square", "S&H", "Glide"];
     let cur = enum_index(&lfo.shape, 7);
     let (list, wave, cells) = {
-        let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(72.0 * s, 6.0 * 22.0 * s));
+        let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(108.0 * s, 6.0 * 22.0 * s));
         let right = Rect::from_min_max(Pos2::new(list.right() + 14.0 * s, ed.top()), ed.max);
         let wave = Rect::from_min_size(right.min + Vec2::new(0.0, 2.0 * s), Vec2::new(right.width(), 52.0 * s));
         let row = Rect::from_min_max(Pos2::new(right.left(), wave.bottom() + 4.0 * s), right.max);
         let c = |col| cell_at(row, 3, 1, 0, col, 1, s);
         (list, wave, [c(0), c(1), c(2)])
     };
-    let pick = controls::seg_v(ui, list, &SHAPES, cur.min(6), ui.id().with(("seg", format!("sc_lfo_shape{k}"))), &[]).filter(|&i| i != cur.min(6));
+    // every shape in view, each its icon and name (owner, 2026-11-07)
+    let draw: Vec<SegPaint> = LFO_SHAPES.iter().map(|&sh| shape_item(sh)).collect();
+    let items: Vec<controls::SegItem> = draw.iter().map(|f| controls::SegItem::Icon(f.as_ref())).collect();
+    let pick = controls::seg_v_items(ui, list, &items, cur.min(6), ui.id().with(("seg", format!("sc_lfo_shape{k}"))), &[]).filter(|&i| i != cur.min(6));
     if let Some(i) = pick {
         set_norm(setter, &lfo.shape, i as f32 / 6.0);
         *focus = Some(id("shape"));

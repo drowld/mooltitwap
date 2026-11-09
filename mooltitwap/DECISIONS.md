@@ -2,6 +2,22 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-09 · Crate adoption pass 2: cards and the LFO shape list (v2.52.0)
+
+- **Cards** are the crate's `paint::card`: the panel fill and its title (12 px
+  ink at 16, 12; was 13 px ink2 at 16, 10). The picture and lane cards were
+  filled with `frame`, which the crate defines as text on a selected fill:
+  they're `panel` now, like the rest.
+- **LFO shapes:** the stacked list shows each shape's icon and name, drawn by
+  the crate (`seg_v_items`, `modulation::curve::shape_icon` / `shape_name`), as
+  the owner asked (2026-11-07). The names are the crate's: Triangle, and Saw
+  for Ramp. Until the modulation passes (6–9) put Afterecho on the crate's
+  generators, the icons are the crate's drawings: its Triangle starts at the
+  middle going up, Afterecho's at the bottom (the wave beside the list shows
+  what plays).
+- `softsystems-ui` now builds with `mod`, and `softsystems-mod` is a
+  dependency (passes 6–9 need both).
+
 ## 2026-11-09 · One page shape: Tall removed (v2.51.0)
 
 Owner: Afterecho runs on the iPad but never standalone, so always in a host's

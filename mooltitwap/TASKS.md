@@ -6,7 +6,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 - [ ] **v2.49: Afterecho on softsystems-ui** (owner's go 2026-11-06, branch `ui/softsystems-ui`, uncommitted): shared theme, fonts, ☰ Options panel, 16/12 frame, controls, the shared preset sheet, the contrast rule in a test. Lists by length are in (Y axis and LFO shape dropdowns, Spacing the vertical segment). "In this preset" is back, under the sheet's list. Left: owner check, then merge on his word. Linear SOF-224.
 - [ ] **Crate adoption, 10 passes** (owner via the crates hub, 2026-11-09; one pass at a time, each tested and shown, committed on the owner's word). Branch `ui/softsystems-ui`.
   1. [x] Remove the compatibility paths: old editors, epoche-ui, migrations, the old look and preset folders, deprecated params (v2.50.0, 7014573).
-  2. [ ] UI leftovers: cards on `paint::card`, LFO shapes as icons (`seg_v_items`), quirks page.
+  2. [x] UI leftovers: cards on `paint::card` (picture and lane were on `frame`), LFO shapes as icon + name (`seg_v_items`) (v2.52.0). Quirks page: the hub keeps it, told.
   3. [ ] Saturate: listening test of the crate's TUBE / TAPE / AMP / GRIT / TRANSFO against tanh, keep two; PolSat531 against the loop's soft clip (loop only, never a Saturate choice).
   4. [ ] Diffuse: listening test of the crate's DIFFUSION and SPACES ROOM / VAULT against v2.47's chain, keep two.
   5. [ ] Filter: the crate's shared SVF (clamps differ at the extremes).
@@ -39,7 +39,8 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 - iPad installs: devicectl refuses while the iPad is locked or "not unlocked recently" — unlock first.
 
 ## Done (recent)
-- [x] v2.51.0 One page shape: Tall removed (owner: Afterecho always runs in a host panel). 100 tests, iOS check, screenshots.
+- [x] v2.52.0 Crate pass 2: the crate's cards; LFO shapes as icons and names. 100 tests, iOS check, screenshots.
+- [x] v2.51.0 One page shape: Tall removed (owner: Afterecho always runs in a host panel). 100 tests, iOS check, screenshots. Commit 8c1ab85.
 - [x] v2.50.0 Old editors and every compatibility path removed (crate adoption pass 1); 101 tests, iOS check, screenshots. Commit 7014573. (SOF-89)
 - [x] v2.48.0 Presets on the shared softsystems-presets crate (`presets.rs` 1,533 → ~530 lines); parity-checked on copies of the real folders; loads send only changed params; factory `author` "Soft Systems". Not committed, not installed. The edited check is the crate's since its float-grid fix (nice-plug 780e520). (SOF-205)
 - [x] v2.47.0 Diffuse rebuilt from the listening test (candidate C): six short drifting allpasses, wide, the loops read early by its delay, Cross → Diffuse too (SOF-199); with v2.46: Detune Range 1–12 st, In/Out 0 dB at the top, full-page preset sheet, accent ring (SOF-84 notes)
