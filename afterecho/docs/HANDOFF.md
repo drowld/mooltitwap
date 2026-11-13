@@ -1,4 +1,13 @@
-# Mooltitwap — Developer Handoff
+# Afterecho — Developer Handoff
+
+**Names (v2.55.0, 2026-11-13):** the crate and folder are `afterecho`, the ids
+`com.softsystems.afterecho` (CLAP, macOS bundles, iOS), VST3 `SoftSystemsAftr1`, AU
+`aufx`/`Aftr`/`SfSy`. Older sections below still say `mooltitwap` and `com.tlkm.afterecho`:
+read them as `afterecho` and `com.softsystems.afterecho`.
+
+**Beta (2026-11-13):** the version is `1.0.0-beta.1` and every build is a beta build (`beta`
+feature on by default). Without an `afterecho-beta` licence it plays the demo with silences from
+the start. The end date in `lib.rs` is a placeholder until the owner sets it.
 
 **What it is:** A 16-tap multitap delay "garden" (VST3 + CLAP + standalone), inspired
 by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
@@ -293,18 +302,18 @@ build, shoot, revert.
 ## 0. TL;DR / Quick start
 
 ```bash
-cd "/Users/emmanuelbussien/Petal vst/mooltitwap"
+cd "/Volumes/Plexicon/CODING/Petal vst/afterecho"
 
 # Compile-check fast (catches type errors)
 cargo build
 
 # Build the actual plugin bundles (release)
-cargo xtask bundle mooltitwap --release
-# → produces ../target/bundled/mooltitwap.{clap,vst3}
+cargo nice-plug bundle afterecho --release
+# → produces ../target/bundled/Afterecho.{clap,vst3}
 
 # Install to the user plugin folders (NOT /Library — that needs sudo)
-cp -rf "../target/bundled/mooltitwap.clap" "$HOME/Library/Audio/Plug-Ins/CLAP/"
-cp -rf "../target/bundled/mooltitwap.vst3" "$HOME/Library/Audio/Plug-Ins/VST3/"
+cp -rf "../target/bundled/Afterecho.clap" "$HOME/Library/Audio/Plug-Ins/CLAP/"
+cp -rf "../target/bundled/Afterecho.vst3" "$HOME/Library/Audio/Plug-Ins/VST3/"
 ```
 
 The version string shown in the GUI header comes from `CARGO_PKG_VERSION` at compile

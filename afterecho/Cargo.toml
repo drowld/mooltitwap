@@ -1,18 +1,27 @@
 [package]
-name = "mooltitwap"
-version = "2.54.0"
+name = "afterecho"
+version = "1.0.0-beta.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["Emmanuel Bussien"]
-description = "Multitap delay garden, inspired by Rainbow Circuit's Petal"
+description = "A delay of up to 16 taps, drawn and moved on one page."
 
 [lib]
 crate-type = ["cdylib", "lib"]
 
 # Desktop standalone host — for local visual testing (`cargo run --release`).
 [[bin]]
-name = "mooltitwap"
+name = "afterecho"
 path = "src/main.rs"
+
+# A beta build (docs: nice-plug beta-licensing-plan.md, licence-crate.md "Beta builds"):
+# the licence is `afterecho-beta` and stops at `BETA_ENDS` (lib.rs). The licence crate ties
+# it to the version: with `beta` on it must be x.y.z-beta.N, and a release version must
+# build without it. Afterecho is in beta, so it's on by default; the release drops it
+# from `default` and the `-beta.N` from the version together.
+[features]
+default = ["beta"]
+beta = ["softsystems-licence/beta"]
 
 [dependencies]
 # egui pinned to the exact version the fork resolves so the editor closure
@@ -24,13 +33,19 @@ crossbeam = "0.8"
 softsystems-presets = { path = "../../Dev/nice-plug/crates/softsystems-presets" }
 # The Soft Systems look: tokens, Hanken, controls, the ☰ panel, the preset sheet.
 # The licence section comes once the licence is wired.
-softsystems-ui = { path = "../../Dev/nice-plug/crates/softsystems-ui", default-features = false, features = ["presets", "mod"] }
+softsystems-ui = { path = "../../Dev/nice-plug/crates/softsystems-ui", default-features = false, features = ["presets", "mod", "licence"] }
 softsystems-mod = { path = "../../Dev/nice-plug/crates/softsystems-mod" }
+# The licence check and the demo gate (nice-plug docs/licence-crate.md).
+softsystems-licence = { path = "../../Dev/nice-plug/crates/softsystems-licence" }
 softsystems-fx = { path = "../../Dev/nice-plug/crates/softsystems-fx", features = ["filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Detune's Clean quality (phase vocoder, v2.45).
 realfft = "3.5"
+
+[dev-dependencies]
+# The tests' demo gate, `DemoGate::off()`: Cargo turns `dev` on for tests only.
+softsystems-licence = { path = "../../Dev/nice-plug/crates/softsystems-licence", features = ["beta", "dev"] }
 
 # Desktop (VST3/CLAP/standalone): `standalone` builds the local test host;
 # `assert_process_allocs` keeps the RT path allocation-free. egui via baseview

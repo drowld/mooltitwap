@@ -1,20 +1,23 @@
-# TASKS — mooltitwap (Afterecho)
+# TASKS — Afterecho
 _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDESIGN_PLAN.md. Branch `ui/scope-first`, local commits only (push on major milestones, owner's call)._
 
 ## In Progress
 - [ ] **Owner hand test (v2.34–v2.47)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), v2.42 (Repeats, the Motion matrix, Hanken Grotesk) and v2.43 (Time view, Grid, two Steps with Glide, ear safety), v2.44 (fractional delay reads: Repitch glides, cycles a sample tighter), v2.45 (per-tap detune, Light/Clean), v2.46 (Detune Range, In/Out at 0 dB, full-page presets), v2.47 (Diffuse rebuilt; Cross → Diffuse with it), v2.48 (presets on the shared store: browse, Try/Back, Save as… once). v2.47.0 installed 2026-11-01. Step clicks: owner confirmed fixed (2026-11-01). Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
 - [ ] **v2.49: Afterecho on softsystems-ui** (owner's go 2026-11-06, branch `ui/softsystems-ui`, uncommitted): shared theme, fonts, ☰ Options panel, 16/12 frame, controls, the shared preset sheet, the contrast rule in a test. Lists by length are in (Y axis and LFO shape dropdowns, Spacing the vertical segment). "In this preset" is back, under the sheet's list. Left: owner check, then merge on his word. Linear SOF-224.
-- [ ] **Crate adoption, 10 passes** (owner via the crates hub, 2026-11-09; one pass at a time, each tested and shown, committed on the owner's word). Branch `ui/softsystems-ui`.
-  1. [x] Remove the compatibility paths: old editors, epoche-ui, migrations, the old look and preset folders, deprecated params (v2.50.0, 7014573).
-  2. [x] UI leftovers: cards on `paint::card` (picture and lane were on `frame`), LFO shapes as icon + name (`seg_v_items`) (v2.52.0, da07e71); air in the knob cells, shape list aligned (v2.53.0). Quirks page: the hub keeps it, told.
-  3. [ ] **In progress:** reels and metrics ready (`spikes/saturate/`); waiting for the owner's ears. Saturate: listening test of the crate's TUBE / TAPE / AMP / GRIT / TRANSFO against tanh, keep two; PolSat531 against the loop's soft clip (loop only, never a Saturate choice).
-  4. [ ] **Waiting for ears:** reels and metrics ready (`spikes/diffuse-crate/`). Diffuse: the crate's DIFFUSION (S, M) and SPACES ROOM / VAULT against v2.47's chain. Numbers (not heard): DIFFUSION flutters at this size (echo density 0.10–0.27); SPACES is dense but lands 77–92 ms late in the loop and rings; it's a candidate for Out / In only.
-  5. [x] Filter: the tap filter is the crate's SVF (v2.54.0): differences ≤ −54 dB, more accurate, +0.08 % of a core; 100 tests, iOS check. Not committed.
-  6. [ ] Modulation engine: LFO 1–3, Follow, Step 1–2 on softsystems-mod; taps as voices with `set_voice_offset` (Scatter).
-  7. [ ] The matrix: targets, routes, Depth / Time (replaces SOF-244's bugs).
-  8. [ ] Grid, halo, knob menu, tiles.
-  9. [ ] Editors: curve, steps, follow; mod-to-mod routing.
-  10. [ ] Licence: softsystems-licence and the ☰ section.
+- [ ] **Beta readiness: everything from the crates** (crates hub, 2026-11-13: Afterecho is 4th to beta after Vortex, Tide and Strata; date: owner). One pass at a time, each built, tested and shown, committed on the owner's word. Branch `ui/softsystems-ui`. Done so far: presets (v2.48), UI (v2.49), pass 1 compatibility removed (v2.50), pass 2 cards and shape list (v2.52–2.53), the crate's SVF (v2.54).
+  Beta-critical:
+  1. [x] Name and ids (v2.55.0, SOF-92): `com.softsystems.afterecho` (CLAP, bundles, iOS), VST3 `SoftSystemsAftr1`, AU manufacturer `SfSy`, vendor Soft Systems; crate, folder, `Afterecho` struct and `AfterechoParams` renamed. 100 tests, bundles load, iOS check. Not committed, not installed.
+  2. [x] Licence (v2.56.0): `softsystems-licence` wired by hand: `licence!("afterecho")` (the beta date comes with pass 3), the demo gate last on the output, checks at load, editor open and preset load, the ☰ panel's Licence section (Activate, offline, sign out). 100 tests, iOS check, screenshot. Not activated against the server, not committed.
+  3. [x] Beta build (1.0.0-beta.1): `beta` feature on by default, `licence!("afterecho", beta_ends = …)`, release hardening (lto fat, codegen-units 1, path remaps in `.cargo/config.toml`, `@rpath/Afterecho` install name in `build.rs`). CLAP and VST3 pass `check-release-binary.py --beta`. **Blocker before any tester build: `BETA_ENDS` is a placeholder (2026-12-31), the owner sets the date.** The tests run the crate's `DemoGate::off()` (dev-dependency with `dev`), and the standalone passes the check too (the Licensing chat's fixes, nice-plug eaf0e7e). Gap sent: CFBundleVersion "1.0.0-beta.1" (bundler). Not committed.
+  4. [ ] Beta UI and title: `paint::wordmark`, header laid out from its rect, `BetaUi` badge, banner and pop-up. Waits for nice-plug main: the hub merges claude/ui-beta → ui-halo → ui-wordmark.
+  After:
+  5. [ ] The shared knob (`knob::knob`): arc ink or accent (owner); Feedback's stop at 100 % (crate gap: the UI crate proposes `Knob::detent` / `.over`, owner picks from drawings; keep our drag until then); every knob cell ≥ ~54 px wide for the halo.
+  6. [ ] Saturate (`spikes/saturate/`, waiting for ears).
+  7. [ ] Diffuse (`spikes/diffuse-crate/`, waiting for ears).
+  8. [ ] Modulation engine on softsystems-mod: LFO 1–3, Follow, Step 1–2; taps as voices (Scatter).
+  9. [ ] The matrix: targets, routes, Depth / Time (replaces SOF-244's bugs).
+  10. [ ] Grid, halo, knob menu, tiles.
+  11. [ ] Editors: curve, steps, follow; mod-to-mod routing.
   - Optional: the tape's 2× oversampler on the crate's half-band.
   Release gate: SPACES tables, TUBE and TRANSFO constants need the owner's clearance before a public build.
 - [ ] **Factory presets: tune by ear** — the 18 approved presets (v2.41.0, `factory.rs`) are written and tested against their descriptions; none heard yet. Linear SOF-147.
@@ -28,7 +31,6 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 5. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
 7. [ ] Phase 5: hosts (AUM, Drambo, Logic iPad, Cubasis; Ableton, Reaper, Bitwig, FL; pluginval), release list (bundle IDs, App Group, 60 fps cap), licences (RE-DEEMER notice, GPL vs Soft Systems plan). Linear SOF-90.
 8. [ ] Verify Fade mode thoroughly with feedback interaction. Linear SOF-91.
-9. [ ] Coordinated rename to Afterecho (struct, crate/folder, bundler key, docs; IDs stay unless owner accepts broken sessions). Linear SOF-92.
 - Later (after release): 32 taps. Linear SOF-93 (Backlog).
 
 ## Open questions (owner)

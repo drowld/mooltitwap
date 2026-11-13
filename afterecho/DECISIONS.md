@@ -2,6 +2,45 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-13 · The beta build (1.0.0-beta.1, beta pass 3)
+
+Owner: the beta is `1.0.0-beta.1`, its date later. The licence crate ties the version to its
+`beta` feature (a beta version without it, or a release version with it, doesn't build), so
+Afterecho's `beta` feature is on by default while it's in beta; the release drops it from
+`default` and the `-beta.N` from the version together. The beta's last day is written in
+`lib.rs`; 2026-12-31 is a placeholder until the owner gives the date. Dev builds are beta
+builds now: without an `afterecho-beta` licence they play the beta's demo, silences from the
+start (the unit tests swap in the crate's `DemoGate::off()`, which exists only with its `dev` feature, a dev-dependency). The version no longer
+moves on every change: tester builds count `-beta.N`.
+Release hardening, as the licence crate asks: `lto = "fat"`, one codegen unit, the local
+paths and the licence crate's name remapped out (`.cargo/config.toml`), and the plug-in's
+install name `@rpath/Afterecho` (`build.rs`, Tide's way). The CLAP and VST3 pass
+`check-release-binary.py --beta`. Release builds take about 2.5 minutes now (were ~25 s).
+Rejected: a release version for dev builds and the beta version only at release time, which
+the crate's guard can't express without editing the version per build.
+
+## 2026-11-13 · The licence (v2.56.0, beta pass 2)
+
+Afterecho runs the shared licence crate (`softsystems-licence`), wired by hand as its docs
+say (the shared helper, plan 2.12, isn't built): `licence!("afterecho")` and its demo gate
+on the plug-in, the gate last on the output (3 minutes clean, then ~2 s of silence every
+45 s while unlicensed), the checks when the state loads, the window opens and a preset
+loads. The ☰ panel shows the crate's Licence section (Activate, offline activation, sign
+out); iOS needs no licence and hides it. The beta end date comes with the beta build (pass
+3). Rejected: Tide's own licence panel; the crate's section is the same for every plug-in.
+
+## 2026-11-13 · Soft Systems names and ids (v2.55.0, beta pass 1, SOF-92)
+
+Before any tester installs it, Afterecho takes the ids every Soft Systems plug-in uses
+(Tide's pattern): CLAP and bundle ids `com.softsystems.afterecho` (iOS too, was
+`com.tlkm.afterecho`), VST3 class `SoftSystemsAftr1`, AU manufacturer `SfSy` (was `Busn`;
+type and subtype stay `aufx` / `Aftr`), vendor "Soft Systems", softsystems.app, the
+website's contact address. The crate and folder are `afterecho`, the plug-in struct
+`Afterecho`, its params `AfterechoParams`. Sessions saved with the old ids no longer recall
+it, and preset files saved under the old id are refused (owner: no one uses it yet, no
+backward compatibility). Rejected: keeping `com.bussien.mooltitwap` so old sessions load,
+which would have fixed a personal id into the public release.
+
 ## 2026-11-09 · Crate adoption pass 5: the tap filter is the crate's SVF (v2.54.0)
 
 The per-tap filter (Cutoff, Q, type, 12/24/48 dB) runs on `softsystems-fx`'s

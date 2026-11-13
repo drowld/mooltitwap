@@ -478,7 +478,7 @@ pub enum CrossfeedMode {
 const GAIN_RANGE: FloatRange = FloatRange::SymmetricalSkewed { min: -24.0, max: 12.0, factor: 1.0, center: 0.0 };
 
 #[derive(Params)]
-pub struct PetalParams {
+pub struct AfterechoParams {
     /// Persists the editor window size across sessions.
     #[persist = "editor"]
     pub editor_state: Arc<EguiState>,
@@ -830,7 +830,7 @@ impl Default for TapParams {
     }
 }
 
-impl Default for PetalParams {
+impl Default for AfterechoParams {
     fn default() -> Self {
         let time_default = 0.25; // normalized → ~125 ms in Free mode, 1/4 in Sync mode
         Self {
@@ -1102,7 +1102,7 @@ impl Default for PetalParams {
 }
 
 // ─── Time conversion helpers ──────────────────────────────────────────────
-impl PetalParams {
+impl AfterechoParams {
     /// How the taps spread on one side: the mode, that side's Shape pad (the
     /// left one while they're linked), Euclid's steps and rotation, swing.
     pub fn spacing(&self, right: bool) -> crate::topology::Spacing {
@@ -1259,14 +1259,14 @@ mod tests {
     fn feedback_time_inverse_round_trips() {
         // Free: any time in range comes back within a hair.
         for ms in [10.0f32, 37.0, 250.0, 1000.0, 3333.0, 8000.0, 12500.0, 20000.0] {
-            let n = PetalParams::feedback_time_norm_for_secs(SyncMode::Free, ms / 1000.0, 120.0);
-            let back = PetalParams::feedback_time_seconds_mode(SyncMode::Free, n, 120.0) * 1000.0;
+            let n = AfterechoParams::feedback_time_norm_for_secs(SyncMode::Free, ms / 1000.0, 120.0);
+            let back = AfterechoParams::feedback_time_seconds_mode(SyncMode::Free, n, 120.0) * 1000.0;
             assert!((back - ms).abs() < ms * 1e-3, "{ms} ms came back as {back}");
         }
         // Sync: every division, the long ones too, maps back onto itself.
         for (i, &(beats, label)) in SYNC_DIVS.iter().chain(FB_LONG_DIVS).enumerate() {
             let secs = beats * 60.0 / 120.0;
-            let n = PetalParams::feedback_time_norm_for_secs(SyncMode::Sync, secs, 120.0);
+            let n = AfterechoParams::feedback_time_norm_for_secs(SyncMode::Sync, secs, 120.0);
             assert!(n <= FEEDBACK_TIME_MAX, "division {i} lands past the range");
             assert_eq!(fb_div(n).1, label, "division {i}");
         }
@@ -1279,17 +1279,17 @@ mod tests {
             let n = i as f32 / (SYNC_DIVS.len() - 1) as f32;
             assert_eq!(fb_div(n), snap_to_div(n), "division {i}");
         }
-        let free = |n| PetalParams::feedback_time_seconds_mode(SyncMode::Free, n, 120.0);
+        let free = |n| AfterechoParams::feedback_time_seconds_mode(SyncMode::Free, n, 120.0);
         assert!((free(1.0) - 8.0).abs() < 1e-3);
         // The new top: 20 s free, 8 bars synced.
         assert!((free(FEEDBACK_TIME_MAX) - 20.0).abs() < 0.01);
         assert_eq!(fb_div(FEEDBACK_TIME_MAX).1, "8/1");
-        assert_eq!(PetalParams::default().feedback_time.value(), 8.0 / 17.0);
+        assert_eq!(AfterechoParams::default().feedback_time.value(), 8.0 / 17.0);
     }
 
     #[test]
     fn repeats_read_as_a_count_or_the_loop() {
-        let r = &PetalParams::default().repeats;
+        let r = &AfterechoParams::default().repeats;
         assert_eq!(r.value(), REPEATS_DEFAULT);
         assert_eq!(r.normalized_value_to_string(1.0, false), "∞");
         assert_eq!(r.normalized_value_to_string(r.preview_normalized(4), false), "4");

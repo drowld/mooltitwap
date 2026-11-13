@@ -1,9 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["mooltitwap", "xtask"]
+members = ["afterecho", "xtask"]
 
 [profile.release]
-lto = "thin"
+# The licence crate's hardening (nice-plug docs/licence-crate.md, "Release builds"): the
+# inlined checks blend into their callers. Never panic = "abort": the AUv3 wrapper catches
+# panics, an abort takes the host down.
+lto = "fat"
+codegen-units = 1
 strip = "symbols"
 
 [profile.dev]

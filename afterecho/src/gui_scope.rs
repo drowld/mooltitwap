@@ -20,7 +20,7 @@ use crate::gui::{gain_db_to_pos, pos_to_gain_db, EditorState, VizData};
 use crate::bounce;
 use crate::matrix;
 use crate::motion;
-use crate::params::{ChannelMode, CrossfeedMode, FilterSlope, FilterType, MotionShape, PetalParams, SpacingMode, SyncMode, TapParams, NUM_TAPS, REPEATS_LOOP};
+use crate::params::{ChannelMode, CrossfeedMode, FilterSlope, FilterType, MotionShape, AfterechoParams, SpacingMode, SyncMode, TapParams, NUM_TAPS, REPEATS_LOOP};
 use crate::topology;
 use crate::ui::epo;
 use crate::ui::theme::{self, G, INK, INK2, INSET, PANEL, PAPER, SOFT};
@@ -303,11 +303,12 @@ impl ScopeState {
 /// One editor frame of the scope page: publish the look, zoom, then draw.
 pub fn frame(
     ui: &mut egui::Ui,
-    params: &Arc<PetalParams>,
+    params: &Arc<AfterechoParams>,
     setter: &ParamSetter,
     st: &mut EditorState,
     egui_state: &EguiState,
     tempo: f32,
+    licence: &softsystems_licence::Licence,
 ) {
     let ios = cfg!(target_os = "ios");
     let mut open_presets = false;
@@ -401,8 +402,13 @@ pub fn frame(
     } else {
         vp.min
     };
+    // a preset that loads (the box's ‹ ›, the sheet) is one of the licence's check points
+    let before = st.scope.presets.session.loaded().map(|p| p.id.clone());
     page(ui, o, s, lay, params, setter, st, tempo);
-    options_panel(ui, o, s, lay, params, setter, &mut st.scope, egui_state, zoom);
+    if st.scope.presets.session.loaded().map(|p| &p.id) != before.as_ref() {
+        licence.check_state_load();
+    }
+    options_panel(ui, o, s, lay, params, setter, &mut st.scope, egui_state, zoom, licence);
     ui.ctx().request_repaint();
 }
 
@@ -412,7 +418,7 @@ fn page(
     o: Pos2,
     s: f32,
     l: &Layout,
-    params: &Arc<PetalParams>,
+    params: &Arc<AfterechoParams>,
     setter: &ParamSetter,
     st: &mut EditorState,
     tempo: f32,
@@ -654,7 +660,7 @@ fn paint_diamond(p: &egui::Painter, c: Pos2, rad: f32, stroke: Stroke) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn header(
-    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     st: &mut EditorState,
 ) {
     let (y, h) = (g::HEAD_Y, g::HEAD_H);
@@ -981,7 +987,7 @@ struct Labels {
 }
 
 impl Labels {
-    fn of(params: &PetalParams) -> Labels {
+    fn of(params: &AfterechoParams) -> Labels {
         Labels { ch: params.channel_mode.value(), det_range: params.detune_range.value() as f32 }
     }
 }
@@ -1018,7 +1024,7 @@ fn secs_text(t: f32) -> String {
 
 /// Taps that are live; the rest are hidden, as in v3. Euclid places one per
 /// step at most; any more are silent and hidden too.
-fn n_active(params: &PetalParams) -> usize {
+fn n_active(params: &AfterechoParams) -> usize {
     params.taps_heard()
 }
 
@@ -1197,7 +1203,7 @@ fn axis_grid(p: &egui::Painter, plot: Rect, axis: Axis, lb: Labels, s: f32) {
 
 #[allow(clippy::too_many_arguments)]
 fn picture(
-    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     sc: &mut ScopeState, tempo: f32,
 ) {
     let (x, y, w, h) = l.picture;
@@ -1288,7 +1294,7 @@ fn picture(
 /// it and open the Tap tab. Double-click resets what the view moves.
 #[allow(clippy::too_many_arguments)]
 fn field(
-    ui: &mut egui::Ui, plot: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, plot: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     sc: &mut ScopeState, viz: &VizData, axis: Axis, tempo: f32,
 ) {
     let p = ui.painter().clone();
@@ -1486,7 +1492,7 @@ fn field(
 /// miss a narrow column. The number under a bar mutes or unmutes it.
 #[allow(clippy::too_many_arguments)]
 fn bars(
-    ui: &mut egui::Ui, plot: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, plot: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     sc: &mut ScopeState, axis: Axis,
 ) {
     let p = ui.painter().clone();
@@ -1608,7 +1614,7 @@ fn bars(
 
 #[allow(clippy::too_many_arguments)]
 fn lane(
-    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     sc: &mut ScopeState, tempo: f32,
 ) {
     let (x, y, w, h) = l.lane;
@@ -1783,7 +1789,7 @@ fn stepper_cell(
 /// down the grid's side), the picked one's controls on the left, the matrix
 /// on the right. The picture shows the taps moving.
 fn motion_panel(
-    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState,
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState,
 ) {
     let (x, y, w, h) = l.lane;
     if std::mem::take(&mut sc.mx_demo) {
@@ -1862,7 +1868,7 @@ fn shape_item(shape: softsystems_mod::Shape) -> SegPaint {
 /// synced), Free / Sync and Scatter.
 #[allow(clippy::too_many_arguments)]
 fn lfo_editor(
-    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, k: usize,
+    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, k: usize,
     focus: &mut Option<String>,
 ) {
     let lfo = params.lfos()[k];
@@ -1933,7 +1939,7 @@ fn bool_seg_cell(
 /// Length, Scatter and Glide. `j`: Step 1 or 2 (0, 1).
 #[allow(clippy::too_many_arguments)]
 fn step_editor(
-    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, j: usize,
+    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, j: usize,
     focus: &mut Option<String>,
 ) {
     let st = params.steps()[j];
@@ -1990,7 +1996,7 @@ fn step_editor(
 /// newly picked source.
 #[allow(clippy::too_many_arguments)]
 fn mx_grid(
-    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, picked: usize,
+    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, picked: usize,
     focus: &mut Option<String>,
 ) -> Option<usize> {
     let p = ui.painter().clone();
@@ -2066,7 +2072,7 @@ fn mono_text(p: &egui::Painter, at: Pos2, t: &str, s: f32, col: Color32) {
 }
 
 /// Preview only: a few routes and steps, so the grid has something to show.
-fn mx_demo(params: &PetalParams, setter: &ParamSetter) {
+fn mx_demo(params: &AfterechoParams, setter: &ParamSetter) {
     let set = |prm: &FloatParam, v: f32| {
         setter.begin_set_parameter(prm);
         setter.set_parameter(prm, v);
@@ -2088,7 +2094,7 @@ fn mx_demo(params: &PetalParams, setter: &ParamSetter) {
 /// Where Motion has tap `i` right now on `axis` (v2.42): its set value `v`
 /// moved by what the audio thread last reported for that target (0, so `v`
 /// itself, while nothing routes there). Type and Slope don't move.
-fn moved_value(params: &PetalParams, axis: Axis, i: usize, v: f32) -> f32 {
+fn moved_value(params: &AfterechoParams, axis: Axis, i: usize, v: f32) -> f32 {
     let m = |t: usize| f32::from_bits(params.motion_now[t][i].load(std::sync::atomic::Ordering::Relaxed));
     match axis {
         Axis::Pan => motion::pan(v, m(0), 1.0),
@@ -2103,7 +2109,7 @@ fn moved_value(params: &PetalParams, axis: Axis, i: usize, v: f32) -> f32 {
 /// panel). The cells use the nested param ids, so the focus card follows them.
 #[allow(clippy::too_many_arguments)]
 fn tap_panel(
-    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     focus: &mut Option<String>, viz: &VizData, i: usize,
 ) {
     let tap = &params.taps[i];
@@ -2169,7 +2175,7 @@ fn echo_readout(viz: &VizData) -> String {
 /// edge ↔: the cycle (switches it to Manual).
 #[allow(clippy::too_many_arguments)]
 fn echo(
-    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     focus: &mut Option<String>, viz: &VizData, tempo: f32,
 ) {
     let p = ui.painter().clone();
@@ -2338,7 +2344,7 @@ fn echo(
         let cv = if cd.delta != Vec2::ZERO {
             cd.pos.map(|q| {
                 let cycle = ((q.x - plot.left()) / plot.width() * range - t0 + margin).max(topology::MIN_FB_SECS);
-                PetalParams::feedback_time_norm_for_secs(params.sync_mode.value(), cycle, tempo)
+                AfterechoParams::feedback_time_norm_for_secs(params.sync_mode.value(), cycle, tempo)
             })
         } else {
             None
@@ -2385,7 +2391,7 @@ fn echo(
 /// Time, sync, transition mode, link, tap count, spacing and the Shape pad.
 #[allow(clippy::too_many_arguments)]
 fn time_card(
-    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter,
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     focus: &mut Option<String>, tempo: f32,
 ) {
     let rect = r(o, s, l.right_x, l.time.0, l.right_w, l.time.1);
@@ -2412,7 +2418,7 @@ fn time_card(
     enum_cell(ui, t(1, 0, 3), s, setter, &params.delay_mode, "delay_mode", "Mode", &["Repitch", "Fade", "Jump"], true, focus);
     if !linked {
         let nr = params.base_time_r.unmodulated_normalized_value();
-        let r_txt = PetalParams::format_base_time_mode(params.sync_mode_r_eff(), nr, tempo);
+        let r_txt = AfterechoParams::format_base_time_mode(params.sync_mode_r_eff(), nr, tempo);
         knob_cell(ui, t(2, 0, 1), s, setter, &params.base_time_r, "base_time_r", "Time R", false, true, Some(r_txt), focus);
         enum_cell(ui, t(2, 1, 1), s, setter, &params.sync_mode_r, "sync_r", "Sync R", &["Free", "Sync"], true, focus);
     }
@@ -2450,7 +2456,7 @@ fn time_card(
 /// colours (one that lands on the dry note's step sounds at the pattern's
 /// end, the same spot). Drag round it to turn the pattern; Steps and Rotate
 /// under it.
-fn euclid_ring(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, focus: &mut Option<String>) {
+fn euclid_ring(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, focus: &mut Option<String>) {
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
     let p = ui.painter().clone();
     let n = params.euclid_steps.value() as usize;
@@ -2526,7 +2532,7 @@ fn euclid_ring(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>,
 
 /// The Shape pad: X bends where the taps bunch up, Y how hard (shape_x −1…1,
 /// shape_y 0…1 with 1 at the top, as in v3). Ticks show the real tap positions.
-fn shape_pad(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, focus: &mut Option<String>) {
+fn shape_pad(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, focus: &mut Option<String>) {
     let p = ui.painter().clone();
     text(&p, Pos2::new(area.center().x, area.top() + g::LBL_H * 0.5 * s), Align2::CENTER_CENTER, "Shape", 11.0, s, INK2());
     let side = (area.height() - 2.0 * (g::LBL_H + 2.0) * s).min(area.width());
@@ -2582,7 +2588,7 @@ fn shape_pad(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<PetalParams>, s
 }
 
 /// Diffuse · Tape · Saturate on one card; a dot marks the blocks that are on.
-fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState) {
+fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState) {
     let rect = r(o, s, l.right_x, l.colour.0, l.right_w, l.colour.1);
     let inner = card(ui, rect, "Colour", s);
     let tabs = Rect::from_min_size(Pos2::new(rect.right() - 254.0 * s, rect.top() + 7.0 * s), Vec2::new(240.0, 26.0) * s);
@@ -2624,7 +2630,7 @@ fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Peta
     }
 }
 
-fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, focus: &mut Option<String>) {
+fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, focus: &mut Option<String>) {
     let rect = r(o, s, l.right_x, l.output.0, l.right_w, l.output.1);
     let inner = card(ui, rect, "Output", s);
     // Levels on the left; ducking after a rule, in the columns Colour's
@@ -2660,7 +2666,7 @@ fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Peta
 
 /// Write the current shape across the live taps on axis `ai`, between its
 /// range's pins. One gesture per tap.
-fn pattern_apply(params: &PetalParams, setter: &ParamSetter, sc: &ScopeState, ai: usize) {
+fn pattern_apply(params: &AfterechoParams, setter: &ParamSetter, sc: &ScopeState, ai: usize) {
     let Some(shape) = sc.pat_shape else { return };
     let axis = Axis::ALL[ai];
     let range = sc.pat_range[ai].unwrap_or_else(|| axis.default_range());
@@ -2671,7 +2677,7 @@ fn pattern_apply(params: &PetalParams, setter: &ParamSetter, sc: &ScopeState, ai
 }
 
 /// Keep every tap's value on axis `ai` so Undo can put it back (the last 32).
-fn pattern_keep(params: &PetalParams, sc: &mut ScopeState, ai: usize) {
+fn pattern_keep(params: &AfterechoParams, sc: &mut ScopeState, ai: usize) {
     let axis = Axis::ALL[ai];
     let undo = &mut sc.pat_undo[ai];
     undo.push(core::array::from_fn(|i| axis.get(&params.taps[i])));
@@ -2684,7 +2690,7 @@ fn pattern_keep(params: &PetalParams, sc: &mut ScopeState, ai: usize) {
 /// Random), Range (two pins; the shape re-spreads as they move), Reset and
 /// Undo, all on the picked axis. Alternate clicked again flips, Random
 /// re-rolls. A click outside closes it.
-fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState) {
+fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState) {
     let Some(btn) = sc.pat_btn.filter(|_| sc.pat_open) else { return };
     let ch = params.channel_mode.value();
     let ai = if ch == ChannelMode::Mono && sc.y_axis == 0 { 1 } else { sc.y_axis };
@@ -2797,8 +2803,8 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<PetalParams>, setter: &Para
 /// then Afterecho's own rows: Accent, the Detune quality, the preset folder.
 #[allow(clippy::too_many_arguments)]
 fn options_panel(
-    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, sc: &mut ScopeState,
-    egui_state: &EguiState, zoom: f32,
+    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState,
+    egui_state: &EguiState, zoom: f32, licence: &softsystems_licence::Licence,
 ) {
     let ios = cfg!(target_os = "ios");
     let at = o + Vec2::new(l.pad, g::HEAD_Y + g::HEAD_H + 8.0) * s;
@@ -2806,7 +2812,9 @@ fn options_panel(
     let mut accent_changed = false;
     let mut reveal = false;
     let ScopeState { look, accent, options, .. } = sc;
-    let env = Env { product: &PRODUCT, look, zoom: (!ios).then_some(Zoom { now: zoom, steps: &ZOOMS }), licence: None };
+    // the licence as it is now, only while the panel is open (iOS: none needed, hidden)
+    let lic = options.is_open().then(|| softsystems_ui::options::LicenceView::of(licence));
+    let env = Env { product: &PRODUCT, look, zoom: (!ios).then_some(Zoom { now: zoom, steps: &ZOOMS }), licence: lic };
     let out = options.show(ui, at, burger, env, |rows| {
         let colors: Vec<Color32> = ACCENTS.iter().map(|a| a.get(softsystems_ui::t().dark)).collect();
         accent_changed = rows.accent("Accent", &colors, &mut accent.on, &mut accent.custom);
@@ -2824,6 +2832,9 @@ fn options_panel(
             reveal = rows.button("Folder", "Open preset folder");
         }
     });
+    if let Some(act) = out.licence {
+        act.apply(licence);
+    }
     if out.look_changed {
         sc.save_look();
     }

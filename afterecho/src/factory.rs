@@ -6,7 +6,7 @@
 //! page shows: taps, ms, %, enum index), and stored the way `presets::capture`
 //! stores a sound.
 
-use crate::params::PetalParams;
+use crate::params::AfterechoParams;
 use crate::presets::{sound, Kind, Preset, Store};
 use nice_plug::prelude::*;
 
@@ -233,7 +233,7 @@ pub fn factory_presets() -> Vec<Preset> {
 }
 
 fn build(r: &Recipe) -> Preset {
-    let p = PetalParams::default();
+    let p = AfterechoParams::default();
     let map = p.param_map();
     // the set was made on the feedback loop (Repeats ∞), before counts (v2.42)
     let base = [("repeats", crate::params::REPEATS_LOOP as f32)];
@@ -260,7 +260,7 @@ mod tests {
     /// Every recipe names real params and a unique name.
     #[test]
     fn recipes_are_sound() {
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let ids: Vec<String> = p.param_map().into_iter().map(|(id, _, _)| id).collect();
         let mut names = std::collections::HashSet::new();
         for r in RECIPES {
@@ -280,7 +280,7 @@ mod tests {
         let all = factory_presets();
         let get = |n: &str| all.iter().find(|p| p.name == n).unwrap_or_else(|| panic!("{n} missing"));
         let read = |n: &str| {
-            let q = PetalParams::default();
+            let q = AfterechoParams::default();
             let p = get(n);
             crate::presets::load_into(&q, &p.values);
             q
@@ -312,7 +312,7 @@ mod tests {
         // the times the descriptions name
         let time = |n: &str| {
             let q = read(n);
-            PetalParams::format_base_time_mode(q.sync_mode.value(), q.base_time_l.value(), 120.0)
+            AfterechoParams::format_base_time_mode(q.sync_mode.value(), q.base_time_l.value(), 120.0)
         };
         for (n, t) in [
             ("Dub Station", "1/4."), ("Dotted Eighth", "1/8."), ("Quarter Repeats", "1/4"), ("Tresillo", "1/16"),
@@ -341,7 +341,7 @@ mod tests {
         assert!((drift.taps[5].filter_q.value() - 2.0).abs() < 0.01);
         // every one is its own sound, and none is Init
         let same = crate::presets::tests::same_sound;
-        let init = Preset::new::<Store>("Init", sound(&PetalParams::default()), Kind::User);
+        let init = Preset::new::<Store>("Init", sound(&AfterechoParams::default()), Kind::User);
         for (i, a) in all.iter().enumerate() {
             assert!(!same(a, &init), "{} is Init", a.name);
             for b in &all[i + 1..] {

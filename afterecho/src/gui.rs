@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::params::{PetalParams, SyncMode, NUM_TAPS};
+use crate::params::{AfterechoParams, SyncMode, NUM_TAPS};
 use crate::topology::{self, compute_positions};
 use crate::MAX_DELAY_SECONDS;
 
@@ -34,7 +34,7 @@ pub struct EditorState {
 
 /// A/B compare: save the live params into the current slot, then load the
 /// target (its snapshot, or a copy of what's live on first use).
-pub(crate) fn ab_switch(st: &mut EditorState, params: &Arc<PetalParams>, setter: &ParamSetter, target: u8) {
+pub(crate) fn ab_switch(st: &mut EditorState, params: &Arc<AfterechoParams>, setter: &ParamSetter, target: u8) {
     if st.ab_active == target { return; }
     st.ab_slots[st.ab_active as usize] = Some(crate::presets::capture(params));
     if let Some(snap) = st.ab_slots[target as usize].clone() {
@@ -57,22 +57,28 @@ pub(crate) fn pos_to_gain_db(pos: f32) -> f32 {
 }
 
 pub fn create_editor(
-    params: Arc<PetalParams>,
+    params: Arc<AfterechoParams>,
     egui_state: Arc<EguiState>,
     tempo_bpm_shared: Arc<AtomicU32>,
+    licence: softsystems_licence::Licence,
 ) -> Option<Box<dyn Editor>> {
     let egui_state_size = egui_state.clone();
     create_egui_editor(
         egui_state,
         EditorState::default(),
         Default::default(),
-        |ctx, _queue, _st| {
-            crate::ui::theme::set_touch(cfg!(target_os = "ios"));
-            crate::ui::theme::install_fonts(ctx);
+        {
+            let licence = licence.clone();
+            move |ctx, _queue, _st| {
+                // each time the window opens
+                licence.check_editor_open();
+                crate::ui::theme::set_touch(cfg!(target_os = "ios"));
+                crate::ui::theme::install_fonts(ctx);
+            }
         },
         move |ui, setter, _queue, st| {
             let tempo = read_tempo(&tempo_bpm_shared);
-            crate::gui_scope::frame(ui, &params, setter, st, &egui_state_size, tempo);
+            crate::gui_scope::frame(ui, &params, setter, st, &egui_state_size, tempo, &licence);
         },
     )
 }
@@ -138,7 +144,7 @@ fn pick_nice_range(needed_secs: f32, sync_mode: SyncMode, tempo_bpm: f32) -> f32
 /// `shown_cap` = how many echo cycles the x-range reserves room for. The v3
 /// GRID/STEMS editing views pass 1 (only the first repeat is ghosted there —
 /// reserving 4 squeezed the editable taps into the left edge).
-pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_cap: usize) -> VizData {
+pub(crate) fn compute_viz_data_ex(params: &AfterechoParams, tempo_bpm: f32, shown_cap: usize) -> VizData {
     let n_active = params.taps_heard();
     let pos_l = compute_positions(params.spacing(false), n_active);
     let pos_r = compute_positions(params.spacing(true), n_active);
@@ -146,7 +152,7 @@ pub(crate) fn compute_viz_data_ex(params: &PetalParams, tempo_bpm: f32, shown_ca
     let time_l_norm = params.base_time_l.value();
     let time_r_norm = if params.time_linked.value() { time_l_norm } else { params.base_time_r.value() };
     let base_secs_l = params.base_time_seconds(time_l_norm, tempo_bpm);
-    let base_secs_r = PetalParams::base_time_seconds_mode(params.sync_mode_r_eff(), time_r_norm, tempo_bpm);
+    let base_secs_r = AfterechoParams::base_time_seconds_mode(params.sync_mode_r_eff(), time_r_norm, tempo_bpm);
     let span_l = NUM_TAPS as f32 * base_secs_l;
     let span_r = NUM_TAPS as f32 * base_secs_r;
 

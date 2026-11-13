@@ -4,7 +4,7 @@
 
 #[cfg(not(target_os = "ios"))]
 fn main() {
-    nice_plug::prelude::nice_export_standalone::<mooltitwap::Mooltitwap>();
+    nice_plug::prelude::nice_export_standalone::<afterecho::Afterecho>();
 }
 
 #[cfg(target_os = "ios")]

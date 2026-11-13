@@ -18,7 +18,7 @@
 //! when a variant is appended. `values_format` tags the format. The floats in
 //! `PLAIN_FLOATS` are stored by plain value too, because their range grew.
 
-use crate::params::PetalParams;
+use crate::params::AfterechoParams;
 use nice_plug::prelude::*;
 use softsystems_presets::{FacetSpec, Facets, Plugin, Sound, Values};
 use std::collections::BTreeMap;
@@ -26,9 +26,8 @@ use std::path::PathBuf;
 
 pub use softsystems_presets::{Kind, PresetRef as PresetSession, Sent, VALUES_FORMAT_PLAIN};
 
-/// The CLAP id (`lib.rs`; kept from the Mooltitwap days so sessions recall
-/// the plug-in): a file from another plug-in is refused.
-pub const PLUGIN_ID: &str = "com.bussien.mooltitwap";
+/// The CLAP id (`lib.rs`): a preset file from another plug-in is refused.
+pub const PLUGIN_ID: &str = "com.softsystems.afterecho";
 
 /// Floats whose range grew past 0..1 after presets were already saved
 /// (`feedback_time`, v2.30): stored by PLAIN value. Before the change their
@@ -47,7 +46,7 @@ pub type Preset = softsystems_presets::Preset<()>;
 pub type Library = softsystems_presets::Library<Store>;
 
 impl Plugin for Store {
-    type Params = PetalParams;
+    type Params = AfterechoParams;
     type Blobs = ();
     const ID: &'static str = PLUGIN_ID;
     const FOLDER: &'static str = "Afterecho";
@@ -78,20 +77,20 @@ impl Plugin for Store {
         crate::factory::factory_presets()
     }
 
-    fn capture_blobs(_: &PetalParams) {}
+    fn capture_blobs(_: &AfterechoParams) {}
 
-    fn apply_blobs(_: &PetalParams, _: &()) {}
+    fn apply_blobs(_: &AfterechoParams, _: &()) {}
 }
 
 // ---------------------------------------------------------------- capture / apply
 
 /// Snapshot every stored param: discrete by plain value, floats normalized.
-pub fn capture(params: &PetalParams) -> BTreeMap<String, f32> {
+pub fn capture(params: &AfterechoParams) -> BTreeMap<String, f32> {
     softsystems_presets::capture_values::<Store>(params)
 }
 
 /// The whole sound as it is now (Afterecho has no blobs).
-pub fn sound(params: &PetalParams) -> Sound<()> {
+pub fn sound(params: &AfterechoParams) -> Sound<()> {
     Sound { values: capture(params), blobs: () }
 }
 
@@ -101,7 +100,7 @@ pub fn sound(params: &PetalParams) -> Sound<()> {
 /// default instead of keeping whatever was set. Unknown ids are skipped. An
 /// empty map is Init. Only the params that change are sent; `sent` is the
 /// editor's record of what it last sent (CLAP sets land a block later).
-pub fn apply(params: &PetalParams, setter: &ParamSetter, snap: &BTreeMap<String, f32>, fmt: u32, sent: &mut Sent) {
+pub fn apply(params: &AfterechoParams, setter: &ParamSetter, snap: &BTreeMap<String, f32>, fmt: u32, sent: &mut Sent) {
     softsystems_presets::apply_values::<Store>(params, setter, snap, fmt, sent);
 }
 
@@ -120,7 +119,7 @@ unsafe fn to_normalized(id: &str, ptr: ParamPtr, stored: f32) -> f32 {
 /// Set a stand-alone params instance (the browser's "In this preset" probe,
 /// the factory builder's tests) to a stored sound, without gestures: no host
 /// sees it.
-pub(crate) fn load_into(params: &PetalParams, snap: &BTreeMap<String, f32>) {
+pub(crate) fn load_into(params: &AfterechoParams, snap: &BTreeMap<String, f32>) {
     for (id, ptr, _group) in params.param_map() {
         // SAFETY: ptr belongs to params, which no host or audio thread reads.
         unsafe {
@@ -220,7 +219,7 @@ pub(crate) mod tests {
     use std::path::Path;
 
     /// The live params still match `snap` (the crate's check, on the step grid).
-    fn matches(params: &PetalParams, snap: &BTreeMap<String, f32>) -> bool {
+    fn matches(params: &AfterechoParams, snap: &BTreeMap<String, f32>) -> bool {
         softsystems_presets::matches::<Store>(params, snap, VALUES_FORMAT_PLAIN)
     }
 
@@ -302,12 +301,12 @@ pub(crate) mod tests {
 
     #[test]
     fn plugin_id_is_the_clap_id() {
-        assert_eq!(PLUGIN_ID, <crate::Mooltitwap as ClapPlugin>::CLAP_ID);
+        assert_eq!(PLUGIN_ID, <crate::Afterecho as ClapPlugin>::CLAP_ID);
     }
 
     #[test]
     fn saved_cycles_read_back_after_the_range_grew() {
-        let params = PetalParams::default();
+        let params = AfterechoParams::default();
         // Captured by plain value, whatever the range.
         assert_eq!(capture(&params)["feedback_time"], params.feedback_time.value());
         // A preset saved before v2.30 holds 0.4706 (1/4 on a 0..1 range): it
@@ -317,7 +316,7 @@ pub(crate) mod tests {
         for fmt in [0, VALUES_FORMAT_PLAIN] {
             let f = t.join(&format!("c{fmt}.json"));
             std::fs::write(&f, format!(r#"{{"name":"c","values_format":{fmt},"values":{{"feedback_time":{old}}}}}"#)).unwrap();
-            let q = PetalParams::default();
+            let q = AfterechoParams::default();
             load_into(&q, &read(&f).values);
             assert!((q.feedback_time.value() - old).abs() < 1e-5, "format {fmt}: {}", q.feedback_time.value());
         }
@@ -325,7 +324,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_preset_missing_a_param_matches_it_at_its_default() {
-        let params = PetalParams::default();
+        let params = AfterechoParams::default();
         let mut snap = capture(&params);
         assert!(matches(&params, &snap));
         // An older preset that predates these params: their defaults stand in.
@@ -339,7 +338,7 @@ pub(crate) mod tests {
 
     #[test]
     fn freeze_stays_out_of_presets_and_a_b() {
-        let params = PetalParams::default();
+        let params = AfterechoParams::default();
         let snap = capture(&params);
         assert!(!snap.contains_key("freeze"));
         // Holding a loop doesn't mark the preset edited.
@@ -356,7 +355,7 @@ pub(crate) mod tests {
     /// default, not at whatever was set last.
     #[test]
     fn apply_loads_defaults_for_unlisted_params() {
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         setter.set_parameter(&p.feedback, 0.9);
         setter.set_parameter(&p.num_taps_active, 3);
@@ -373,9 +372,9 @@ pub(crate) mod tests {
     /// Q default sits off its step grid and moves onto it when set.
     #[test]
     fn a_load_is_not_an_edit() {
-        let fresh = PetalParams::default();
+        let fresh = AfterechoParams::default();
         assert!(matches(&fresh, &BTreeMap::new()));
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         let mut sent = Sent::default();
         let f = Store::factory();
@@ -393,7 +392,7 @@ pub(crate) mod tests {
     /// what a preset holds.
     #[test]
     fn discrete_plain_survives_enum_append() {
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         setter.set_parameter(&p.spacing_mode, crate::params::SpacingMode::Euclidean);
         let snap = capture(&p);
@@ -405,7 +404,7 @@ pub(crate) mod tests {
 
     #[test]
     fn no_duplicate_param_ids() {
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let ids: Vec<String> = p.param_map().into_iter().map(|(id, _, _)| id).collect();
         let set: std::collections::HashSet<&String> = ids.iter().collect();
         assert_eq!(set.len(), ids.len());
@@ -413,7 +412,7 @@ pub(crate) mod tests {
 
     #[test]
     fn facets_come_from_the_sound() {
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         setter.set_parameter(&p.crossfeed_mode, crate::params::CrossfeedMode::PingPong);
         let ping = Preset::new::<Store>("x", sound(&p), Kind::User);
@@ -431,7 +430,7 @@ pub(crate) mod tests {
     fn save_as_writes_named_preset_to_disk() {
         let t = TempDir::new("saveas");
         let mut lib = open(&t);
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let id = lib.save_as("Vocal Throw 2", sound(&p), Some("ping garden")).unwrap();
         assert_eq!(id, "vocal throw 2");
         let v = raw(&t.join("Vocal Throw 2.json"));
@@ -448,7 +447,7 @@ pub(crate) mod tests {
     fn factory_is_read_only() {
         let t = TempDir::new("factory");
         let mut lib = open(&t);
-        let s = sound(&PetalParams::default());
+        let s = sound(&AfterechoParams::default());
         assert_eq!(lib.save("ping garden", s).unwrap_err().to_string(), softsystems_presets::READ_ONLY);
         assert_eq!(lib.delete("ping garden").unwrap_err().to_string(), softsystems_presets::READ_ONLY);
         assert!(files(&t.0).iter().all(|f| f == "library.json"), "nothing written but the library state");
@@ -458,7 +457,7 @@ pub(crate) mod tests {
 
     #[test]
     fn preset_coverage_audit() {
-        let a = PetalParams::default();
+        let a = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         // move every stored param somewhere off its default
         for (id, ptr, _) in a.param_map() {
@@ -474,7 +473,7 @@ pub(crate) mod tests {
         let snap = capture(&a);
         let n_stored = a.param_map().len() - NOT_STORED.len();
         assert_eq!(snap.len(), n_stored);
-        let b = PetalParams::default();
+        let b = AfterechoParams::default();
         apply(&b, &setter, &snap, VALUES_FORMAT_PLAIN, &mut Sent::default());
         assert!(matches(&b, &snap));
         assert_eq!(capture(&b), snap);

@@ -1,10 +1,17 @@
-# nice-plug iOS/AUv3 bundler config. The `[<package>]` section feeds
-# `cargo nice-plug bundle-ios <package>`. AU codes MUST match the plugin's
-# `impl AuPlugin` consts in src/lib.rs.
-[mooltitwap]
+# nice-plug bundler config. The `[<package>]` section feeds
+# `cargo nice-plug bundle afterecho` and `bundle-ios afterecho`.
+# AUv3 identity MUST match the `AuPlugin` consts in afterecho/src/lib.rs —
+# hosts key saved sessions on (type, subtype, manufacturer); never change them
+# after the first release. Manufacturer "SfSy" is every Soft Systems plug-in's.
+[afterecho]
 name = "Afterecho"
+ios_name = "Afterecho"
 au_type = "aufx"            # audio effect
 au_subtype = "Aftr"         # matches AU_SUBTYPE
-au_manufacturer = "Busn"    # matches AU_MANUFACTURER
-ios_bundle_id = "com.tlkm.afterecho"   # matches the vendor prefix on team 6ABFQC732N (cumulus/flanger)
-vendor_name = "Bussien"
+au_manufacturer = "SfSy"    # matches AU_MANUFACTURER
+ios_bundle_id = "com.softsystems.afterecho"
+# Desktop: Afterecho.vst3 → com.softsystems.afterecho.vst3, .clap likewise.
+bundle_id = "com.softsystems.afterecho"
+vendor_name = "Soft Systems"
+vendor_url = "https://softsystems.app"
+description = "A delay of up to 16 taps, drawn and moved on one page."

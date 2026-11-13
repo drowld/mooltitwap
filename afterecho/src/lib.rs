@@ -24,7 +24,7 @@ use crate::diffusion::Diffusion;
 use crate::filter::{soft_clip, svf_tick, DcBlock, LoopTone, PeakLimiter, Svf, ToneCoefs};
 use crate::matrix::{SOURCES, TAP_TARGETS};
 use crate::params::{
-    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, PetalParams, TapeType, NUM_TAPS, REPEATS_LOOP,
+    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, AfterechoParams, TapeType, NUM_TAPS, REPEATS_LOOP,
 };
 use crate::tape::{TapeDegrade, TapeDegradeParams, TapeKind};
 use crate::topology::TopologyEngine;
@@ -136,8 +136,14 @@ impl LoopColour {
 const MAX_DELAY_SECONDS: f32 = 32.0;
 
 /// Simple autocorrelation pitch tracker. Maintains a ring buffer of recent
-pub struct Mooltitwap {
-    params: Arc<PetalParams>,
+pub struct Afterecho {
+    params: Arc<AfterechoParams>,
+    /// The licence (one per process, shared by every Afterecho) and this
+    /// instance's demo gate: no silences for 3 minutes, then ~2 s every 45 s
+    /// while unlicensed. The gate is the audio thread's only view of it. iOS:
+    /// not required, the gate does nothing.
+    licence: softsystems_licence::Licence,
+    gate: softsystems_licence::DemoGate,
     /// Tempo shared with the GUI thread (f32 bitcast into u32).
     /// Updated from `ctx.transport().tempo` every process block.
     tempo_bpm_shared: Arc<AtomicU32>,
@@ -356,11 +362,21 @@ pub struct Mooltitwap {
     lim_r: PeakLimiter,
 }
 
-impl Default for Mooltitwap {
+impl Default for Afterecho {
     fn default() -> Self {
         let dummy_max = 192_000;
+        // reads and checks the licence file; never waits on the network
+        // The beta's last day (UTC), the day the website stops activations. PLACEHOLDER
+        // until the owner sets Afterecho's date: set it before any build reaches a tester.
+        #[cfg(feature = "beta")]
+        let licence = softsystems_licence::licence!("afterecho", beta_ends = "2026-12-31");
+        #[cfg(not(feature = "beta"))]
+        let licence = softsystems_licence::licence!("afterecho");
+        let gate = licence.demo_gate();
         Self {
-            params: Arc::new(PetalParams::default()),
+            params: Arc::new(AfterechoParams::default()),
+            licence,
+            gate,
             tempo_bpm_shared: Arc::new(AtomicU32::new(120.0_f32.to_bits())),
             sample_rate: 48_000.0,
             topology_l: TopologyEngine::new(),
@@ -452,7 +468,7 @@ impl Default for Mooltitwap {
     }
 }
 
-impl Mooltitwap {
+impl Afterecho {
     /// Allocate everything for `sample_rate` (initialize's work; tests call it
     /// directly).
     fn prepare(&mut self, sample_rate: f32) {
@@ -556,15 +572,13 @@ impl TapLines<'_> {
     }
 }
 
-impl Plugin for Mooltitwap {
-    // Display name (DAW plugin browser). Renamed to Afterecho (2026-07-11) —
-    // "Mooltitwap"/"multitap" branding is retired. The struct/crate/folder are
-    // still `mooltitwap` internally (a bigger rename, deferred); VST3_CLASS_ID
-    // and CLAP_ID are UNCHANGED so existing sessions still recall the plugin.
+impl Plugin for Afterecho {
+    // The ids are Soft Systems' (v2.55, SOF-92): sessions saved with the old
+    // `com.bussien.mooltitwap` ids no longer recall it (no one uses it yet).
     const NAME: &'static str = "Afterecho";
-    const VENDOR: &'static str = "Emmanuel Bussien";
-    const URL: &'static str = "https://example.com";
-    const EMAIL: &'static str = "noreply@example.com";
+    const VENDOR: &'static str = "Soft Systems";
+    const URL: &'static str = "https://softsystems.app";
+    const EMAIL: &'static str = "hello@softsystems.app";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
     const AUDIO_IO_LAYOUTS: &'static [AudioIOLayout] = &[AudioIOLayout {
@@ -587,6 +601,7 @@ impl Plugin for Mooltitwap {
             self.params.clone(),
             self.params.editor_state.clone(),
             self.tempo_bpm_shared.clone(),
+            self.licence.clone(),
         )
     }
 
@@ -597,6 +612,9 @@ impl Plugin for Mooltitwap {
         _ctx: &mut impl InitContext<Self>,
     ) -> bool {
         self.prepare(buffer_config.sample_rate);
+        self.gate.set_sample_rate(buffer_config.sample_rate);
+        // the host restores the state before this
+        self.licence.check_state_load();
         true
     }
 
@@ -674,7 +692,7 @@ impl Plugin for Mooltitwap {
         let time_l_norm = p.base_time_l.value();
         let time_r_norm = if p.time_linked.value() { time_l_norm } else { p.base_time_r.value() };
         let base_sec_l = p.base_time_seconds(time_l_norm, tempo_bpm);
-        let base_sec_r = PetalParams::base_time_seconds_mode(p.sync_mode_r_eff(), time_r_norm, tempo_bpm);
+        let base_sec_r = AfterechoParams::base_time_seconds_mode(p.sync_mode_r_eff(), time_r_norm, tempo_bpm);
 
         // the taps heard (Euclid places one per step at most)
         let n_active = p.taps_heard();
@@ -1879,13 +1897,15 @@ impl Plugin for Mooltitwap {
                 now.store(m.to_bits(), Ordering::Relaxed);
             }
         }
+        // the demo's silences, last, on the output (nothing while licensed)
+        self.gate.process(buffer.as_slice());
 
         ProcessStatus::Normal
     }
 }
 
-impl ClapPlugin for Mooltitwap {
-    const CLAP_ID: &'static str = "com.bussien.mooltitwap";
+impl ClapPlugin for Afterecho {
+    const CLAP_ID: &'static str = "com.softsystems.afterecho";
     const CLAP_DESCRIPTION: Option<&'static str> = Some("Afterecho — delay garden");
     const CLAP_MANUAL_URL: Option<&'static str> = None;
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
@@ -1893,8 +1913,8 @@ impl ClapPlugin for Mooltitwap {
         &[ClapFeature::AudioEffect, ClapFeature::Stereo, ClapFeature::Delay];
 }
 
-impl Vst3Plugin for Mooltitwap {
-    const VST3_CLASS_ID: [u8; 16] = *b"MooltitwapMultiD";
+impl Vst3Plugin for Afterecho {
+    const VST3_CLASS_ID: [u8; 16] = *b"SoftSystemsAftr1";
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Fx, Vst3SubCategory::Delay, Vst3SubCategory::Stereo];
 }
@@ -1903,18 +1923,18 @@ impl Vst3Plugin for Mooltitwap {
 // feature — see Cargo.toml's target-cfg deps). Gating on target_os keeps the
 // desktop clap/vst3/standalone build, which has no `auv3`, compiling.
 #[cfg(target_os = "ios")]
-impl AuPlugin for Mooltitwap {
+impl AuPlugin for Afterecho {
     // Hosts key saved sessions on (type, subtype, manufacturer). Pick once,
     // never change. AU_TYPE auto-derives to `aufx` (audio effect).
     // MUST match bundler.toml's au_subtype / au_manufacturer.
     const AU_SUBTYPE: [u8; 4] = *b"Aftr"; // Afterecho
-    const AU_MANUFACTURER: [u8; 4] = *b"Busn"; // Bussien (not all-lowercase — Apple reserves those)
+    const AU_MANUFACTURER: [u8; 4] = *b"SfSy"; // every Soft Systems plug-in (not all-lowercase: Apple reserves those)
 }
 
-nice_export_clap!(Mooltitwap);
-nice_export_vst3!(Mooltitwap);
+nice_export_clap!(Afterecho);
+nice_export_vst3!(Afterecho);
 #[cfg(target_os = "ios")]
-nice_export_auv3!(Mooltitwap);
+nice_export_auv3!(Afterecho);
 
 #[cfg(test)]
 mod tests {
@@ -1926,18 +1946,18 @@ mod tests {
     /// A host that only tells the time.
     struct Host(Transport);
 
-    impl ProcessContext<Mooltitwap> for Host {
+    impl ProcessContext<Afterecho> for Host {
         fn plugin_api(&self) -> PluginApi { PluginApi::Clap }
         fn execute_background(&self, _task: ()) {}
         fn execute_gui(&self, _task: ()) {}
         fn transport(&self) -> &Transport { &self.0 }
-        fn next_event(&mut self) -> Option<PluginNoteEvent<Mooltitwap>> { None }
-        fn send_event(&mut self, _event: PluginNoteEvent<Mooltitwap>) {}
+        fn next_event(&mut self) -> Option<PluginNoteEvent<Afterecho>> { None }
+        fn send_event(&mut self, _event: PluginNoteEvent<Afterecho>) {}
         fn set_latency_samples(&self, _samples: u32) {}
         fn set_current_voice_capacity(&self, _capacity: u32) {}
     }
 
-    fn set(plug: &Mooltitwap, id: &str, plain: f32) {
+    fn set(plug: &Afterecho, id: &str, plain: f32) {
         let (_, ptr, _) = plug.params.param_map().into_iter().find(|(i, _, _)| i == id)
             .unwrap_or_else(|| panic!("no param {id}"));
         // SAFETY: ptr belongs to plug's params, which outlive the call.
@@ -1945,8 +1965,11 @@ mod tests {
     }
 
     /// Wet only, one tap per pan, 20 ms apart; the cycle follows the cluster.
-    fn plugin(pans: &[f32]) -> Mooltitwap {
-        let mut plug = Mooltitwap::default();
+    fn plugin(pans: &[f32]) -> Afterecho {
+        let mut plug = Afterecho::default();
+        // a beta's demo is silent from the first block on a machine without a beta
+        // licence: the tests run the gate that never silences (the crate's `dev`)
+        plug.gate = softsystems_licence::DemoGate::off();
         plug.prepare(SR);
         plug.reset();
         set(&plug, "dry_wet", 1.0);
@@ -1964,7 +1987,7 @@ mod tests {
 
     /// Run `input` through in 256-sample blocks; `at` runs before each block
     /// with its first sample's index.
-    fn render(plug: &mut Mooltitwap, input: &[(f32, f32)], mut at: impl FnMut(usize, &Mooltitwap)) -> Vec<(f32, f32)> {
+    fn render(plug: &mut Afterecho, input: &[(f32, f32)], mut at: impl FnMut(usize, &Afterecho)) -> Vec<(f32, f32)> {
         let mut host = Host(Transport::new(SR));
         let mut out = Vec::with_capacity(input.len());
         for (b, chunk) in input.chunks(256).enumerate() {
@@ -2251,7 +2274,7 @@ mod tests {
     }
 
     /// Freeze from `secs` on, switched at a block's start as a host would.
-    fn freeze_from(secs: f32) -> impl FnMut(usize, &Mooltitwap) {
+    fn freeze_from(secs: f32) -> impl FnMut(usize, &Afterecho) {
         move |s, plug| set(plug, "freeze", if s as f32 >= secs * SR { 1.0 } else { 0.0 })
     }
 
@@ -2491,7 +2514,7 @@ mod tests {
         // from clicking.
         let input = held_tone();
         let n = input.len();
-        let pattern = |plug: &Mooltitwap, flip: bool| {
+        let pattern = |plug: &Afterecho, flip: bool| {
             for i in 0..8 {
                 let odd = (i % 2 == 1) != flip;
                 let k = i + 1;
@@ -3042,7 +3065,7 @@ mod tests {
 
     #[test]
     fn in_and_out_sit_at_0_db_on_the_knob_top() {
-        let plug = Mooltitwap::default();
+        let plug = Afterecho::default();
         for g in [&plug.params.input_gain, &plug.params.output_gain] {
             for (db, n) in [(-24.0, 0.0), (-12.0, 0.25), (0.0, 0.5), (6.0, 0.75), (12.0, 1.0)] {
                 assert!((g.preview_normalized(db) - n).abs() < 1e-5, "{db} dB at {}", g.preview_normalized(db));

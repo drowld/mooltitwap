@@ -47,7 +47,7 @@ impl PresetUi {
     }
 
     /// This frame's edited state, computed once a frame.
-    pub(super) fn update(&mut self, params: &PetalParams, frame: u64) -> bool {
+    pub(super) fn update(&mut self, params: &AfterechoParams, frame: u64) -> bool {
         if self.edited_frame != Some(frame) {
             self.edited = self.session.edited(params);
             self.edited_frame = Some(frame);
@@ -58,7 +58,7 @@ impl PresetUi {
     /// Keep the host-session field and this state in step: a value the host
     /// restored under us (a project opened, an undo) is adopted; ours is
     /// written when it changes. GUI thread; the audio thread never reads it.
-    pub(super) fn sync_session(&mut self, params: &PetalParams, frame: u64) {
+    pub(super) fn sync_session(&mut self, params: &AfterechoParams, frame: u64) {
         let host = params.preset_session.lock().map(|g| g.clone()).unwrap_or_default();
         if self.field.as_ref() != Some(&host) {
             // this editor's first frame adopts only a named preset: an empty
@@ -83,7 +83,7 @@ impl PresetUi {
     }
 
     /// ‹ › in the header: the previous / next preset of the browser's list.
-    pub(super) fn step(&mut self, params: &PetalParams, setter: &ParamSetter, d: i32) {
+    pub(super) fn step(&mut self, params: &AfterechoParams, setter: &ParamSetter, d: i32) {
         self.ensure();
         let Some(lib) = self.lib.as_mut() else { return };
         self.sheet.step(&mut Ctx { lib, session: &mut self.session, params, setter }, d);
@@ -106,7 +106,7 @@ impl PresetUi {
 /// it shows (the sound's shape and time; its colour, motion and output).
 fn summary(p: &crate::presets::Preset) -> Vec<SummaryLine> {
     thread_local! {
-        static PROBE: PetalParams = PetalParams::default();
+        static PROBE: AfterechoParams = AfterechoParams::default();
     }
     let lines = PROBE.with(|q| {
         crate::presets::load_into(q, &p.values);
@@ -116,7 +116,7 @@ fn summary(p: &crate::presets::Preset) -> Vec<SummaryLine> {
     vec![line(&lines[..3]), line(&lines[3..])]
 }
 
-fn summary_lines(q: &PetalParams) -> Vec<String> {
+fn summary_lines(q: &AfterechoParams) -> Vec<String> {
     let taps = q.num_taps_active.value();
     let spacing = match q.spacing_mode.value() {
         SpacingMode::Linear => "Lin".to_string(),
@@ -131,7 +131,7 @@ fn summary_lines(q: &PetalParams) -> Vec<String> {
     let swing = q.swing.value();
     let swing = if swing > 0.5005 { format!(" · swing {:.0} %", swing * 100.0) } else { String::new() };
     let sync = q.sync_mode.value();
-    let time = PetalParams::format_base_time_mode(sync, q.base_time_l.value(), 120.0);
+    let time = AfterechoParams::format_base_time_mode(sync, q.base_time_l.value(), 120.0);
     let split = if q.time_linked.value() { "" } else { " · L/R split" };
     let mode = match q.delay_mode.value() {
         DelayMode::Repitch => "Repitch",
@@ -188,7 +188,7 @@ fn summary_lines(q: &PetalParams) -> Vec<String> {
 
 /// The header's preset box, centred: ‹ name › with its state under the name.
 /// The name opens the sheet; ‹ › load the previous / next preset.
-pub(super) fn preset_box(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState) {
+pub(super) fn preset_box(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, st: &mut EditorState) {
     let pb = r(o, s, (l.w - l.preset_w) * 0.5, g::HEAD_Y, l.preset_w, g::HEAD_H);
     let pu = &mut st.scope.presets;
     pu.sync_session(params, ui.ctx().cumulative_frame_nr());
@@ -204,7 +204,7 @@ pub(super) fn preset_box(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params:
 
 /// The sheet over every card under the header (SOF-243: the exact box round
 /// the cards).
-pub(super) fn sheet(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<PetalParams>, setter: &ParamSetter, st: &mut EditorState) {
+pub(super) fn sheet(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, st: &mut EditorState) {
     let pu = &mut st.scope.presets;
     pu.ensure();
     let Some(lib) = pu.lib.as_mut() else { return };
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn the_session_names_the_preset() {
         let t = TempDir::new("ui-session");
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         let mut pu = ui_in(&t);
         pu.ensure();
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn step_walks_the_presets() {
         let t = TempDir::new("ui-step");
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         let mut pu = ui_in(&t);
         pu.step(&p, &setter, 1);
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn closing_while_trying_keeps_it() {
         let t = TempDir::new("ui-close");
-        let p = PetalParams::default();
+        let p = AfterechoParams::default();
         let setter = ParamSetter::new(&TestGui);
         let mut pu = ui_in(&t);
         pu.track(true);
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn the_summary_reads_the_preset() {
-        let q = PetalParams::default();
+        let q = AfterechoParams::default();
         let pg = crate::factory::factory_presets().into_iter().find(|p| p.name == "Ping Garden").unwrap();
         crate::presets::load_into(&q, &pg.values);
         let lines = summary_lines(&q);

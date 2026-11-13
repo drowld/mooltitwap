@@ -1,4 +1,4 @@
-# mooltitwap (Afterecho) — Architecture
+# Afterecho — Architecture
 
 _As of v2.47.0 (2026-11-01), branch `ui/scope-first`. The why behind each piece is in DECISIONS.md._
 
@@ -31,7 +31,7 @@ went in v2.50, with every compatibility path (old sessions, old presets, the old
    clears the delay. The loops' write-back passes 5 Hz DC blockers (not Freeze's hold).
 
 ## Key modules (src/)
-- `lib.rs` — plugin impls, `process`, engine state, tests (incl. click and A/B-style checks).
+- `lib.rs` — plugin impls, `process`, engine state, the licence and its demo gate (last on the output), tests (incl. click and A/B-style checks).
 - `params.rs` — `PetalParams` (+ `TapParams[16]`, `LfoParams` ×3, `StepParams` ×2, `MxRow` ×6), enums (`MotionShape`, `MOTION_DIVS`…),
   helpers shared by engine and page (`spacing`, `taps_heard`, `pattern_secs`,
   `motion_depths`, `motion_hz`), and plain atomics the engine writes for the page:
@@ -62,8 +62,7 @@ went in v2.50, with every compatibility path (old sessions, old presets, the old
   matrix, across the whole lane; Tap), the Time card (Time | Pattern, Euclid ring,
   Swing), Colour, Output (Duck), the ☰ Options panel's own rows (Accent, Detune, the preset
   folder). `PRODUCT` describes Afterecho to the shared UI; the look is saved in
-  `Soft Systems/Afterecho/appearance.json` (+ `accent.json`), imported once from
-  `Mooltitwap/appearance.json`.
+  `Soft Systems/Afterecho/appearance.json` (+ `accent.json`).
   `gui_scope/preset_sheet.rs` — the shared preset box and sheet (`softsystems_ui::preset_sheet`),
   over the box round all the cards while open; `PresetUi` keeps the library, the store's
   `Session` and the sheet's view, and syncs the host-session field.

@@ -4,7 +4,7 @@
 //! six move the whole echo. Pure maths, shared by the engine and the page.
 //!
 //! A route's depth is a cell, −1…1; Amount and Polarity scale every cell
-//! (`PetalParams::mx_grid`). The sums are clamped to −1…1 and then converted
+//! (`AfterechoParams::mx_grid`). The sums are clamped to −1…1 and then converted
 //! the v2.39 way for the taps (`motion.rs`), so a single route at a depth
 //! sounds exactly as v2.39's Motion did at that depth.
 //!

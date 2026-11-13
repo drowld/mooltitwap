@@ -1,6 +1,6 @@
-# Mooltitwap
+# Afterecho
 
-A multitap delay garden in Rust, inspired by Rainbow Circuit's **Petal** (Max for Live).
+A Soft Systems delay of up to 16 taps, in Rust (`afterecho/`), first inspired by Rainbow Circuit's **Petal** (Max for Live). Ids: `com.softsystems.afterecho`.
 
 Built with [nih-plug](https://github.com/robbert-vdh/nih-plug) and [egui](https://github.com/emilk/egui). Bundles as VST3 + CLAP on macOS.
 
@@ -16,17 +16,17 @@ Separate feedback delay loop, state-variable filter at the wet bus, soft-clip sa
 ## Build
 
 ```sh
-cargo xtask bundle mooltitwap --release
+cargo nice-plug bundle afterecho --release
 ```
 
 Bundles land in `target/bundled/`. Copy to:
 
-- `~/Library/Audio/Plug-Ins/VST3/mooltitwap.vst3`
-- `~/Library/Audio/Plug-Ins/CLAP/mooltitwap.clap`
+- `~/Library/Audio/Plug-Ins/VST3/Afterecho.vst3`
+- `~/Library/Audio/Plug-Ins/CLAP/Afterecho.clap`
 
 ## Status
 
-v2.1.0 — DSP + egui GUI working. Diffusion / crossfeed / per-tap filter still stubs.
+See `afterecho/TASKS.md` and `afterecho/docs/HANDOFF.md`.
 
 ## Credits
 

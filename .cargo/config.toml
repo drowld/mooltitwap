@@ -1,2 +1,12 @@
 [alias]
 xtask = "run --package xtask --release --"
+
+# Keep this machine's paths out of the shipped binaries (panic locations embed source paths),
+# and the licence crate's name: its remap last, so it wins over the line above it
+# (nice-plug docs/licence-crate.md, "Release builds"). No-op on other machines.
+[build]
+rustflags = [
+    "--remap-path-prefix=/Users/emmanuelbussien=~",
+    "--remap-path-prefix=/Volumes/Plexicon/CODING=src",
+    "--remap-path-prefix=/Volumes/Plexicon/CODING/Dev/nice-plug/crates/softsystems-licence=dep",
+]
