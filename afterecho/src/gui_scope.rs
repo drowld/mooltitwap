@@ -546,45 +546,35 @@ fn dial_arc(c: Pos2, rad: f32, v0: f32, v1: f32) -> Vec<Pos2> {
         .collect()
 }
 
-fn paint_dial(p: &egui::Painter, c: Pos2, rad: f32, n: f32, bip: bool, s: f32, alpha: u8) {
-    let arc = |v0: f32, v1: f32| dial_arc(c, rad, v0, v1);
-    let sw = 3.0 * s;
-    p.add(egui::Shape::line(arc(0.0, 1.0), Stroke::new(sw, theme::with_alpha(theme::line2(), alpha))));
-    let (v0, v1) = if bip { (n.min(0.5), n.max(0.5)) } else { (0.0, n.max(0.004)) };
-    p.add(egui::Shape::line(arc(v0, v1), Stroke::new(sw, theme::with_alpha(INK(), alpha))));
-    let cap = rad - sw * 1.3;
-    p.circle_filled(c, cap, theme::with_alpha(theme::PANEL2(), alpha));
-    let a = (-135.0 + 270.0 * n).to_radians();
-    let (sa, ca) = a.sin_cos();
-    p.line_segment(
-        [c + Vec2::new(sa, -ca) * cap * 0.2, c + Vec2::new(sa, -ca) * cap * 0.8],
-        Stroke::new(2.0 * s, theme::with_alpha(INK(), alpha)),
-    );
-}
-
-/// A knob cell. `id` is the param's id — the focus card follows it.
+/// A knob cell: the crate's knob (`softsystems_ui::knob`: name, dial, value;
+/// the arc in the accent). `id` is the param's id — the focus card follows it.
+/// Stepped params of up to 16 positions show a dot per step.
 #[allow(clippy::too_many_arguments)]
 fn knob_cell<P: Param>(
-    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &P, id: &str,
+    ui: &mut egui::Ui, cell: Rect, _s: f32, setter: &ParamSetter, param: &P, id: &str,
     label: &str, bip: bool, enabled: bool, disp: Option<String>, focus: &mut Option<String>,
 ) {
-    let (ctl, lab, val) = cell_parts(cell, s);
-    let dial = Rect::from_center_size(ctl.center(), Vec2::splat(g::DIAL * s));
-    let hit = if theme::touch() { dial.expand(((theme::TOUCH_MIN_HIT - g::DIAL) * 0.5).max(0.0) * s) } else { dial };
-    let resp = ui.interact(hit, ui.id().with(("knob", id)), Sense::click_and_drag());
-    if enabled {
-        let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-        if epo::knob_drive(ui, setter, param, hit, &resp) {
-            *focus = Some(id.to_string());
-        }
-    }
+    use softsystems_ui::knob::{self, Kind, Knob};
     let n = param.modulated_normalized_value();
-    let alpha = if enabled { 255 } else { 90 };
-    let p = ui.painter();
-    paint_dial(p, dial.center(), g::DIAL * 0.5 * s, n, bip, s, alpha);
-    text(p, lab, Align2::CENTER_CENTER, label, 11.0, s, theme::with_alpha(INK2(), alpha));
-    let v = disp.unwrap_or_else(|| param.normalized_value_to_string(n, true));
-    mono(p, val, Align2::CENTER_CENTER, &v, 11.5, s, theme::with_alpha(INK(), alpha));
+    let text = disp.unwrap_or_else(|| param.normalized_value_to_string(n, true));
+    let kind = match param.step_count() {
+        _ if bip => Kind::Bipolar,
+        Some(c) if (1..=15).contains(&c) => Kind::Stepped(c + 1),
+        _ => Kind::Plain,
+    };
+    let k = Knob::new(label, &text).kind(kind).default(param.default_normalized_value()).live(enabled);
+    let mut v = n;
+    let out = knob::knob(ui, cell, ui.id().with(("knob", id)), &k, &mut v);
+    if out.began {
+        setter.begin_set_parameter(param);
+    }
+    if out.changed {
+        setter.set_parameter_normalized(param, v);
+        *focus = Some(id.to_string());
+    }
+    if out.ended {
+        setter.end_set_parameter(param);
+    }
 }
 
 /// A BoolParam toggle cell: the button shows the state, the name sits above.
@@ -1744,7 +1734,10 @@ fn feedback_cell(ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, pa
     let n = param.modulated_normalized_value();
     let alpha = if enabled { 255 } else { 90 };
     let p = ui.painter();
-    paint_dial(p, dial.center(), g::DIAL * 0.5 * s, n, false, s, alpha);
+    // the crate's dial (the arc in the accent); over 100 %, the self-oscillating
+    // range on top in the warning colour
+    let al = if enabled { 1.0 } else { softsystems_ui::tokens::DIM };
+    softsystems_ui::knob::dial(p, dial.center(), g::DIAL * s, softsystems_ui::knob::Kind::Plain, n, softsystems_ui::t().c.accent, al);
     let unity = param.preview_normalized(1.0);
     if n > unity + 1e-4 {
         let arc = dial_arc(dial.center(), g::DIAL * 0.5 * s, unity, n);

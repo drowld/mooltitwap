@@ -2,6 +2,16 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-13 · The shared knob, its arc in the accent (beta pass 5)
+
+Every knob is the crate's (`softsystems_ui::knob::knob`, SOF-228): the cell (name, dial,
+value), the drag (140 px for the range, Shift fine, double-click or double tap to the
+default), multitouch on the iPad, a dot per step for stepped params of up to 16 positions.
+The owner picked the accent for the value arc (was Afterecho's ink). Feedback keeps its own
+drag, for its stop at 100 % on the way up, and draws the crate's dial with the range above
+100 % in the warning colour on top, until the crate has a detent (proposed by the UI chat).
+Afterecho's own dial painter is gone.
+
 ## 2026-11-13 · The beta build (1.0.0-beta.1, beta pass 3)
 
 Owner: the beta is `1.0.0-beta.1`, its date later. The licence crate ties the version to its
