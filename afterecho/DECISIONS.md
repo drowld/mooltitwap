@@ -2,6 +2,33 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-14 · A "Dub" Colour tab, from Cumulus's Dub Delay (owner)
+
+The owner agreed (2026-11-14) to give Afterecho a fourth Colour tab, **Dub**, always in the
+feedback loop: Cumulus's Dub Delay feedback path (from Molekular, core_084): high-pass, low-pass,
+up to 3 two-pole allpasses ("Swirl"), and PolSat531 with drive. Intensity raises the drive and the
+low-pass resonance together, so each pass comes back darker, smeared and softly clipped. Knobs:
+Intensity, Low cut, High cut, Swirl. Three rules from the owner:
+- the loop processor goes into softsystems-fx (without its delay line), shared with Cumulus and
+  Carrier; asked of the fx crate session;
+- PolSat531 is fine inside Dub, as part of its sound; it is still never a Saturate choice;
+- no gain compensation of the loop: Cumulus's port divides the feedback by the low-pass's Q;
+  Afterecho leaves it alone and lets its loop limit hold it.
+A listening spike comes first. Rejected: a separate Dub effect next to the multitap, which would
+duplicate the delay Afterecho already is.
+
+## 2026-11-14 · The shared title and the beta interface (beta pass 4)
+
+As Strata did (its B3): the title is every plug-in's (`paint::wordmark`: the name in lower case,
+24 px, a square in the accent), Afterecho's own wordmark gone. The BETA badge sits after it, and
+the channel modes start after both, narrowing rather than moving the centred preset box. In the
+beta's last 7 days a banner sits under the header and the cards and the window move down by its
+height. The pop-up opens each time the window opens (never at host load); with no beta licence it
+covers the page and its Activate opens the ☰ panel on Licence. One licence snapshot a frame feeds
+both. The build is named from git (`build.rs`): "afterecho 1.0.0-beta.1 (hash)" in the pop-up and
+bug reports, "1.0.0-beta.1 · hash" in the ☰ footer, "+" when tracked files have changes, which
+stands in for the version bumps that used to tell builds apart.
+
 ## 2026-11-13 · The shared knob, its arc in the accent (beta pass 5)
 
 Every knob is the crate's (`softsystems_ui::knob::knob`, SOF-228): the cell (name, dial,

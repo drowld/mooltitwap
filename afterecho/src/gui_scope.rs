@@ -96,7 +96,9 @@ const LAYOUT: Layout = Layout {
 pub const PRODUCT: Product = Product {
     name: "Afterecho",
     slug: "afterecho",
-    version: env!("CARGO_PKG_VERSION"),
+    // "1.0.0-beta.1 · a1b2c3d" in the ☰ footer, and the beta pop-up's build (build.rs)
+    version: env!("AFTERECHO_BUILD"),
+    build: env!("AFTERECHO_BUILD_ID"),
     accent: accents::AFTERECHO,
     presets: &[ss_presets::AFTERECHO],
     dark_default: true,
@@ -178,6 +180,11 @@ pub struct ScopeState {
     preview: bool,
     /// The ☰ Options panel.
     options: options::Panel,
+    /// The beta's badge, banner and pop-up (a new one per window: the pop-up shows on open).
+    beta: softsystems_ui::beta::BetaUi,
+    /// The banner's height with its gap, logical px, last frame: the cards and the window
+    /// move down by it in the beta's last 7 days (0 otherwise).
+    banner_h: f32,
     /// Param id of the control last touched. Nothing reads it since the
     /// last-touched card went (v2.42); the cells still record it.
     focus: Option<String>,
@@ -381,7 +388,7 @@ pub fn frame(
     let vp = ui.ctx().screen_rect();
     let lay = &LAYOUT;
     let zoom = if ios {
-        (vp.width() / lay.w).min(vp.height() / lay.h).clamp(0.3, 3.0)
+        (vp.width() / lay.w).min(vp.height() / (lay.h + st.scope.banner_h)).clamp(0.3, 3.0)
     } else {
         (egui_state.size().0 as f32 / lay.w).clamp(0.5, 2.5)
     };
@@ -389,7 +396,7 @@ pub fn frame(
     softsystems_ui::theme::begin_frame(ui.ctx(), st.scope.theme(zoom));
     if !ios {
         let (w, h) = egui_state.size();
-        let want_h = (w as f32 * lay.h / lay.w).round() as u32;
+        let want_h = (w as f32 * (lay.h + st.scope.banner_h) / lay.w).round() as u32;
         if h.abs_diff(want_h) > 2 {
             egui_state.set_requested_size((w, want_h));
         }
@@ -398,17 +405,25 @@ pub fn frame(
     ui.painter().rect_filled(vp, 0.0, PAPER());
     let s = zoom;
     let o = if ios {
-        vp.min + ((vp.size() - Vec2::new(lay.w, lay.h) * s) * 0.5).max(Vec2::ZERO)
+        vp.min + ((vp.size() - Vec2::new(lay.w, lay.h + st.scope.banner_h) * s) * 0.5).max(Vec2::ZERO)
     } else {
         vp.min
     };
     // a preset that loads (the box's ‹ ›, the sheet) is one of the licence's check points
     let before = st.scope.presets.session.loaded().map(|p| p.id.clone());
-    page(ui, o, s, lay, params, setter, st, tempo);
+    // one licence snapshot a frame, for the beta interface and the ☰ panel (a release: no beta)
+    let lic = options::LicenceView::of(licence);
+    let beta = softsystems_ui::beta::BetaView::of(&lic);
+    page(ui, o, s, lay, params, setter, st, tempo, beta.as_ref());
     if st.scope.presets.session.loaded().map(|p| &p.id) != before.as_ref() {
         licence.check_state_load();
     }
-    options_panel(ui, o, s, lay, params, setter, &mut st.scope, egui_state, zoom, licence);
+    // the beta's pop-up over the page; its Activate opens the ☰ panel on Licence
+    let page_rect = Rect::from_min_size(o, Vec2::new(lay.w, lay.h + st.scope.banner_h) * s);
+    let sc = &mut st.scope;
+    sc.beta.overlay(ui, page_rect, beta.as_ref(), &PRODUCT, &mut sc.options, ui.id().with("sc_beta"));
+    let lic = st.scope.options.is_open().then_some(lic);
+    options_panel(ui, o, s, lay, params, setter, &mut st.scope, egui_state, zoom, licence, lic);
     ui.ctx().request_repaint();
 }
 
@@ -422,8 +437,14 @@ fn page(
     setter: &ParamSetter,
     st: &mut EditorState,
     tempo: f32,
+    beta: Option<&softsystems_ui::beta::BetaView>,
 ) {
-    header(ui, o, s, l, params, setter, st);
+    header(ui, o, s, l, params, setter, st, beta);
+    // the beta's last 7 days: a banner where the cards begin, the cards under it (the
+    // window grows by as much, `frame`)
+    let br = r(o, s, l.pad, l.time.0, l.w - 2.0 * l.pad, 0.0);
+    st.scope.banner_h = st.scope.beta.banner(ui, br, beta, &PRODUCT, ui.id().with("sc_beta")) / s;
+    let o = o + Vec2::new(0.0, st.scope.banner_h * s);
     // The preset browser covers the whole page under the header (v2.46;
     // before, the cards stayed in view beside it).
     st.scope.presets.track(st.preset_open);
@@ -649,9 +670,10 @@ fn paint_diamond(p: &egui::Painter, c: Pos2, rad: f32, stroke: Stroke) {
 // Header: ☰ · wordmark · channel modes · preset · A/B · light/dark
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn header(
     ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter,
-    st: &mut EditorState,
+    st: &mut EditorState, beta: Option<&softsystems_ui::beta::BetaView>,
 ) {
     let (y, h) = (g::HEAD_Y, g::HEAD_H);
 
@@ -659,18 +681,20 @@ fn header(
     let hb = r(o, s, l.pad, y, 38.0, h);
     st.scope.options.button(ui, hb, ui.id().with("sc_hamb"));
 
-    // wordmark, in Hanken's SemiBold
-    ui.painter().text(
-        o + Vec2::new(l.pad + 52.0, y + h * 0.5) * s,
-        Align2::LEFT_CENTER,
-        "Afterecho",
-        FontId::new(22.0 * s, softsystems_ui::fonts::semibold()),
-        INK(),
-    );
+    // the title, every plug-in's (softsystems-ui: lower case, the accent's square), then
+    // the beta's badge after it
+    let at = o + Vec2::new(l.pad + 52.0, y + h * 0.5) * s;
+    let name = softsystems_ui::paint::wordmark(ui.painter(), at, PRODUCT.name);
+    let badge = st.scope.beta.badge(ui, name.right_center() + Vec2::new(10.0 * s, 0.0), beta, ui.id().with("sc_beta"));
+    // the channel modes start after them, giving up width rather than moving the centred
+    // preset box
+    let after = (name.right().max(badge.right()) - o.x) / s + 16.0;
+    let tabs_x = (l.pad + 176.0).max(after);
+    let tabs_w = l.tabs_w.min((l.w - l.preset_w) * 0.5 - 16.0 - tabs_x);
 
     // channel modes
     let cm = enum_index(&params.channel_mode, 3);
-    if let Some(i) = seg(ui, r(o, s, l.pad + 176.0, y, l.tabs_w, h), &["Stereo", "M/S", "Mono"], cm, "sc_chan", true) {
+    if let Some(i) = seg(ui, r(o, s, tabs_x, y, tabs_w, h), &["Stereo", "M/S", "Mono"], cm, "sc_chan", true) {
         set_norm(setter, &params.channel_mode, i as f32 / 2.0);
     }
 
@@ -2797,7 +2821,7 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<AfterechoParams>, setter: &
 #[allow(clippy::too_many_arguments)]
 fn options_panel(
     ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState,
-    egui_state: &EguiState, zoom: f32, licence: &softsystems_licence::Licence,
+    egui_state: &EguiState, zoom: f32, licence: &softsystems_licence::Licence, lic: Option<options::LicenceView>,
 ) {
     let ios = cfg!(target_os = "ios");
     let at = o + Vec2::new(l.pad, g::HEAD_Y + g::HEAD_H + 8.0) * s;
@@ -2805,8 +2829,6 @@ fn options_panel(
     let mut accent_changed = false;
     let mut reveal = false;
     let ScopeState { look, accent, options, .. } = sc;
-    // the licence as it is now, only while the panel is open (iOS: none needed, hidden)
-    let lic = options.is_open().then(|| softsystems_ui::options::LicenceView::of(licence));
     let env = Env { product: &PRODUCT, look, zoom: (!ios).then_some(Zoom { now: zoom, steps: &ZOOMS }), licence: lic };
     let out = options.show(ui, at, burger, env, |rows| {
         let colors: Vec<Color32> = ACCENTS.iter().map(|a| a.get(softsystems_ui::t().dark)).collect();
@@ -2835,7 +2857,7 @@ fn options_panel(
         sc.accent.save();
     }
     if let Some(z) = out.zoom {
-        egui_state.set_requested_size(((l.w * z).round() as u32, (l.h * z).round() as u32));
+        egui_state.set_requested_size(((l.w * z).round() as u32, ((l.h + sc.banner_h) * z).round() as u32));
     }
     if reveal {
         reveal_presets();
