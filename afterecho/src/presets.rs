@@ -6,7 +6,7 @@
 //! half: which params a preset holds, its facets, its folder and its
 //! factory bank.
 //!
-//! Afterecho has no blobs: everything a preset holds is a parameter (§3.3).
+//! One blob, "mod": Motion's patch (§3.3); everything else is a parameter.
 //! Its facets are Time (Sync | Free) and Cross (Mix | Ping | Diffuse), both
 //! derived from the values when saving (§3.4).
 //!
@@ -20,7 +20,10 @@
 
 use crate::params::AfterechoParams;
 use nice_plug::prelude::*;
-use softsystems_presets::{FacetSpec, Facets, Plugin, Sound, Values};
+use crate::modulation;
+use serde::Serialize;
+use softsystems_mod::Patch;
+use softsystems_presets::{BlobReader, Blobs as _, FacetSpec, Facets, Plugin, Sound, Values};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -42,12 +45,12 @@ const NOT_STORED: &[&str] = &["freeze", "ear_guard"];
 /// Afterecho, as the shared store sees it.
 pub struct Store;
 
-pub type Preset = softsystems_presets::Preset<()>;
+pub type Preset = softsystems_presets::Preset<Blobs>;
 pub type Library = softsystems_presets::Library<Store>;
 
 impl Plugin for Store {
     type Params = AfterechoParams;
-    type Blobs = ();
+    type Blobs = Blobs;
     const ID: &'static str = PLUGIN_ID;
     const FOLDER: &'static str = "Afterecho";
     const VERSION: &'static str = env!("CARGO_PKG_VERSION");
@@ -77,9 +80,53 @@ impl Plugin for Store {
         crate::factory::factory_presets()
     }
 
-    fn capture_blobs(_: &AfterechoParams) {}
+    fn capture_blobs(params: &AfterechoParams) -> Blobs {
+        let mut b = Blobs { mods: params.motion.patch.lock().ok().map(|g| g.clone()) };
+        b.sanitize();
+        b
+    }
 
-    fn apply_blobs(_: &AfterechoParams, _: &()) {}
+    fn apply_blobs(params: &AfterechoParams, blobs: &Blobs) {
+        let mut patch = blobs.resolved().mods.unwrap_or_else(modulation::default_patch);
+        modulation::slots().load(&mut patch);
+        if let Ok(mut g) = params.motion.patch.lock() {
+            *g = patch;
+        }
+        params.motion.shared.changed();
+    }
+}
+
+/// A preset's blob (§3.3): Motion's patch (the slots' kinds, shapes and steps, and the
+/// routes; the continuous settings are host params and travel with the values). A file
+/// without it (or one that can't be read) loads the line-up's defaults with no routes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Blobs {
+    #[serde(rename = "mod", skip_serializing_if = "Option::is_none")]
+    pub mods: Option<Patch>,
+}
+
+impl softsystems_presets::Blobs for Blobs {
+    const NAMES: &'static [&'static str] = &["mod"];
+
+    fn read(r: &mut BlobReader) -> Self {
+        // through Patch::from_value: a newer format is refused, routes are cleaned
+        Blobs { mods: r.take::<serde_json::Value>("mod").and_then(|v| Patch::from_value(v).ok()) }
+    }
+
+    fn resolved(&self) -> Self {
+        Blobs { mods: Some(self.mods.clone().unwrap_or_else(modulation::default_patch)) }
+    }
+
+    /// A non-finite number (a step) would be written as a JSON null and fail to load, so a
+    /// patch that doesn't read back as itself is saved as the defaults.
+    fn sanitize(&mut self) {
+        if let Some(p) = &self.mods {
+            let back = serde_json::to_value(p).ok().and_then(|v| Patch::from_value(v).ok());
+            if back.as_ref() != Some(p) {
+                self.mods = Some(modulation::default_patch());
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- capture / apply
@@ -89,9 +136,9 @@ pub fn capture(params: &AfterechoParams) -> BTreeMap<String, f32> {
     softsystems_presets::capture_values::<Store>(params)
 }
 
-/// The whole sound as it is now (Afterecho has no blobs).
-pub fn sound(params: &AfterechoParams) -> Sound<()> {
-    Sound { values: capture(params), blobs: () }
+/// The whole sound as it is now: the params and Motion's patch.
+pub fn sound(params: &AfterechoParams) -> Sound<Blobs> {
+    Sound { values: capture(params), blobs: <Store as Plugin>::capture_blobs(params) }
 }
 
 /// Restore params by driving each like a knob gesture so the host records

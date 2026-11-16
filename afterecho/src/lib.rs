@@ -6,8 +6,7 @@ mod factory;
 mod filter;
 mod gui;
 mod gui_scope;
-mod matrix;
-mod motion;
+mod modulation;
 mod params;
 mod presets;
 mod tape;
@@ -22,7 +21,7 @@ use crate::delay::{ChannelTaps, DelayLine, ReadLine, SlewedTime};
 use crate::detune::{Pv, Wsola};
 use crate::diffusion::Diffusion;
 use crate::filter::{soft_clip, svf_tick, DcBlock, LoopTone, PeakLimiter, Svf, ToneCoefs};
-use crate::matrix::{SOURCES, TAP_TARGETS};
+use crate::modulation::{ModRt, N_TGT, T_COLOUR, T_CROSS, T_CUTOFF, T_DUCK, T_FDBK, T_GAIN, T_MIX, T_PAN, T_RESO, T_TONE};
 use crate::params::{
     ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, AfterechoParams, TapeType, NUM_TAPS, REPEATS_LOOP,
 };
@@ -208,16 +207,9 @@ pub struct Afterecho {
     duck_hold: usize,
     duck_depth: f32,
     duck_dip: f32,
-    /// Motion (v2.42, the matrix): where each LFO's cycle is (in cycles) and
-    /// each Step's (in steps), each Step's value gliding per tap (and for the
-    /// whole echo, the last), the dry input's level for Follow (10 ms up,
-    /// 200 ms down), and each tap's movement now per tap target
-    /// (`matrix::tap_mods`).
-    lfo_phase: [f64; matrix::LFOS],
-    step_phase: [f64; 2],
-    step_now: [[f32; NUM_TAPS + 1]; 2],
-    motion_env: f32,
-    mod_tap: [[f32; NUM_TAPS]; TAP_TARGETS],
+    /// Motion (beta pass 8): the shared crate's six slots and its matrix,
+    /// each tap a read-head (`modulation.rs`).
+    modu: ModRt,
     /// The whole-echo targets as Motion has them, gliding (5 ms) to where
     /// each 32-sample tick aims them: Feedback, Crossfeed, Mix.
     fb_now: f32,
@@ -373,8 +365,9 @@ impl Default for Afterecho {
         #[cfg(not(feature = "beta"))]
         let licence = softsystems_licence::licence!("afterecho");
         let gate = licence.demo_gate();
+        let params = Arc::new(AfterechoParams::default());
         Self {
-            params: Arc::new(AfterechoParams::default()),
+            params: params.clone(),
             licence,
             gate,
             tempo_bpm_shared: Arc::new(AtomicU32::new(120.0_f32.to_bits())),
@@ -403,11 +396,7 @@ impl Default for Afterecho {
             duck_hold: 0,
             duck_depth: 0.0,
             duck_dip: 0.0,
-            lfo_phase: [0.0; matrix::LFOS],
-            step_phase: [0.0; 2],
-            step_now: [[0.0; NUM_TAPS + 1]; 2],
-            motion_env: 0.0,
-            mod_tap: [[0.0; NUM_TAPS]; TAP_TARGETS],
+            modu: ModRt::new(48_000.0, &params.motion),
             fb_now: 0.0,
             cross_now: 0.0,
             mix_now: 0.0,
@@ -473,6 +462,7 @@ impl Afterecho {
     /// directly).
     fn prepare(&mut self, sample_rate: f32) {
         self.sample_rate = sample_rate;
+        self.modu = ModRt::new(sample_rate, &self.params.motion);
         let max_samples = (MAX_DELAY_SECONDS * self.sample_rate) as usize;
         self.main_l = ChannelTaps::new(max_samples);
         self.main_r = ChannelTaps::new(max_samples);
@@ -646,7 +636,7 @@ impl Plugin for Afterecho {
         self.duck_env = 0.0;
         self.duck_hold = 0;
         self.duck_dip = 0.0;
-        self.motion_env = 0.0;
+        self.modu.reset();
         self.ping_live = 0;
         self.ping_since_off = usize::MAX;
         self.ping_age = usize::MAX;
@@ -686,7 +676,6 @@ impl Plugin for Afterecho {
         let p = self.params.clone();
 
         let tempo_bpm = ctx.transport().tempo.unwrap_or(120.0) as f32;
-        let (playing, song_beats) = (ctx.transport().playing, ctx.transport().pos_beats());
         // Publish tempo to GUI thread for accurate grid/sync display
         self.tempo_bpm_shared.store(tempo_bpm.to_bits(), Ordering::Relaxed);
         let time_l_norm = p.base_time_l.value();
@@ -1026,46 +1015,15 @@ impl Plugin for Afterecho {
         let det_hold = (0.3 * sr) as usize;
         let clean_on = p.detune_quality.value() == crate::params::DetuneQuality::Clean && !self.pv.is_empty();
 
-        // Motion (v2.42, the matrix): its sources move the taps' pan, gain,
-        // cutoff and Q around their set values (kept here) and the whole
-        // echo's targets around their knobs; with no routes it is off. It
-        // re-aims every 32 samples and the glides smooth the steps. A synced
-        // source sits where the song is while the host plays.
-        let grid = p.mx_grid();
-        let tap_on = matrix::any_tap(&grid);
-        let glob_on = matrix::any_global(&grid);
-        let motion = tap_on || glob_on;
-        let tap_used: [bool; TAP_TARGETS] = core::array::from_fn(|t| matrix::col_used(&grid, t));
-        let glob_used: [bool; 6] = core::array::from_fn(|i| matrix::col_used(&grid, TAP_TARGETS + i));
-        let lfos = p.lfos();
-        let lfo_shape = lfos.map(|l| l.shape.value());
-        let lfo_scatter = lfos.map(|l| l.scatter.value());
-        let lfo_step: [f64; matrix::LFOS] = core::array::from_fn(|k| lfos[k].hz(tempo_bpm) as f64 / sr as f64);
-        for (k, l) in lfos.iter().enumerate() {
-            if let (Some(beats), true, Some(pos)) = (l.beats(), playing, song_beats) {
-                self.lfo_phase[k] = pos / beats as f64;
-            }
-        }
-        let stp = p.steps();
-        let steps = stp.map(|st| st.values());
-        let step_len = stp.map(|st| st.len.value() as usize);
-        let step_scatter = stp.map(|st| st.scatter.value());
-        let step_hz = stp.map(|st| st.hz(tempo_bpm));
-        let step_inc = step_hz.map(|hz| hz as f64 / sr as f64);
-        // each tick, a step's value moves this share of the way to the next:
-        // a few ms at Glide 0 (no click), a whole step's slide at 100 %
-        let step_glide = core::array::from_fn::<f32, 2, _>(|j| {
-            let tau = (stp[j].glide.value() / step_hz[j].max(1e-3)).max(0.003);
-            1.0 - (-32.0 / (tau * sr)).exp()
-        });
-        for (j, st) in stp.iter().enumerate() {
-            if let (Some(beats), true, Some(pos)) = (st.beats(), playing, song_beats) {
-                self.step_phase[j] = pos / beats as f64;
-            }
-        }
-        if !tap_on {
-            self.mod_tap = [[0.0; NUM_TAPS]; TAP_TARGETS];
-        }
+        // Motion (beta pass 8, the shared crate): its slots move the taps'
+        // pan, gain, cutoff and Q around their set values (each tap a
+        // read-head, Scatter apart) and the whole echo's knobs, by a share of
+        // each knob's travel; with no routes it leaves them as set. It
+        // re-aims every 32 samples and the glides smooth the steps.
+        self.modu.begin_block(&p.motion, ctx.transport(), n_active);
+        let motion = self.modu.routed();
+        let tap_on = self.modu.moves_taps();
+        let routed_to: [bool; N_TGT] = core::array::from_fn(|t| self.modu.reaches(t));
         // the whole-echo targets Motion aims at (their knobs while nothing moves them)
         let (mut fb_target, mut cross_target, mut wet_target) = (feedback, crossfeed, dry_wet);
         if initial_snap {
@@ -1074,8 +1032,12 @@ impl Plugin for Afterecho {
         let set_db: [f32; NUM_TAPS] = core::array::from_fn(|i| p.taps[i].gain_db.value());
         let set_pan: [f32; NUM_TAPS] = core::array::from_fn(|i| p.taps[i].pan.value());
         let (set_cut, set_q) = (tap_cut, tap_q);
-        let menv_up = 1.0 - (-1.0 / (0.01 * sr)).exp();
-        let menv_down = 1.0 - (-1.0 / (0.2 * sr)).exp();
+        // the tap knobs' positions, which the routes move from
+        let tp = &p.taps;
+        let n_pan: [f32; NUM_TAPS] = core::array::from_fn(|i| tp[i].pan.preview_normalized(set_pan[i]));
+        let n_db: [f32; NUM_TAPS] = core::array::from_fn(|i| tp[i].gain_db.preview_normalized(set_db[i]));
+        let n_cut: [f32; NUM_TAPS] = core::array::from_fn(|i| tp[i].filter_cutoff.preview_normalized(set_cut[i]));
+        let n_q: [f32; NUM_TAPS] = core::array::from_fn(|i| tp[i].filter_q.preview_normalized(set_q[i]));
         let type_step = 1.0 / (0.01 * sr);
 
         // ── Ping (see bounce.rs) ─────────────────────────────────────────
@@ -1105,7 +1067,11 @@ impl Plugin for Afterecho {
             // a tap swings once the first bounced repeat has reached it
             let w = if swinging && self.ping_age >= reach { width } else { 0.0 };
             // (Motion's pan as of the last block: the placement glides anyway)
-            let pan = motion::pan(p.taps[i].pan.value(), self.mod_tap[0][i], 1.0);
+            let pan = if routed_to[T_PAN] {
+                p.taps[i].pan.preview_plain(self.modu.apply_tap(T_PAN, i, n_pan[i]))
+            } else {
+                p.taps[i].pan.value()
+            };
             ping_target[i] = bounce::placement(ch_mode, pan, w);
             if !ping_was_live {
                 self.ping_gain[i] = ping_target[i];
@@ -1165,7 +1131,7 @@ impl Plugin for Afterecho {
         };
         let ring_len = if colour.diffuse.is_some() || colour.tape {
             (3.0 * sr) as usize
-        } else if tone_target != 0.0 || self.tone_t != 0.0 || glob_used[matrix::TONE] {
+        } else if tone_target != 0.0 || self.tone_t != 0.0 || routed_to[T_TONE] {
             (0.1 * sr) as usize
         } else {
             1
@@ -1208,89 +1174,56 @@ impl Plugin for Afterecho {
             } else {
                 self.duck_env += (key - self.duck_env) * duck_rel;
             }
-            self.motion_env += (key - self.motion_env) * if key > self.motion_env { menv_up } else { menv_down };
+            // Follow hears the dry input's level
+            self.modu.advance(key);
 
             // Motion: re-aim the live taps and the whole echo (the glides
             // smooth the steps). A target no route reaches stays on its knob.
             if motion && s % 32 == 0 {
-                let env_m = motion::env_value(self.motion_env);
-                if glob_on {
-                    let mut src = [0.0f32; SOURCES];
-                    for k in 0..matrix::LFOS {
-                        src[k] = motion::shape_at(lfo_shape[k], self.lfo_phase[k], NUM_TAPS);
-                    }
-                    src[matrix::FOLLOW] = env_m;
-                    for j in 0..2 {
-                        let to = matrix::step_at(&steps[j], step_len[j], self.step_phase[j], 0.0, 0, 1);
-                        let now = &mut self.step_now[j][NUM_TAPS];
-                        *now += (to - *now) * step_glide[j];
-                        src[matrix::STEP + j] = *now;
-                    }
-                    let gm = matrix::global_mods(&grid, &src);
-                    if glob_used[matrix::FEEDBACK] {
-                        fb_target = matrix::feedback(feedback, gm[matrix::FEEDBACK]);
-                    }
-                    if glob_used[matrix::CROSS] {
-                        cross_target = matrix::cross(crossfeed, gm[matrix::CROSS]);
-                    }
-                    if glob_used[matrix::MIX] {
-                        wet_target = matrix::mix(dry_wet, gm[matrix::MIX]);
-                    }
-                    if glob_used[matrix::TONE] {
-                        tone_target = matrix::tone(tone_base, gm[matrix::TONE]);
-                    }
-                    if glob_used[matrix::DUCK] {
-                        duck_target = matrix::duck(duck_base, gm[matrix::DUCK]);
-                    }
-                    if glob_used[matrix::COLOUR] {
-                        let m = gm[matrix::COLOUR];
-                        diffuse_amount = matrix::colour(diffuse_base, m);
-                        colour.diffuse = (diffuse_routing == DiffuseRouting::Feedback).then_some(diffuse_amount);
-                        sat_amount = matrix::colour(sat_base, m);
-                        if degrade_on {
-                            let cfg = tape_cfg(matrix::colour(degrade_amount, m));
-                            self.tape.set_params(&cfg);
-                            self.tape_bounce.set_params(&cfg);
-                        }
+                self.modu.update();
+                let m = &self.modu;
+                if routed_to[T_FDBK] {
+                    fb_target = p.feedback.preview_plain(m.apply(T_FDBK, p.feedback.preview_normalized(feedback)));
+                }
+                if routed_to[T_CROSS] {
+                    cross_target = p.crossfeed.preview_plain(m.apply(T_CROSS, p.crossfeed.preview_normalized(crossfeed)));
+                }
+                if routed_to[T_MIX] {
+                    wet_target = p.dry_wet.preview_plain(m.apply(T_MIX, p.dry_wet.preview_normalized(dry_wet)));
+                }
+                if routed_to[T_TONE] {
+                    tone_target = p.loop_tone.preview_plain(m.apply(T_TONE, p.loop_tone.preview_normalized(tone_base)));
+                }
+                if routed_to[T_DUCK] {
+                    duck_target = p.duck.preview_plain(m.apply(T_DUCK, p.duck.preview_normalized(duck_base)));
+                }
+                if routed_to[T_COLOUR] {
+                    let c = m.apply(T_COLOUR, modulation::COLOUR_BASE);
+                    diffuse_amount = modulation::colour(diffuse_base, c);
+                    colour.diffuse = (diffuse_routing == DiffuseRouting::Feedback).then_some(diffuse_amount);
+                    sat_amount = modulation::colour(sat_base, c);
+                    if degrade_on {
+                        let cfg = tape_cfg(modulation::colour(degrade_amount, c));
+                        self.tape.set_params(&cfg);
+                        self.tape_bounce.set_params(&cfg);
                     }
                 }
                 if tap_on {
                     for i in 0..n_active {
-                        let mut src = [0.0f32; SOURCES];
-                        for k in 0..matrix::LFOS {
-                            src[k] = motion::shape_at(lfo_shape[k], motion::tap_phase(self.lfo_phase[k], lfo_scatter[k], i, n_active), i);
+                        if routed_to[T_PAN] {
+                            (tap_pan_l[i], tap_pan_r[i]) = bounce::pan_gains(tp[i].pan.preview_plain(m.apply_tap(T_PAN, i, n_pan[i])));
                         }
-                        src[matrix::FOLLOW] = env_m;
-                        for j in 0..2 {
-                            let to = matrix::step_at(&steps[j], step_len[j], self.step_phase[j], step_scatter[j], i, n_active);
-                            let now = &mut self.step_now[j][i];
-                            *now += (to - *now) * step_glide[j];
-                            src[matrix::STEP + j] = *now;
+                        if routed_to[T_GAIN] && tap_gain[i] > 0.0 {
+                            tap_gain[i] = nice_plug::util::db_to_gain(tp[i].gain_db.preview_plain(m.apply_tap(T_GAIN, i, n_db[i])));
                         }
-                        let m = matrix::tap_mods(&grid, &src);
-                        for (t, v) in m.iter().enumerate() {
-                            self.mod_tap[t][i] = *v;
+                        if routed_to[T_CUTOFF] {
+                            tap_cut[i] = tp[i].filter_cutoff.preview_plain(m.apply_tap(T_CUTOFF, i, n_cut[i]));
                         }
-                        if tap_used[0] {
-                            (tap_pan_l[i], tap_pan_r[i]) = bounce::pan_gains(motion::pan(set_pan[i], m[0], 1.0));
-                        }
-                        if tap_used[1] && tap_gain[i] > 0.0 {
-                            tap_gain[i] = nice_plug::util::db_to_gain(matrix::gain_db(set_db[i], m[1]));
-                        }
-                        if tap_used[2] {
-                            tap_cut[i] = motion::cutoff(set_cut[i], m[2], 1.0);
-                        }
-                        if tap_used[3] {
-                            tap_q[i] = motion::reso(set_q[i], m[3], 1.0);
+                        if routed_to[T_RESO] {
+                            tap_q[i] = tp[i].filter_q.preview_plain(m.apply_tap(T_RESO, i, n_q[i]));
                         }
                     }
                 }
-            }
-            for (ph, step) in self.lfo_phase.iter_mut().zip(lfo_step) {
-                *ph += step;
-            }
-            for (ph, inc) in self.step_phase.iter_mut().zip(step_inc) {
-                *ph += inc;
             }
             self.fb_now += (fb_target - self.fb_now) * tap_glide;
             self.cross_now += (cross_target - self.cross_now) * tap_glide;
@@ -1890,13 +1823,8 @@ impl Plugin for Afterecho {
         self.params.guard_db.store((-20.0 * guard_least.max(1e-6).log10()).to_bits(), Ordering::Relaxed);
         // the Duck knob shows the most the echoes dipped in this block
         self.params.duck_dip_db.store(duck_most.to_bits(), Ordering::Relaxed);
-        // and the field each tap's movement, per tap target
-        for (t, row) in self.params.motion_now.iter().enumerate() {
-            for (i, now) in row.iter().enumerate() {
-                let m = if tap_on && i < n_active { self.mod_tap[t][i] } else { 0.0 };
-                now.store(m.to_bits(), Ordering::Relaxed);
-            }
-        }
+        // and the editor Motion's values, playheads and each tap's movement
+        self.modu.publish(&p.motion.shared);
         // the demo's silences, last, on the output (nothing while licensed)
         self.gate.process(buffer.as_slice());
 
@@ -1940,6 +1868,7 @@ nice_export_auv3!(Afterecho);
 mod tests {
     use super::*;
     use core::f32::consts::PI;
+    use softsystems_mod::{Modulator, Rate};
 
     const SR: f32 = 48_000.0;
 
@@ -1962,6 +1891,31 @@ mod tests {
             .unwrap_or_else(|| panic!("no param {id}"));
         // SAFETY: ptr belongs to plug's params, which outlive the call.
         unsafe { ptr._internal_set_normalized_value(ptr.preview_normalized(plain)) };
+    }
+
+    /// Motion: a route from `slot` to `target` at `amount` (a share of the knob's travel),
+    /// through the patch, as the editor makes one.
+    fn route(plug: &Afterecho, slot: u16, target: &str, amount: f32) {
+        let m = &plug.params.motion;
+        m.patch.lock().unwrap().routes.set(slot, target, amount, crate::modulation::CAPACITY);
+        m.shared.changed();
+    }
+
+    /// Motion: slot `slot` at `rate` (its unit in the patch, its value the host's param, as
+    /// `ModParams` keeps it), with `edit` applied to the rest.
+    fn slot(plug: &Afterecho, n: usize, rate: softsystems_mod::Rate, edit: impl FnOnce(&mut softsystems_mod::Modulator)) {
+        let m = &plug.params.motion;
+        {
+            let mut g = m.patch.lock().unwrap();
+            let md = &mut g.modulators[n];
+            if let Some(c) = md.clock_mut() {
+                c.rate = rate;
+                c.trigger = if rate.unit.is_tempo() { softsystems_mod::Trigger::Sync } else { softsystems_mod::Trigger::Free };
+            }
+            edit(md);
+        }
+        set(plug, &format!("mod{}_rate", n + 1), rate.position());
+        m.shared.changed();
     }
 
     /// Wet only, one tap per pan, 20 ms apart; the cycle follows the cluster.
@@ -2654,13 +2608,13 @@ mod tests {
 
     #[test]
     fn motion_moves_the_whole_echo() {
-        // LFO 1 at 2 Hz on Mix, full depth, from 50 %: the mix swings all
-        // the way, and Feedback stays on its knob
+        // LFO 1 at 2 Hz on Mix, half the knob's travel either way, from 50 %:
+        // the mix swings all the way, and Feedback stays on its knob
         let mut plug = plugin(&[0.0]);
         set(&plug, "dry_wet", 0.5);
         set(&plug, "feedback", 0.4);
-        set(&plug, "motion_rate", 2.0);
-        set(&plug, "mx_lfo1_mix", 1.0);
+        slot(&plug, 0, Rate::hz(2.0), |_| {});
+        route(&plug, 0, "mix", 0.5);
         let (mut lo, mut hi, mut fb) = (1.0f32, 0.0f32, (1.0f32, 0.0f32));
         render(&mut plug, &held_tone()[..SR as usize], |at, plug| {
             if at == 0 {
@@ -3218,39 +3172,43 @@ mod tests {
 
     #[test]
     fn step_on_cutoff_is_no_sharper_than_a_smooth_lfo() {
-        // Step 1 jumping a tap's cutoff four octaves either way at 8 steps a
-        // second, at Glide 0, against a sine LFO at the same depth and rate:
+        // (at Afterecho's default Slew; with Slew off see the eprintln)
+        // Step 1 jumping a tap's cutoff over half its knob's travel at 8 steps
+        // a second, Slew off, against a sine LFO at the same depth and rate:
         // the jumps are rounded off, so they bend the tone hardly more than
         // the smooth sweep does (the sweep itself is what moves it)
         let input = held_tone();
-        let sharpest = |step: bool| {
+        let sharpest = |step: bool, slew: bool| {
             let mut plug = plugin(&[0.0]);
             set(&plug, "tap_filter_cutoff_1", 1500.0);
             if step {
-                set(&plug, "step_sync", 0.0);
-                set(&plug, "step_rate", 8.0);
-                set(&plug, "step_glide", 0.0);
-                for (i, v) in [1.0, -1.0, 0.5, -0.5].into_iter().enumerate() {
-                    set(&plug, &format!("step_v_{}", i + 1), v);
-                }
-                set(&plug, "step_len", 4.0);
-                set(&plug, "mx_step_cutoff", 1.0);
+                slot(&plug, 4, Rate::hz(8.0), |m| {
+                    if let Modulator::Steps(st) = m {
+                        st.levels[..4].copy_from_slice(&[1.0, 0.0, 0.75, 0.25]);
+                        st.count = 4;
+                        st.common.bipolar = true;
+                        st.common.slew = slew;
+                    }
+                });
+                route(&plug, 4, "cutoff", 0.25);
             } else {
-                set(&plug, "motion_rate", 8.0);
-                set(&plug, "mx_lfo1_cutoff", 1.0);
+                slot(&plug, 0, Rate::hz(8.0), |_| {});
+                route(&plug, 0, "cutoff", 0.25);
             }
             sharpest_bend(&render(&mut plug, &input, |_, _| {}))
         };
-        let (smooth, (stepped, at)) = (sharpest(false).0, sharpest(true));
+        let (smooth, (stepped, at)) = (sharpest(false, true).0, sharpest(true, true));
+        eprintln!("Slew off: {:.2}× the sine's", sharpest(true, false).0 / smooth);
         assert!(stepped < 1.2 * smooth, "{:.2}× the sine's sharpest bend, at {:.3} s", stepped / smooth, at as f32 / SR + 0.3);
     }
 
     #[test]
     fn motion_swings_the_taps_from_side_to_side() {
-        // noise through one centred tap; Motion's sine at 2 Hz on Pan, full depth
+        // noise through one centred tap; Motion's sine at 2 Hz on Pan, half
+        // the knob's travel either way: hard left to hard right
         let mut plug = plugin(&[0.0]);
-        set(&plug, "motion_rate", 2.0);
-        set(&plug, "mx_lfo1_pan", 1.0);
+        slot(&plug, 0, Rate::hz(2.0), |_| {});
+        route(&plug, 0, "pan", 0.5);
         let input: Vec<(f32, f32)> = noise_burst(1.0).iter().enumerate().map(|(i, _)| {
             let v = ((i as u32).wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0 - 0.5;
             (0.3 * v, 0.3 * v)
@@ -3261,32 +3219,37 @@ mod tests {
     }
 
     #[test]
-    fn motion_on_gain_only_dips() {
-        // the same tone with and without Gain motion: never louder, sometimes much softer
+    fn motion_on_gain_stays_within_the_knob() {
+        // the same tone with and without Gain motion (the crate's rule: a share
+        // of the knob's travel, clamped at its ends): from 0 dB it rises at most
+        // to the knob's +6 dB, and dips far more than that
         let run = |depth: f32| {
             let mut plug = plugin(&[0.0, 0.0, 0.0]);
-            set(&plug, "motion_rate", 3.0);
-            set(&plug, "mx_lfo1_gain", depth);
+            slot(&plug, 0, Rate::hz(3.0), |_| {});
+            if depth != 0.0 {
+                route(&plug, 0, "gain", depth);
+            }
             render(&mut plug, &held_tone(), |_, _| {})
         };
-        let (still, moving) = (run(0.0), run(1.0));
+        let (still, moving) = (run(0.0), run(0.5));
         let peak = |o: &[(f32, f32)], a: f32, b: f32| o[(a * SR) as usize..(b * SR) as usize].iter().fold(0.0f32, |m, s| m.max(s.0.abs()));
-        assert!(peak(&moving, 0.5, 4.5) <= peak(&still, 0.5, 4.5) * 1.001);
-        assert!(rms(&moving, 0.5, 4.5) < 0.7 * rms(&still, 0.5, 4.5));
+        assert!(peak(&moving, 0.5, 4.5) <= peak(&still, 0.5, 4.5) * 2.0 * 1.01);
+        let quietest = (0..80).map(|k| rms(&moving, 0.5 + k as f32 * 0.05, 0.55 + k as f32 * 0.05)).fold(1.0f32, f32::min);
+        assert!(quietest < 0.3 * rms(&still, 0.5, 4.5), "{quietest} against {}", rms(&still, 0.5, 4.5));
     }
 
     #[test]
     fn env_motion_opens_the_filter_while_you_play() {
-        // Follow on Cutoff, full depth, a tap set to 1 kHz: up while the tone
-        // plays, down again in the silence after it
+        // Follow on Cutoff, the knob's whole travel, a tap set to 1 kHz: up
+        // while the tone plays, back on its knob in the silence after it
         let mut plug = plugin(&[0.0]);
-        set(&plug, "mx_follow_cutoff", 1.0);
+        route(&plug, 3, "cutoff", 1.0);
         set(&plug, "tap_filter_cutoff_1", 1000.0);
         render(&mut plug, &played(0.5, 0.0, 0.5, 0.5, 0.5), |_, _| {});
         let playing = plug.tap_cut[0].now;
         render(&mut plug, &vec![(0.0, 0.0); (1.5 * SR) as usize], |_, _| {});
         let quiet = plug.tap_cut[0].now;
-        assert!(playing > 4000.0 && quiet < 200.0, "playing {playing:.0} Hz, quiet {quiet:.0} Hz");
+        assert!(playing > 4000.0 && quiet < 1100.0, "playing {playing:.0} Hz, quiet {quiet:.0} Hz");
     }
 
     #[test]
@@ -3294,18 +3257,56 @@ mod tests {
         // Sync, a cycle of one bar, the host playing at beat 1 (a quarter of
         // the bar in): the sine is at its top
         let mut plug = plugin(&[0.0]);
-        set(&plug, "motion_sync", 1.0);
-        set(&plug, "motion_div", 3.0);
-        set(&plug, "mx_lfo1_pan", 1.0);
+        slot(&plug, 0, Rate::bars(1.0), |_| {});
+        route(&plug, 0, "pan", 0.5);
         let mut t = Transport::new(SR);
         (t.playing, t.tempo, t.pos_beats) = (true, Some(120.0), Some(1.0));
         let mut host = Host(t);
-        let (mut l, mut r) = (vec![0.0f32; 32], vec![0.0f32; 32]);
+        // (a few ticks: the crate's output ramps to each tick's value)
+        let (mut l, mut r) = (vec![0.0f32; 96], vec![0.0f32; 96]);
         let mut buffer = Buffer::default();
         // SAFETY: l and r outlive the buffer.
-        unsafe { buffer.set_slices(32, |b| *b = vec![&mut l[..], &mut r[..]]) };
+        unsafe { buffer.set_slices(96, |b| *b = vec![&mut l[..], &mut r[..]]) };
         plug.process(&mut buffer, &mut AuxiliaryBuffers { inputs: &mut [], outputs: &mut [] }, &mut host);
-        assert!(plug.mod_tap[0][0] > 0.999, "{}", plug.mod_tap[0][0]);
+        let pan = plug.params.motion.shared.matrix.voice_offset(crate::modulation::T_PAN, 0);
+        assert!(pan > 0.499, "{pan}");
+    }
+
+    #[test]
+    fn scatter_spreads_the_taps_round_the_cycle() {
+        // two taps reading LFO 1 on Pan: Scatter 100 % puts them half a cycle
+        // apart (opposite sides), 0 % together; the whole echo reads tap 1
+        let offsets = |scatter: f32| {
+            let mut plug = plugin(&[0.0, 0.0]);
+            set(&plug, "mx_scatter", scatter);
+            slot(&plug, 0, Rate::hz(1.3), |_| {});
+            route(&plug, 0, "pan", 0.5);
+            render(&mut plug, &vec![(0.0, 0.0); (0.4 * SR) as usize], |_, _| {});
+            let mx = &plug.params.motion.shared.matrix;
+            (mx.voice_offset(crate::modulation::T_PAN, 0), mx.voice_offset(crate::modulation::T_PAN, 1))
+        };
+        let (a, b) = offsets(1.0);
+        assert!(a.abs() > 0.05 && (a + b).abs() < 0.02, "{a} {b}");
+        let (a, b) = offsets(0.0);
+        assert!(a.abs() > 0.05 && (a - b).abs() < 1e-4, "{a} {b}");
+    }
+
+    #[test]
+    fn the_patch_rides_in_presets_and_reaches_the_engine() {
+        // a route made in the editor is in the preset's blob, and a preset's
+        // blob is what the engine plays after loading it
+        use crate::presets::Store;
+        use softsystems_presets::Plugin;
+        let plug = plugin(&[0.0]);
+        route(&plug, 2, "fdbk", -0.25);
+        let blobs = Store::capture_blobs(&plug.params);
+        let r = blobs.mods.as_ref().unwrap().routes.iter().find(|r| r.target == "fdbk").unwrap();
+        assert_eq!((r.source.slot, r.amount), (2, -0.25));
+        let mut other = plugin(&[0.0]);
+        Store::apply_blobs(&other.params, &blobs);
+        set(&other, "feedback", 0.5);
+        render(&mut other, &vec![(0.0, 0.0); 4096], |_, _| {});
+        assert!(other.modu.reaches(crate::modulation::T_FDBK) && !other.modu.reaches(crate::modulation::T_PAN));
     }
 
     #[test]
@@ -3316,10 +3317,21 @@ mod tests {
         let sharpest = |depth: f32| {
             let mut plug = plugin(&[-0.5, 0.7, 0.0]);
             set(&plug, "feedback", 0.6);
-            set(&plug, "motion_shape", 3.0);
-            set(&plug, "motion_rate", 2.0);
-            for id in ["mx_lfo1_pan", "mx_lfo1_gain", "mx_lfo1_cutoff"] {
-                set(&plug, id, depth);
+            slot(&plug, 0, Rate::hz(2.0), |m| {
+                if let Modulator::Curve(c) = m {
+                    c.shape = softsystems_mod::Shape::Square;
+                }
+            });
+            // v2.42's full depth in knob travel: Pan's whole width, Gain's
+            // 24 dB of its 66 (from −12 dB, so it swings −24…0 dB as v2.42's
+            // dip did, its top the still tone's level), Cutoff's 4 octaves
+            if depth != 0.0 {
+                for k in 1..=3 {
+                    set(&plug, &format!("gain_db_{k}"), -12.0);
+                }
+                for (id, a) in [("pan", 0.5), ("gain", 0.18), ("cutoff", 0.3)] {
+                    route(&plug, 0, id, a * depth);
+                }
             }
             set(&plug, "tap_filter_cutoff_1", 2000.0);
             sharpest_bend(&render(&mut plug, &input, |_, _| {}))

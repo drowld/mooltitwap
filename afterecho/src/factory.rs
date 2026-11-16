@@ -9,10 +9,11 @@
 use crate::params::AfterechoParams;
 use crate::presets::{sound, Kind, Preset, Store};
 use nice_plug::prelude::*;
+use softsystems_mod::{Modulator, Rate, Shape, Trigger};
 
 /// Raised whenever the factory set changes (kept in library.json as
 /// `factory_version`).
-pub const FACTORY_VERSION: u32 = 1;
+pub const FACTORY_VERSION: u32 = 2;
 
 /// One factory preset: `changes` are (param id, plain value) from Init.
 struct Recipe {
@@ -55,8 +56,6 @@ const BLOOM: f32 = 1.0;
 const ON_FB: f32 = 1.0;
 const ON_OUT: f32 = 2.0;
 const BP: f32 = 1.0;
-const TRI: f32 = 1.0;
-const GLIDE: f32 = 5.0;
 
 /// The set, A–Z (approved 2026-10-31; every one still to be tuned by ear).
 const RECIPES: &[Recipe] = &[
@@ -109,7 +108,6 @@ const RECIPES: &[Recipe] = &[
             ("tap_filter_cutoff_4", 1200.0), ("tap_filter_cutoff_5", 1200.0), ("tap_filter_cutoff_6", 1200.0),
             ("tap_filter_q_1", 2.0), ("tap_filter_q_2", 2.0), ("tap_filter_q_3", 2.0),
             ("tap_filter_q_4", 2.0), ("tap_filter_q_5", 2.0), ("tap_filter_q_6", 2.0),
-            ("motion_shape", GLIDE), ("motion_sync", 1.0), ("motion_div", 2.0), ("mx_lfo1_cutoff", 0.60),
         ],
     },
     Recipe {
@@ -138,7 +136,7 @@ const RECIPES: &[Recipe] = &[
         changes: &[
             ("num_taps_active", 5.0), ("spacing_mode", EUCLID), ("euclid_steps", 16.0),
             ("sync_mode", SYNC), ("base_time_l", T_1_16), ("feedback", 0.60),
-            ("crossfeed_mode", PING), ("crossfeed", 1.0), ("motion_sync", 1.0), ("mx_lfo1_pan", 0.60), ("duck", 6.0), ("dry_wet", 0.35),
+            ("crossfeed_mode", PING), ("crossfeed", 1.0), ("duck", 6.0), ("dry_wet", 0.35),
         ],
     },
     Recipe {
@@ -222,9 +220,21 @@ const RECIPES: &[Recipe] = &[
         notes: "A slow wave of pan through the taps.",
         changes: &[
             ("num_taps_active", 6.0), ("base_time_l", T_150MS), ("feedback", 0.40),
-            ("motion_shape", TRI), ("motion_rate", 0.7), ("motion_scatter", 1.0), ("mx_lfo1_pan", 0.80),
+            ("mx_scatter", 1.0),
         ],
     },
+];
+
+/// Motion in the recipes that move (beta pass 8, on the shared crate): LFO 1's shape and
+/// rate, and its routes as (slot, target id, amount: a share of the knob's travel).
+/// v2.42's depths carried over by reach: Pan's knob is two wide, so v2.42's ±0.6 is 0.3 of
+/// its travel; Cutoff's ±2.4 octaves round 1.2 kHz is about 0.2 of its skewed travel
+/// (170 Hz to 4.6 kHz).
+type MotionRecipe = (&'static str, Shape, Rate, &'static [(u16, &'static str, f32)]);
+const MOTION: &[MotionRecipe] = &[
+    ("Filter Drift", Shape::Glide, Rate::bars(2.0), &[(0, "cutoff", 0.20)]),
+    ("Ping Garden", Shape::Sine, Rate::bars(1.0), &[(0, "pan", 0.30)]),
+    ("Wobble Pan", Shape::Triangle, Rate::hz(0.7), &[(0, "pan", 0.40)]),
 ];
 
 /// The factory presets, built from Init plus each recipe's changes.
@@ -244,6 +254,22 @@ fn build(r: &Recipe) -> Preset {
             unsafe { ptr._internal_set_normalized_value(ptr.preview_normalized(*plain)) };
         } else {
             debug_assert!(false, "factory preset {} names an unknown param {id}", r.name);
+        }
+    }
+    if let Some((_, shape, rate, routes)) = MOTION.iter().find(|m| m.0 == r.name) {
+        let mut g = p.motion.patch.lock().unwrap_or_else(|e| e.into_inner());
+        if let Modulator::Curve(c) = &mut g.modulators[0] {
+            c.shape = *shape;
+            c.clock.rate = *rate;
+            c.clock.trigger = if rate.unit.is_tempo() { Trigger::Sync } else { Trigger::Free };
+        }
+        for &(slot, target, amount) in routes.iter() {
+            g.routes.set(slot, target, amount, crate::modulation::CAPACITY);
+        }
+        // the rate's value is a host param (its position in the unit)
+        if let Some((_, ptr, _)) = map.iter().find(|(pid, _, _)| pid == "mod1_rate") {
+            // SAFETY: as above
+            unsafe { ptr._internal_set_normalized_value(ptr.preview_normalized(rate.position())) };
         }
     }
     let mut pr = Preset::new::<Store>(r.name, sound(&p), Kind::Factory);
@@ -335,7 +361,11 @@ mod tests {
         assert_eq!((read("Haas Wide").taps[0].pan.value(), read("Haas Wide").taps[1].pan.value()), (-1.0, 1.0));
         assert!((read("Swing Shuffle").swing.value() - 0.66).abs() < 1e-4);
         assert_eq!(read("Swell Duck").duck.value(), 12.0);
-        assert!(read("Wobble Pan").mx_lfo1.pan.value() > 0.79);
+        // Motion's routes and LFO 1 travel in the preset's blob
+        let pan = |n: &str| get(n).blobs.mods.as_ref().and_then(|m| m.routes.iter().find(|r| r.target == "pan").map(|r| r.amount));
+        assert_eq!(pan("Wobble Pan"), Some(0.40));
+        assert_eq!(pan("Ping Garden"), Some(0.30));
+        assert!((read("Wobble Pan").motion.scatter.value() - 1.0).abs() < 1e-6);
         let drift = read("Filter Drift");
         assert_eq!(drift.taps[5].filter_type.value(), crate::params::FilterType::BandPass);
         assert!((drift.taps[5].filter_q.value() - 2.0).abs() < 0.01);

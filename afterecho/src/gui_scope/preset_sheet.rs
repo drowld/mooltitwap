@@ -110,13 +110,13 @@ fn summary(p: &crate::presets::Preset) -> Vec<SummaryLine> {
     }
     let lines = PROBE.with(|q| {
         crate::presets::load_into(q, &p.values);
-        summary_lines(q)
+        summary_lines(q, p.blobs.mods.as_ref())
     });
     let line = |a: &[String]| vec![(a.join(" · "), None)];
     vec![line(&lines[..3]), line(&lines[3..])]
 }
 
-fn summary_lines(q: &AfterechoParams) -> Vec<String> {
+fn summary_lines(q: &AfterechoParams, mods: Option<&softsystems_mod::Patch>) -> Vec<String> {
     let taps = q.num_taps_active.value();
     let spacing = match q.spacing_mode.value() {
         SpacingMode::Linear => "Lin".to_string(),
@@ -161,16 +161,23 @@ fn summary_lines(q: &AfterechoParams) -> Vec<String> {
     }
     let tone = crate::params::tone_text(q.loop_tone.value());
     let colour = if colour.is_empty() { format!("Tone {tone} · no colour") } else { format!("Tone {tone} · {}", colour.join(", ")) };
-    // Motion: each routed source and what it moves, the first two in full
-    let routes: Vec<String> = q
-        .mx_rows()
-        .iter()
-        .enumerate()
-        .filter_map(|(r, row)| {
-            let to: Vec<&str> = row.cells().iter().enumerate().filter(|(_, c)| c.value().abs() > 1e-4).map(|(t, _)| crate::matrix::TGT_NAMES[t]).collect();
-            (!to.is_empty()).then(|| format!("{} → {}", crate::matrix::SRC_NAMES[r], to.join(", ")))
+    // Motion: each routed slot and what it moves, the first two in full
+    let routes: Vec<String> = mods
+        .map(|patch| {
+            (0..crate::modulation::N_SLOTS)
+                .filter_map(|slot| {
+                    let to: Vec<&str> = patch
+                        .routes
+                        .iter()
+                        .filter(|r| r.source.slot as usize == slot && r.amount != 0.0)
+                        .filter_map(|r| crate::modulation::TGT_IDS.iter().position(|id| *id == r.target))
+                        .map(|t| crate::modulation::TGT_NAMES[t])
+                        .collect();
+                    (!to.is_empty()).then(|| format!("{} → {}", super::motion_tab::slot_name(patch, slot), to.join(", ")))
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     let motion = match routes.len() {
         0 => "No motion".to_string(),
         1 | 2 => format!("Motion · {}", routes.join(" · ")),
@@ -317,9 +324,10 @@ mod tests {
         let q = AfterechoParams::default();
         let pg = crate::factory::factory_presets().into_iter().find(|p| p.name == "Ping Garden").unwrap();
         crate::presets::load_into(&q, &pg.values);
-        let lines = summary_lines(&q);
+        let lines = summary_lines(&q, pg.blobs.mods.as_ref());
         assert_eq!(lines.len(), 6);
         assert!(lines[0].starts_with("5 taps"), "{lines:?}");
         assert!(lines[2].starts_with("Ping"), "{lines:?}");
+        assert_eq!(lines[4], "Motion · LFO 1 → Pan", "{lines:?}");
     }
 }

@@ -34,7 +34,7 @@ softsystems-presets = { path = "../../Dev/nice-plug/crates/softsystems-presets" 
 # The Soft Systems look: tokens, Hanken, controls, the ☰ panel, the preset sheet.
 # The licence section comes once the licence is wired.
 softsystems-ui = { path = "../../Dev/nice-plug/crates/softsystems-ui", default-features = false, features = ["presets", "mod", "licence"] }
-softsystems-mod = { path = "../../Dev/nice-plug/crates/softsystems-mod" }
+softsystems-mod = { path = "../../Dev/nice-plug/crates/softsystems-mod", features = ["params"] }
 # The licence check and the demo gate (nice-plug docs/licence-crate.md).
 softsystems-licence = { path = "../../Dev/nice-plug/crates/softsystems-licence" }
 softsystems-fx = { path = "../../Dev/nice-plug/crates/softsystems-fx", features = ["filter"] }

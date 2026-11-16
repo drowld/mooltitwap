@@ -2,6 +2,35 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-15 · Motion on the shared modulation crate (beta pass 8)
+
+Following the owner's answers (2026-11-13/14): six fixed slots (LFO 1–3, Follow, Step 1–2), each
+switchable from its editor's name between LFO, Steps and Follow; the taps as read-heads; amounts by
+the crate's rule; layout A. v2.42's own matrix (`matrix.rs`, `motion.rs`, 6 × 10 hidden cell
+params, Amount and Polarity) is gone: the slots' continuous settings are the crate's host params
+("Mod 1 Rate"…), and the kinds, shapes, steps and routes are a `Patch` saved with the session and
+in presets as the "mod" blob. No compatibility with v2.42 sessions (pass 1's rule).
+Decided here, cheap to change:
+- **Read-heads:** every slot is per voice, one voice per tap; one Scatter knob (0–100 %, default
+  50 %) puts tap *i* of *n* `Scatter · i/n` of a cycle along, for every slot (v2.42 had a Scatter
+  per LFO and Step). The six whole-echo targets read tap 1, which sits at the cycle's start.
+- **The crate's rule changes three behaviours:** a Gain route now moves both ways within the
+  knob (up to its +6 dB), where v2.42's only dipped; Follow is unipolar (it adds as you play, and
+  sits on the knob in silence), where v2.42's swung below the knob in silence; Colour has no knob,
+  so its base is ×1 and a route scales every colour's amount ×0..×2.
+- **Steps glide by default** (Slew on, 10 ms), standing for v2.43's Glide 10 %: with Slew off the
+  crate's 0.67 ms edge plus the taps' 5 ms glides bend a filtered tone 1.5× more sharply than a
+  sine LFO does (measured), where v2.43's Glide 0 still had ~3 ms.
+- **Every LFO starts at 1 Hz** (v2.42: 0.5, 0.25, 1 Hz): a rate is a host param whose default is
+  its kind's, so slots of one kind can't start at different rates. Shapes still differ (sine,
+  triangle, glide).
+- **Names:** the crate's, with its curves called "LFO" (owner); Steps keep the crate's "Steps 1".
+- **Depth and Time** (the crate's globals) replace Amount and Polarity, in the Routes sheet's
+  header.
+- **Factory presets** (FACTORY_VERSION 2): Filter Drift, Ping Garden and Wobble Pan rewritten onto
+  the patch at v2.42's reach (Pan 0.3 / 0.4 of the knob, Cutoff 0.2); not heard.
+Rejected: keeping Afterecho's own engine beside the crate (two modulation systems to keep alike).
+
 ## 2026-11-14 · A "Dub" Colour tab, from Cumulus's Dub Delay (owner)
 
 The owner agreed (2026-11-14) to give Afterecho a fourth Colour tab, **Dub**, always in the

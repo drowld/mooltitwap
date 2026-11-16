@@ -18,9 +18,7 @@ use std::sync::Arc;
 
 use crate::gui::{gain_db_to_pos, pos_to_gain_db, EditorState, VizData};
 use crate::bounce;
-use crate::matrix;
-use crate::motion;
-use crate::params::{ChannelMode, CrossfeedMode, FilterSlope, FilterType, MotionShape, AfterechoParams, SpacingMode, SyncMode, TapParams, NUM_TAPS, REPEATS_LOOP};
+use crate::params::{ChannelMode, CrossfeedMode, FilterSlope, FilterType, AfterechoParams, SpacingMode, SyncMode, TapParams, NUM_TAPS, REPEATS_LOOP};
 use crate::topology;
 use crate::ui::epo;
 use crate::ui::theme::{self, G, INK, INK2, INSET, PANEL, PAPER, SOFT};
@@ -29,6 +27,7 @@ use softsystems_ui::options::{self, Env, Product, Zoom};
 use softsystems_ui::tokens::{accents, presets as ss_presets, Accent, CustomAccent};
 use softsystems_ui::{Appearance, Theme};
 
+mod motion_tab;
 mod preset_sheet;
 
 /// Element sizes (logical px), the same on every page shape — Tide's, so the
@@ -202,9 +201,9 @@ pub struct ScopeState {
     lane_back: usize,
     /// The tap the Tap tab opens on when nothing is selected.
     last_tap: usize,
-    /// The Motion tab's source being edited (`matrix::SRC_NAMES`).
-    mx_src: usize,
-    /// Preview: route a few sources on the first frame, to see the matrix.
+    /// The Motion tab: the open slot, its editors' state, the Routes sheet.
+    motion: motion_tab::MotionUi,
+    /// Preview: route a few slots on the first frame, to see the matrix.
     mx_demo: bool,
     /// Colour card tab: 0 Diffuse · 1 Tape · 2 Saturate.
     colour_tab: usize,
@@ -227,6 +226,8 @@ pub struct ScopeState {
     pat_demo: bool,
     /// The preset browser's state (the loaded preset, Try, the sheet's view).
     pub(crate) presets: preset_sheet::PresetUi,
+    /// Preview only (`nobeta`): the beta pop-up isn't drawn, to see the page under it.
+    no_beta: bool,
 }
 
 /// The pattern menu's shapes: where each tap sits between the range's ends.
@@ -355,15 +356,17 @@ pub fn frame(
                         "tap" => sc.lane_tab = 2,
                         "motion" => sc.lane_tab = 1,
                         "mxdemo" => (sc.lane_tab, sc.mx_demo) = (1, true),
-                        "step" => sc.mx_src = matrix::STEP,
-                        "step2" => sc.mx_src = matrix::STEP + 1,
-                        "follow" => sc.mx_src = matrix::FOLLOW,
+                        "step" => (sc.lane_tab, sc.motion.sel) = (1, 4),
+                        "step2" => (sc.lane_tab, sc.motion.sel) = (1, 5),
+                        "follow" => (sc.lane_tab, sc.motion.sel) = (1, 3),
+                        "routes" => (sc.lane_tab, sc.motion.routes) = (1, true),
                         "time" => sc.time_view = true,
                         "presets" => open_presets = true,
                         "saveas" => (open_presets, sc.presets.preview) = (true, 1),
                         "trying" => (open_presets, sc.presets.preview) = (true, 2),
                         "deleting" => (open_presets, sc.presets.preview) = (true, 3),
                         "light" => sc.look.dark = false,
+                        "nobeta" => sc.no_beta = true,
                         "tape" => sc.colour_tab = 1,
                         _ => {
                             if let Some(n) = t.strip_prefix("sel").and_then(|n| n.parse::<usize>().ok()) {
@@ -421,7 +424,9 @@ pub fn frame(
     // the beta's pop-up over the page; its Activate opens the ☰ panel on Licence
     let page_rect = Rect::from_min_size(o, Vec2::new(lay.w, lay.h + st.scope.banner_h) * s);
     let sc = &mut st.scope;
-    sc.beta.overlay(ui, page_rect, beta.as_ref(), &PRODUCT, &mut sc.options, ui.id().with("sc_beta"));
+    if !sc.no_beta {
+        sc.beta.overlay(ui, page_rect, beta.as_ref(), &PRODUCT, &mut sc.options, ui.id().with("sc_beta"));
+    }
     let lic = st.scope.options.is_open().then_some(lic);
     options_panel(ui, o, s, lay, params, setter, &mut st.scope, egui_state, zoom, licence, lic);
     ui.ctx().request_repaint();
@@ -452,8 +457,16 @@ fn page(
     if presets_open {
         preset_sheet::sheet(ui, o, s, l, params, setter, st);
     } else {
-        picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
-        lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
+        if std::mem::take(&mut st.scope.mx_demo) {
+            mx_demo(params);
+        }
+        // Motion's Routes sheet covers the picture and the lane
+        if st.scope.motion.routes {
+            motion_tab::routes_sheet(ui, o, s, l, params, setter, &mut st.scope);
+        } else {
+            picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
+            lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
+        }
         time_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
         colour_card(ui, o, s, l, params, setter, &mut st.scope);
         output_card(ui, o, s, l, params, setter, &mut st.scope.focus);
@@ -1684,7 +1697,7 @@ fn lane(
             text(&p, o + Vec2::new(x + w - 14.0, y + 20.0) * s, Align2::RIGHT_CENTER, &echo_readout(&viz), 12.0, s, INK2());
             echo(ui, curves, s, params, setter, &mut sc.focus, &viz, tempo);
         }
-        1 => motion_panel(ui, o, s, l, params, setter, sc),
+        1 => motion_tab::motion_panel(ui, o, s, l, params, setter, sc),
         _ => {
             let mut t = sc.sel.unwrap_or(shown).min(n - 1);
             // ‹ Tap 3 of 8 › steps through the live taps, wrapping.
@@ -1802,51 +1815,6 @@ fn stepper_cell(
     text(p, val, Align2::CENTER_CENTER, sub, 11.0, s, SOFT());
 }
 
-/// The Motion tab (v2.42), the whole lane: the sources across the top (and
-/// down the grid's side), the picked one's controls on the left, the matrix
-/// on the right. The picture shows the taps moving.
-fn motion_panel(
-    ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState,
-) {
-    let (x, y, w, h) = l.lane;
-    if std::mem::take(&mut sc.mx_demo) {
-        mx_demo(params, setter);
-    }
-    let src = sc.mx_src.min(matrix::SOURCES - 1);
-    // Amount and Polarity scale every route; the sources sit beside the tabs
-    // where there's room for them (the grid's row names pick them too).
-    let pills = r(o, s, x + w - 14.0 - 168.0, y + 7.0, 168.0, 26.0);
-    if let Some(i) = seg(ui, r(o, s, x + 232.0, y + 7.0, 372.0, 26.0), &matrix::SRC_NAMES, src, "sc_mx_src", true) {
-        sc.mx_src = i;
-    }
-    let half = Vec2::new(pills.width() * 0.5 - 4.0 * s, pills.height());
-    pill_drag(ui, Rect::from_min_size(pills.min, half), s, setter, &params.mx_amount, "mx_amount", "Amt", &mut sc.focus);
-    pill_drag(ui, Rect::from_min_size(pills.min + Vec2::new(pills.width() * 0.5 + 4.0 * s, 0.0), half), s, setter, &params.mx_pol, "mx_pol", "Pol", &mut sc.focus);
-
-    let body = r(o, s, x + 14.0, y + 46.0, w - 28.0, h - 52.0);
-    let (ed, grid) = {
-        let ed_w = 302.0 * s;
-        let ed = Rect::from_min_size(body.min, Vec2::new(ed_w, body.height()));
-        let xm = ed.right() + 12.0 * s;
-        rule(ui.painter(), Pos2::new(xm, body.top() + 4.0 * s), Pos2::new(xm, body.bottom() - 4.0 * s), s);
-        (ed, Rect::from_min_max(Pos2::new(xm + 12.0 * s, body.top()), body.max))
-    };
-    match src {
-        0..=2 => lfo_editor(ui, ed, s, params, setter, src, &mut sc.focus),
-        matrix::FOLLOW => {
-            let p = ui.painter();
-            let at = ed.left_top() + Vec2::new(0.0, 14.0 * s);
-            text(p, at, Align2::LEFT_CENTER, "Follow: the input's level", 13.0, s, INK());
-            text(p, at + Vec2::new(0.0, 22.0 * s), Align2::LEFT_CENTER, "Louder moves its routes up, quiet down.", 12.0, s, INK2());
-            text(p, at + Vec2::new(0.0, 40.0 * s), Align2::LEFT_CENTER, "10 ms up, 200 ms down.", 12.0, s, SOFT());
-        }
-        _ => step_editor(ui, ed, s, params, setter, src - matrix::STEP, &mut sc.focus),
-    }
-    if let Some(i) = mx_grid(ui, grid, s, params, setter, src, &mut sc.focus) {
-        sc.mx_src = i;
-    }
-}
-
 /// A small value pill (Amount, Polarity): its name and value; drag it ↕.
 #[allow(clippy::too_many_arguments)]
 fn pill_drag(ui: &mut egui::Ui, rect: Rect, s: f32, setter: &ParamSetter, param: &FloatParam, id: &str, label: &str, focus: &mut Option<String>) {
@@ -1859,265 +1827,36 @@ fn pill_drag(ui: &mut egui::Ui, rect: Rect, s: f32, setter: &ParamSetter, param:
     text(ui.painter(), rect.center(), Align2::CENTER_CENTER, &format!("{label} {v}"), 11.5, s, INK());
 }
 
-/// The LFO shapes in `MotionShape`'s order (Env, the seventh, isn't one), as
-/// the shared modulation crate names and draws them: Ramp is its Saw.
-const LFO_SHAPES: [softsystems_mod::Shape; 6] = {
-    use softsystems_mod::Shape as S;
-    [S::Sine, S::Triangle, S::Saw, S::Square, S::SampleHold, S::Glide]
-};
-
-/// A segment's painter, as `SegItem::Icon` takes it.
-type SegPaint = Box<dyn Fn(&egui::Painter, Rect, Color32)>;
-
-/// A shape's segment: the crate's icon, then its name, from the box the crate
-/// gives (it starts where the list's words do).
-fn shape_item(shape: softsystems_mod::Shape) -> SegPaint {
-    use softsystems_ui::modulation::curve::{shape_icon, shape_name};
-    Box::new(move |p, r, col| {
-        let icon = Rect::from_min_size(r.min, Vec2::new(r.height() * 1.6, r.height()));
-        shape_icon(p, icon, shape, col);
-        let at = Pos2::new(icon.right() + r.height() * 0.6, r.center().y);
-        softsystems_ui::paint::text(p, at, Align2::LEFT_CENTER, shape_name(shape), softsystems_ui::tokens::TXT, col);
-    })
-}
-
-/// An LFO's controls: its shape, the wave, Rate (Hz, or a note value when
-/// synced), Free / Sync and Scatter.
-#[allow(clippy::too_many_arguments)]
-fn lfo_editor(
-    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, k: usize,
-    focus: &mut Option<String>,
-) {
-    let lfo = params.lfos()[k];
-    let prefix = if k == 0 { "motion".to_string() } else { format!("lfo{}", k + 1) };
-    let id = |what: &str| format!("{prefix}_{what}");
-    let cur = enum_index(&lfo.shape, 7);
-    let (list, wave, cells) = {
-        let list = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(108.0 * s, 6.0 * 22.0 * s));
-        let right = Rect::from_min_max(Pos2::new(list.right() + 14.0 * s, ed.top()), ed.max);
-        let wave = Rect::from_min_size(right.min + Vec2::new(0.0, 2.0 * s), Vec2::new(right.width(), 52.0 * s));
-        let row = Rect::from_min_max(Pos2::new(right.left(), wave.bottom() + 4.0 * s), right.max);
-        let c = |col| cell_at(row, 3, 1, 0, col, 1, s);
-        (list, wave, [c(0), c(1), c(2)])
-    };
-    // every shape in view, each its icon and name (owner, 2026-11-07)
-    let draw: Vec<SegPaint> = LFO_SHAPES.iter().map(|&sh| shape_item(sh)).collect();
-    let items: Vec<controls::SegItem> = draw.iter().map(|f| controls::SegItem::Icon(f.as_ref())).collect();
-    let pick = controls::seg_v_items(ui, list, &items, cur.min(6), ui.id().with(("seg", format!("sc_lfo_shape{k}"))), &[]).filter(|&i| i != cur.min(6));
-    if let Some(i) = pick {
-        set_norm(setter, &lfo.shape, i as f32 / 6.0);
-        *focus = Some(id("shape"));
-    }
-    {
-        let p = ui.painter();
-        p.rect_filled(wave, g::R_CTL * s, INSET());
-        let inner = wave.shrink2(Vec2::new(8.0, 8.0) * s);
-        p.line_segment([inner.left_center(), inner.right_center()], Stroke::new(1.0 * s, theme::line()));
-        let shape = lfo.shape.value();
-        // random shapes over two cycles, so their steps show
-        let cycles = if matches!(shape, MotionShape::SampleHold | MotionShape::Glide) { 2.0 } else { 1.0 };
-        let pts: Vec<Pos2> = (0..=96)
-            .map(|j| {
-                let f = j as f32 / 96.0;
-                let v = motion::shape_at(shape, (f * cycles) as f64, 0);
-                Pos2::new(inner.left() + f * inner.width(), inner.center().y - v * inner.height() * 0.5)
-            })
-            .collect();
-        p.add(egui::Shape::line(pts, Stroke::new(1.8 * s, theme::accent(k))));
-    }
-    if lfo.sync.value() {
-        knob_cell(ui, cells[0], s, setter, &lfo.div, &id("div"), "Rate", false, true, None, focus);
-    } else {
-        knob_cell(ui, cells[0], s, setter, &lfo.rate, &id("rate"), "Rate", false, true, None, focus);
-    }
-    bool_seg_cell(ui, cells[1], s, setter, &lfo.sync, &id("sync"), "Speed", ["Free", "Sync"], focus);
-    knob_cell(ui, cells[2], s, setter, &lfo.scatter, &id("scatter"), "Scatter", false, true, None, focus);
-}
-
-/// A BoolParam as two underlined choices (off, on), name above.
-#[allow(clippy::too_many_arguments)]
-fn bool_seg_cell(
-    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &BoolParam, id: &str, label: &str,
-    names: [&str; 2], focus: &mut Option<String>,
-) {
-    let (ctl, lab, _) = cell_parts(cell, s);
-    let b = Rect::from_center_size(ctl.center(), Vec2::new((cell.width() - 8.0 * s).min(84.0 * s), g::CTL_H * s));
-    if let Some(i) = seg(ui, b, &names, param.value() as usize, id, true) {
-        setter.begin_set_parameter(param);
-        setter.set_parameter(param, i == 1);
-        setter.end_set_parameter(param);
-        *focus = Some(id.to_string());
-    }
-    text(ui.painter(), lab, Align2::CENTER_CENTER, label, 11.0, s, INK2());
-}
-
-/// A Step's controls: the steps as bars round a centre line (drag across
-/// them to draw; the ones past Length are dimmed), Rate, Free / Sync,
-/// Length, Scatter and Glide. `j`: Step 1 or 2 (0, 1).
-#[allow(clippy::too_many_arguments)]
-fn step_editor(
-    ui: &mut egui::Ui, ed: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, j: usize,
-    focus: &mut Option<String>,
-) {
-    let st = params.steps()[j];
-    let prefix = if j == 0 { "step" } else { "step2" };
-    let id = |what: &str| format!("{prefix}_{what}");
-    let (bars, cells) = {
-        let bars = Rect::from_min_size(ed.min + Vec2::new(0.0, 2.0 * s), Vec2::new(ed.width(), 70.0 * s));
-        let row = Rect::from_min_max(Pos2::new(ed.left(), bars.bottom() + 4.0 * s), ed.max);
-        let c = |col, span| cell_at(row, 6, 1, 0, col, span, s);
-        (bars, [c(0, 1), c(1, 2), c(3, 1), c(4, 1), c(5, 1)])
-    };
-    let p = ui.painter().clone();
-    p.rect_filled(bars, g::R_CTL * s, INSET());
-    let inner = bars.shrink2(Vec2::new(6.0, 6.0) * s);
-    let mid = inner.center().y;
-    p.line_segment([Pos2::new(inner.left(), mid), Pos2::new(inner.right(), mid)], Stroke::new(1.0 * s, theme::line()));
-    let len = st.len.value().clamp(1, 16) as usize;
-    let bw = inner.width() / 16.0;
-    let col = theme::accent(matrix::STEP + j);
-    for i in 0..16 {
-        let v = st.steps[i].v.value();
-        let x0 = inner.left() + i as f32 * bw + 1.5 * s;
-        let top = mid - v.max(0.0) * inner.height() * 0.5;
-        let bot = mid - v.min(0.0) * inner.height() * 0.5;
-        let c = if i < len { col } else { theme::with_alpha(col, 70) };
-        p.rect_filled(Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x0 + bw - 3.0 * s, bot.max(top + 2.0 * s))), 1.5 * s, c);
-    }
-    let d = drag_at(ui, ui.id().with(("sc_step_bars", j)), bars);
-    if let (true, Some(pos)) = (d.pressing, d.pos) {
-        let i = (((pos.x - inner.left()) / bw).floor() as i32).clamp(0, 15) as usize;
-        let v = ((mid - pos.y) / (inner.height() * 0.5)).clamp(-1.0, 1.0);
-        let v = (v * 100.0).round() / 100.0;
-        if (st.steps[i].v.value() - v).abs() > 1e-4 {
-            setter.begin_set_parameter(&st.steps[i].v);
-            setter.set_parameter(&st.steps[i].v, v);
-            setter.end_set_parameter(&st.steps[i].v);
-        }
-        *focus = Some(id(&format!("v_{}", i + 1)));
-    }
-    if st.sync.value() {
-        knob_cell(ui, cells[0], s, setter, &st.div, &id("div"), "Rate", false, true, None, focus);
-    } else {
-        knob_cell(ui, cells[0], s, setter, &st.rate, &id("rate"), "Rate", false, true, None, focus);
-    }
-    bool_seg_cell(ui, cells[1], s, setter, &st.sync, &id("sync"), "Speed", ["Free", "Sync"], focus);
-    knob_cell(ui, cells[2], s, setter, &st.len, &id("len"), "Length", false, true, None, focus);
-    knob_cell(ui, cells[3], s, setter, &st.scatter, &id("scatter"), "Scatter", false, true, None, focus);
-    knob_cell(ui, cells[4], s, setter, &st.glide, &id("glide"), "Glide", false, true, None, focus);
-}
-
-/// The matrix: sources down the side (a click picks one to edit), targets
-/// across — the four that move each tap, then the six that move the whole
-/// echo. Drag a cell ↕ to set its depth; double-click clears it. Returns a
-/// newly picked source.
-#[allow(clippy::too_many_arguments)]
-fn mx_grid(
-    ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, picked: usize,
-    focus: &mut Option<String>,
-) -> Option<usize> {
-    let p = ui.painter().clone();
-    let label_w = 62.0 * s;
-    let head_h = 30.0 * s;
-    let cols = matrix::TARGETS as f32;
-    let cw = (area.width() - label_w) / cols;
-    let rh = ((area.height() - head_h) / matrix::SOURCES as f32).min(24.0 * s);
-    let gx = area.left() + label_w;
-    let mono = params.channel_mode.value() == ChannelMode::Mono;
-    // headings: the two groups, then each target
-    for (t0, n, name) in [(0usize, matrix::TAP_TARGETS, "Each tap"), (matrix::TAP_TARGETS, matrix::TARGETS - matrix::TAP_TARGETS, "Whole echo")] {
-        let (a, b) = (gx + t0 as f32 * cw + 3.0 * s, gx + (t0 + n) as f32 * cw - 3.0 * s);
-        text(&p, Pos2::new((a + b) * 0.5, area.top() + 5.0 * s), Align2::CENTER_CENTER, name, 10.5, s, SOFT());
-        p.line_segment([Pos2::new(a, area.top() + 12.0 * s), Pos2::new(b, area.top() + 12.0 * s)], Stroke::new(1.0 * s, theme::line2()));
-    }
-    for (t, name) in matrix::TGT_NAMES.iter().enumerate() {
-        let col = if t == 0 && mono { theme::with_alpha(INK2(), 90) } else { INK2() };
-        text(&p, Pos2::new(gx + (t as f32 + 0.5) * cw, area.top() + 22.0 * s), Align2::CENTER_CENTER, name, 10.5, s, col);
-    }
-    let xs = gx + matrix::TAP_TARGETS as f32 * cw;
-    rule(&p, Pos2::new(xs, area.top() + 16.0 * s), Pos2::new(xs, area.top() + head_h + rh * matrix::SOURCES as f32), s);
-    let rows = params.mx_rows();
-    let mut pick = None;
-    for (r, row) in rows.iter().enumerate() {
-        let y0 = area.top() + head_h + r as f32 * rh;
-        let lab = Rect::from_min_size(Pos2::new(area.left(), y0), Vec2::new(label_w - 4.0 * s, rh));
-        let on = r == picked;
-        if on {
-            p.rect_filled(Rect::from_min_max(lab.min, Pos2::new(area.right(), lab.bottom())), 4.0 * s, PANEL());
-        }
-        let src_col = theme::accent(r);
-        p.circle_filled(Pos2::new(lab.left() + 7.0 * s, lab.center().y), 3.5 * s, src_col);
-        text(&p, Pos2::new(lab.left() + 16.0 * s, lab.center().y), Align2::LEFT_CENTER, matrix::SRC_NAMES[r], 11.5, s, if on { INK() } else { INK2() });
-        let resp = ui.interact(lab, ui.id().with(("mx_row", r)), Sense::click());
-        if epo::tap_or_click(ui, &resp) {
-            pick = Some(r);
-        }
-        for (t, cell) in row.cells().into_iter().enumerate() {
-            let c = Rect::from_min_size(Pos2::new(gx + t as f32 * cw + 2.0 * s, y0 + 2.0 * s), Vec2::new(cw - 4.0 * s, rh - 4.0 * s));
-            let v = cell.value();
-            if v.abs() > 1e-4 {
-                p.rect_filled(c, 3.0 * s, theme::with_alpha(src_col, 40));
-                mono_text(&p, c.center(), &format!("{:+.0}", v * 100.0), s, readable(src_col, PANEL()));
-            } else {
-                p.rect_filled(c, 3.0 * s, INSET());
-            }
-            let key = ui.id().with(("mx_cell", r, t));
-            let d = drag_at(ui, key, c);
-            if d.double {
-                setter.begin_set_parameter(cell);
-                setter.set_parameter(cell, 0.0);
-                setter.end_set_parameter(cell);
-            } else {
-                let nv = (d.delta.y != 0.0).then(|| (v - d.delta.y / (90.0 * s)).clamp(-1.0, 1.0));
-                gesture_set(ui, key.with("g"), setter, cell, &d, nv.map(|v| (v * 100.0).round() / 100.0));
-                if nv.is_some() {
-                    *focus = Some(format!("{}_{}", MX_PREFIX[r], MX_TGT_IDS[t]));
-                    pick = Some(r);
-                }
-            }
-        }
-    }
-    pick.filter(|&r| r != picked)
-}
-
-/// Param id prefixes of the matrix rows and the cells' ids, in grid order.
-const MX_PREFIX: [&str; matrix::SOURCES] = ["mx_lfo1", "mx_lfo2", "mx_lfo3", "mx_follow", "mx_step", "mx_step2"];
-const MX_TGT_IDS: [&str; matrix::TARGETS] = ["pan", "gain", "cutoff", "reso", "colour", "fdbk", "cross", "tone", "mix", "duck"];
-
-fn mono_text(p: &egui::Painter, at: Pos2, t: &str, s: f32, col: Color32) {
-    mono(p, at, Align2::CENTER_CENTER, t, 11.0, s, col);
-}
-
-/// Preview only: a few routes and steps, so the grid has something to show.
-fn mx_demo(params: &AfterechoParams, setter: &ParamSetter) {
-    let set = |prm: &FloatParam, v: f32| {
-        setter.begin_set_parameter(prm);
-        setter.set_parameter(prm, v);
-        setter.end_set_parameter(prm);
-    };
-    set(&params.mx_lfo1.pan, 0.6);
-    set(&params.mx_lfo1.cutoff, -0.3);
-    set(&params.mx_lfo2.colour, 0.25);
-    set(&params.mx_lfo3.tone, -0.2);
-    set(&params.mx_follow.gain, 0.4);
-    set(&params.mx_follow.duck, 0.5);
-    set(&params.mx_step.fdbk, 0.35);
-    set(&params.mx_step2.cutoff, 0.5);
-    for (i, v) in [0.8, -0.2, 0.4, -0.6, 1.0, 0.0, -0.4, 0.6].into_iter().enumerate() {
-        set(&params.step.steps[i].v, v);
-    }
-}
-
 /// Where Motion has tap `i` right now on `axis` (v2.42): its set value `v`
 /// moved by what the audio thread last reported for that target (0, so `v`
 /// itself, while nothing routes there). Type and Slope don't move.
+/// Preview only (`AFTERECHO_PREVIEW=mxdemo`): a few routes and a stepped pattern, to see the
+/// tiles, the editor and the grid without clicking.
+fn mx_demo(params: &AfterechoParams) {
+    let m = &params.motion;
+    if let Ok(mut g) = m.patch.lock() {
+        for (slot, t, a) in [(0u16, "pan", 0.3), (0, "cutoff", -0.15), (1, "colour", 0.25), (2, "tone", -0.2), (4, "gain", 0.2)] {
+            g.routes.set(slot, t, a, crate::modulation::CAPACITY);
+        }
+        if let softsystems_mod::Modulator::Steps(st) = &mut g.modulators[4] {
+            for (i, v) in st.levels.iter_mut().enumerate() {
+                *v = [1.0, 0.25, 0.6, 0.0, 0.8, 0.4, 1.0, 0.1][i % 8];
+            }
+        }
+    }
+    m.shared.changed();
+}
+
 fn moved_value(params: &AfterechoParams, axis: Axis, i: usize, v: f32) -> f32 {
-    let m = |t: usize| f32::from_bits(params.motion_now[t][i].load(std::sync::atomic::Ordering::Relaxed));
+    use crate::modulation::{T_CUTOFF, T_GAIN, T_PAN, T_RESO};
+    let mx = &params.motion.shared.matrix;
+    let tap = &params.taps[i];
+    let moved = |p: &FloatParam, t: usize| p.preview_plain((p.preview_normalized(v) + mx.voice_offset(t, i)).clamp(0.0, 1.0));
     match axis {
-        Axis::Pan => motion::pan(v, m(0), 1.0),
-        Axis::Gain => matrix::gain_db(v, m(1)),
-        Axis::Cutoff => motion::cutoff(v, m(2), 1.0),
-        Axis::Reso => motion::reso(v, m(3), 1.0),
+        Axis::Pan => moved(&tap.pan, T_PAN),
+        Axis::Gain => moved(&tap.gain_db, T_GAIN),
+        Axis::Cutoff => moved(&tap.filter_cutoff, T_CUTOFF),
+        Axis::Reso => moved(&tap.filter_q, T_RESO),
         Axis::Type | Axis::Slope | Axis::Detune => v,
     }
 }
