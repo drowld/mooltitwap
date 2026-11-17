@@ -15,6 +15,20 @@ use crate::MAX_DELAY_SECONDS;
 pub const WINDOW_W: u32 = 1366;
 pub const WINDOW_H: u32 = 666;
 
+/// A new instance's window: the size last picked in ☰ on this computer (the crate's
+/// `Appearance::size`), else the design size. A saved project replaces it with its own
+/// (`#[persist]`). On iOS the host sizes the view.
+pub fn new_editor_state() -> std::sync::Arc<nice_plug_egui::EguiState> {
+    let z = if cfg!(target_os = "ios") {
+        None
+    } else {
+        softsystems_ui::Appearance::load(&crate::gui_scope::PRODUCT).size
+    };
+    let z = z.unwrap_or(1.0);
+    let (w, h) = ((WINDOW_W as f32 * z).round() as u32, (WINDOW_H as f32 * z).round() as u32);
+    nice_plug_egui::EguiState::from_size(w, h).with_host_resize()
+}
+
 fn read_tempo(tempo_atomic: &Arc<AtomicU32>) -> f32 {
     let t = f32::from_bits(tempo_atomic.load(Ordering::Relaxed));
     if t.is_finite() && t > 1.0 { t } else { 120.0 }

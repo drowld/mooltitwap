@@ -630,7 +630,7 @@ impl Default for AfterechoParams {
         Self {
             // The page follows the host's bounds on iOS and picks its shape
             // there (gui_scope.rs `Shape::pick`).
-            editor_state: EguiState::from_size(crate::gui::WINDOW_W, crate::gui::WINDOW_H).with_host_resize(),
+            editor_state: crate::gui::new_editor_state(),
             preset_session: Arc::new(std::sync::Mutex::new(Default::default())),
             base_time_l: FloatParam::new(
                 "Base Time L",

@@ -139,32 +139,33 @@ fn mono(p: &egui::Painter, pos: Pos2, align: Align2, t: &str, px: f32, s: f32, c
 // State
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The accent picked in ☰ (an index into `ACCENTS`, or `ACCENTS.len()` for the
-/// user's own colour), saved per device beside the shared `appearance.json`.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+/// The accent file Afterecho wrote before the crate kept the accent (until 2026-11-17):
+/// read once into `Appearance::accent`/`custom`, then removed.
+#[derive(serde::Deserialize, Default)]
 #[serde(default)]
-struct AccentPick {
+struct OldAccent {
     on: usize,
     custom: CustomAccent,
 }
 
-impl AccentPick {
+impl OldAccent {
     fn file() -> PathBuf {
         softsystems_ui::appearance::product_dir(&PRODUCT).join("accent.json")
     }
 
-    fn read() -> Option<Self> {
-        let a: Self = serde_json::from_str(&std::fs::read_to_string(Self::file()).ok()?).ok()?;
-        Some(Self { on: a.on.min(ACCENTS.len()), ..a })
+    /// Move an old `accent.json` into `look` (and save it); nothing when there's none.
+    fn import(look: &mut Appearance) {
+        Self::import_at(&Self::file(), &softsystems_ui::appearance::file(&PRODUCT), look);
     }
 
-    fn save(&self) {
-        let path = Self::file();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, s);
+    fn import_at(old_file: &std::path::Path, look_file: &std::path::Path, look: &mut Appearance) {
+        let Some(old) = std::fs::read_to_string(old_file).ok().and_then(|t| serde_json::from_str::<OldAccent>(&t).ok()) else {
+            return;
+        };
+        look.accent = old.on.min(ACCENTS.len()) as u8;
+        look.custom = old.custom;
+        if look.write(look_file).is_ok() {
+            let _ = std::fs::remove_file(old_file);
         }
     }
 }
@@ -178,9 +179,9 @@ fn default_look() -> Appearance {
 #[derive(Default)]
 pub struct ScopeState {
     inited: bool,
-    /// The shared look (theme, palette, text size) and Afterecho's accent.
+    /// Every ☰ view setting (theme, palette, text size, accent, own colour, the size a new
+    /// instance opens at), saved per computer (the crate's `appearance.json`).
     look: Appearance,
-    accent: AccentPick,
     /// A preview run (`AFTERECHO_PREVIEW`): the look is never saved.
     preview: bool,
     /// The ☰ Options panel.
@@ -289,9 +290,9 @@ impl ScopeState {
     /// The look at page zoom `s`: the palette and text size picked in ☰, with
     /// the accent picked there (one of `ACCENTS`, or the user's own colour).
     fn theme(&self, s: f32) -> Theme {
-        match ACCENTS.get(self.accent.on) {
+        match ACCENTS.get(self.look.accent as usize) {
             Some(&accent) => Theme::of(&Product { accent, ..PRODUCT }, &self.look, s),
-            None => Theme::of_custom(&PRODUCT, &self.look, &self.accent.custom, s),
+            None => Theme::of_custom(&PRODUCT, &self.look, &self.look.custom, s),
         }
     }
 
@@ -345,10 +346,9 @@ pub fn frame(
             if sc.preview {
                 // a preview reads the look but never writes it
                 sc.look = Appearance::read(&file).unwrap_or_else(default_look);
-                sc.accent = AccentPick::read().unwrap_or_default();
             } else {
                 sc.look = Appearance::load_or_import(&PRODUCT, || Some(default_look()));
-                sc.accent = AccentPick::read().unwrap_or_default();
+                OldAccent::import(&mut sc.look);
             }
             // Desktop previews, to check a state without clicking to it:
             // AFTERECHO_PREVIEW=bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
@@ -2713,13 +2713,15 @@ fn options_panel(
     let strip = header::strip(Rect::from_min_size(o, Vec2::new(l.w, l.h) * s));
     let sq = header::HEADER_SQ * s;
     let burger = Rect::from_center_size(Pos2::new(strip.left() + sq * 0.5, strip.center().y), Vec2::splat(sq));
-    let mut accent_changed = false;
     let mut reveal = false;
-    let ScopeState { look, accent, options, .. } = sc;
+    // the Accent row edits copies (the panel holds the look); they go back into it below
+    let (mut accent_on, mut custom) = (sc.look.accent as usize, sc.look.custom);
+    let mut accent_changed = false;
+    let ScopeState { look, options, .. } = sc;
     let env = Env { product: &PRODUCT, look, zoom: (!ios).then_some(Zoom { now: zoom, steps: &options::ZOOM_STEPS }), licence: lic };
     let out = options.show(ui, at, burger, env, |rows| {
         let colors: Vec<Color32> = ACCENTS.iter().map(|a| a.get(softsystems_ui::t().dark)).collect();
-        accent_changed = rows.accent("Accent", &colors, &mut accent.on, &mut accent.custom);
+        accent_changed = rows.accent("Accent", &colors, &mut accent_on, &mut custom);
         rows.section("Sound");
         // how detuned taps are shifted (v2.45): saved with the sound
         let clean = params.detune_quality.value() == crate::params::DetuneQuality::Clean;
@@ -2737,14 +2739,18 @@ fn options_panel(
     if let Some(act) = out.licence {
         act.apply(licence);
     }
-    if out.look_changed {
-        sc.save_look();
+    if accent_changed {
+        sc.look.accent = accent_on.min(ACCENTS.len()) as u8;
+        sc.look.custom = custom;
     }
-    if accent_changed && !sc.preview {
-        sc.accent.save();
-    }
+    // a new instance opens at the size last picked (a project reopens at its own)
     if let Some(z) = out.zoom {
         egui_state.set_requested_size(((l.w * z).round() as u32, ((l.h + sc.banner_h) * z).round() as u32));
+        sc.look.size = Some(z);
+    }
+    // every ☰ change is saved as it happens (a host may unload without closing the editor)
+    if out.look_changed || accent_changed || out.zoom.is_some() {
+        sc.save_look();
     }
     if reveal {
         reveal_presets();
@@ -2860,6 +2866,27 @@ mod tests {
             let sl = header::slots(&h, title.right(), &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W });
             assert!(sl.fits, "{sl:?}");
         }
+    }
+
+    #[test]
+    fn the_old_accent_file_moves_into_the_look_once() {
+        let dir = std::env::temp_dir().join(format!("afterecho-accent-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (old, new) = (dir.join("accent.json"), dir.join("appearance.json"));
+        std::fs::write(&old, r#"{"on": 6, "custom": {"hue": 200.0, "level": 0.4}}"#).unwrap();
+        let mut look = default_look();
+        OldAccent::import_at(&old, &new, &mut look);
+        assert_eq!((look.accent, look.custom.hue, look.custom.level), (6, 200.0, 0.4));
+        assert!(!old.exists(), "the old file goes once it's moved");
+        let saved = Appearance::read(&new).unwrap();
+        assert_eq!((saved.accent, saved.palette), (6, 1));
+        // the custom accent (past the colours) picks the user's own colour
+        assert!(saved.uses_custom(ACCENTS.len()));
+        // no old file: nothing changes
+        let mut again = default_look();
+        OldAccent::import_at(&old, &new, &mut again);
+        assert_eq!(again, default_look());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
