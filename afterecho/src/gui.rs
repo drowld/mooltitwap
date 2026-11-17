@@ -13,7 +13,7 @@ use crate::topology::{self, compute_positions};
 use crate::MAX_DELAY_SECONDS;
 
 pub const WINDOW_W: u32 = 1366;
-pub const WINDOW_H: u32 = 660;
+pub const WINDOW_H: u32 = 666;
 
 fn read_tempo(tempo_atomic: &Arc<AtomicU32>) -> f32 {
     let t = f32::from_bits(tempo_atomic.load(Ordering::Relaxed));

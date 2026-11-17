@@ -3,7 +3,7 @@
 //! follow; its kind menu on its name), Scatter at the right edge; "Routes…" opens the grid
 //! as a sheet over the picture and the lane, with Depth and Time in its header.
 
-use super::{button, knob_cell, pill_drag, r, rule, text, Layout, ScopeState};
+use super::{button, knob_cell, n_active, pill_drag, r, rule, tap_col, text, Layout, ScopeState};
 use crate::modulation::{self, ALLOWED, FOLLOW_INPUTS, N_SLOTS, N_TGT, TGT_IDS};
 use crate::params::AfterechoParams;
 use crate::ui::theme;
@@ -145,12 +145,17 @@ pub(super) fn motion_panel(
     let er = r(o, s, x + 230.0, y + 46.0, 472.0, 194.0);
     let id = ui.id().with(("mo_editor", sel));
     let heads = mon.heads(sel);
+    // each playhead in its tap's colour, as the tap field draws it (owner, 2026-11-16: A).
+    // The shown voices are the taps 0..n in order (`place_heads`); `heads` skips the rest.
+    let n = n_active(params);
+    let head_cols: Vec<egui::Color32> =
+        (0..mon.voices()).filter(|&k| mon.voice_position(sel, k).is_finite()).map(|k| tap_col(k, n)).collect();
     let mut g = patch.modulators[sel];
     let out: EditOut = match &mut g {
         Modulator::Curve(c) => {
             curve::curve_editor(ui, er, c, &mut mu.curves[sel], &CurveIn { head, heads: &heads, value: mon.value(sel) }, id)
         }
-        Modulator::Steps(st) => steps::steps_editor(ui, er, st, &mut mu.steps[sel], &StepsIn { head, heads: &heads }, id),
+        Modulator::Steps(st) => steps::steps_editor(ui, er, st, &mut mu.steps[sel], &StepsIn { head, heads: &heads, head_cols: &head_cols }, id),
         Modulator::Follow(f) => follow::follower_view(
             ui,
             er,

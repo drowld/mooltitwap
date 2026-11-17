@@ -195,8 +195,8 @@ fn summary_lines(q: &AfterechoParams, mods: Option<&softsystems_mod::Patch>) -> 
 
 /// The header's preset box, centred: ‹ name › with its state under the name.
 /// The name opens the sheet; ‹ › load the previous / next preset.
-pub(super) fn preset_box(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, st: &mut EditorState) {
-    let pb = r(o, s, (l.w - l.preset_w) * 0.5, g::HEAD_Y, l.preset_w, g::HEAD_H);
+/// The preset box in `pb` (the header's preset slot).
+pub(super) fn preset_box(ui: &mut egui::Ui, pb: Rect, params: &Arc<AfterechoParams>, setter: &ParamSetter, st: &mut EditorState) {
     let pu = &mut st.scope.presets;
     pu.sync_session(params, ui.ctx().cumulative_frame_nr());
     let header = pu.session.header(pu.edited);

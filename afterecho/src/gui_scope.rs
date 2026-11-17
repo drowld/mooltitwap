@@ -23,6 +23,7 @@ use crate::topology;
 use crate::ui::epo;
 use crate::ui::theme::{self, G, INK, INK2, INSET, PANEL, PAPER, SOFT};
 use softsystems_ui::controls;
+use softsystems_ui::header;
 use softsystems_ui::options::{self, Env, Product, Zoom};
 use softsystems_ui::tokens::{accents, presets as ss_presets, Accent, CustomAccent};
 use softsystems_ui::{Appearance, Theme};
@@ -34,7 +35,7 @@ mod preset_sheet;
 /// plug-ins match.
 pub(crate) mod g {
     pub const HEAD_Y: f32 = softsystems_ui::tokens::PAGE_MARGIN;
-    pub const HEAD_H: f32 = 38.0;
+    pub const HEAD_H: f32 = softsystems_ui::header::HEADER_H;
     pub const R_CARD: f32 = softsystems_ui::tokens::R_CARD;
     pub const R_CTL: f32 = softsystems_ui::tokens::R_CTL;
     /// A control cell: its name, the control band, then its value. A knob
@@ -64,9 +65,6 @@ pub struct Layout {
     time: (f32, f32),
     colour: (f32, f32),
     output: (f32, f32),
-    /// Header: channel-mode tabs width, preset box width (it's centred).
-    tabs_w: f32,
-    preset_w: f32,
 }
 
 /// The one page, on desktop and in iPad host panels (owner, 2026-11-09:
@@ -80,24 +78,23 @@ const LAYOUT: Layout = {
     const GAP: f32 = softsystems_ui::tokens::BLOCK_GAP;
     const W: f32 = 1366.0;
     const LEFT_W: f32 = 806.0;
-    const TOP: f32 = M + g::HEAD_H + GAP; // 66: the first row of cards
+    const TOP: f32 = M + g::HEAD_H + GAP; // 72: the first row of cards
     const PIC_H: f32 = 320.0;
-    const LANE_Y: f32 = TOP + PIC_H + GAP; // 398
+    const LANE_Y: f32 = TOP + PIC_H + GAP; // 404
+    const LANE_H: f32 = 246.0;
     const COLOUR_H: f32 = 117.0;
     Layout {
     w: W,
-    h: 660.0,
+    h: LANE_Y + LANE_H + M, // 666
     pad: M,
     // the field ends with the Time card, the lane starts with Colour
     picture: (M, TOP, LEFT_W, PIC_H),
-    lane: (M, LANE_Y, LEFT_W, 246.0),
+    lane: (M, LANE_Y, LEFT_W, LANE_H),
     right_x: M + LEFT_W + GAP, // 834
     right_w: W - (M + LEFT_W + GAP) - M, // 516
     time: (TOP, PIC_H),
     colour: (LANE_Y, COLOUR_H),
-    output: (LANE_Y + COLOUR_H + GAP, 117.0), // 527
-    tabs_w: 220.0,
-    preset_w: 270.0,
+    output: (LANE_Y + COLOUR_H + GAP, 117.0), // 533
     }
 };
 
@@ -564,18 +561,6 @@ fn button(ui: &mut egui::Ui, rect: Rect, label: &str, on: bool, salt: &str) -> b
     controls::chip(ui, rect, label, on, ui.id().with(("btn", salt)))
 }
 
-/// The frame a chip has, for boxes that draw their own content (the light/dark
-/// icon, the drag readouts): the card colour with an outline, or `on`'s fill.
-fn outline(p: &egui::Painter, rect: Rect, on: bool, s: f32) {
-    let c = softsystems_ui::t().c;
-    if on {
-        p.rect_filled(rect, g::R_CTL * s, c.on);
-    } else {
-        p.rect_filled(rect, g::R_CTL * s, c.panel);
-        p.rect_stroke(rect, g::R_CTL * s, Stroke::new(1.0, c.line2), egui::StrokeKind::Inside);
-    }
-}
-
 /// Split a cell into (control row, name centre, value centre). The name sits
 /// above the control and the value below it, so the name stays readable while
 /// a finger is on the control.
@@ -795,65 +780,55 @@ fn paint_diamond(p: &egui::Painter, c: Pos2, rad: f32, stroke: Stroke) {
 // Header: ☰ · wordmark · channel modes · preset · A/B · light/dark
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The right items' widths, left to right: Clear, Freeze, A/B.
+const HEAD_RIGHT: [f32; 3] = [72.0, 96.0, 80.0];
+/// The channel modes' width.
+const HEAD_TABS: f32 = 220.0;
+
 #[allow(clippy::too_many_arguments)]
 fn header(
     ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter,
     st: &mut EditorState, beta: Option<&softsystems_ui::beta::BetaView>,
 ) {
-    let (y, h) = (g::HEAD_Y, g::HEAD_H);
-
-    // ☰ settings
-    let hb = r(o, s, l.pad, y, 38.0, h);
-    st.scope.options.button(ui, hb, ui.id().with("sc_hamb"));
-
-    // the title, every plug-in's (softsystems-ui: lower case, the accent's square), then
-    // the beta's badge after it
-    let at = o + Vec2::new(l.pad + 52.0, y + h * 0.5) * s;
-    let name = softsystems_ui::paint::wordmark(ui.painter(), at, PRODUCT.name);
-    let badge = st.scope.beta.badge(ui, name.right_center() + Vec2::new(10.0 * s, 0.0), beta, ui.id().with("sc_beta"));
-    // the channel modes start after them, giving up width rather than moving the centred
-    // preset box
-    let after = (name.right().max(badge.right()) - o.x) / s + 16.0;
-    let tabs_x = (l.pad + 176.0).max(after);
-    let tabs_w = l.tabs_w.min((l.w - l.preset_w) * 0.5 - 16.0 - tabs_x);
+    // the crate's header: ☰, the title and the theme button, then the slots
+    let window = Rect::from_min_size(o, Vec2::new(l.w, l.h) * s);
+    let h = header::head(ui, window, PRODUCT.name, st.scope.options.is_open(), ui.id().with("sc_head"));
+    if h.menu {
+        let open = !st.scope.options.is_open();
+        st.scope.options.set_open(open);
+    }
+    if h.theme {
+        st.scope.look.toggle_dark();
+        st.scope.save_look();
+    }
+    let badge = st.scope.beta.badge(ui, h.badge_at(), beta, ui.id().with("sc_beta"));
+    let after = h.title.right().max(badge.right());
+    let sl = header::slots(&h, after, &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W });
 
     // channel modes
     let cm = enum_index(&params.channel_mode, 3);
-    if let Some(i) = seg(ui, r(o, s, tabs_x, y, tabs_w, h), &["Stereo", "M/S", "Mono"], cm, "sc_chan", true) {
+    if let Some(i) = seg(ui, sl.left, &["Stereo", "M/S", "Mono"], cm, "sc_chan", true) {
         set_norm(setter, &params.channel_mode, i as f32 / 2.0);
     }
 
-    // preset box, centred on the page: ‹ name ›
-    preset_sheet::preset_box(ui, o, s, l, params, setter, st);
+    // preset box: ‹ name ›
+    preset_sheet::preset_box(ui, sl.preset, params, setter, st);
 
-    // A / B
-    let ab_x = l.w - l.pad - 38.0 - 10.0 - 80.0;
-    if let Some(i) = seg(ui, r(o, s, ab_x, y, 80.0, h), &["A", "B"], st.ab_active as usize, "sc_ab", true) {
-        crate::gui::ab_switch(st, params, setter, i as u8);
+    // Clear (v2.43): empty the delay now — the panic button.
+    if button(ui, sl.right[0], "Clear", false, "sc_clear") {
+        params.clear_request.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-
     // Freeze: a performance switch, so it sits up here in reach whatever the
     // lane shows. Ink when it holds.
     let frozen = params.freeze.value();
-    if button(ui, r(o, s, ab_x - 16.0 - 96.0, y, 96.0, h), "Freeze", frozen, "sc_freeze") {
+    if button(ui, sl.right[1], "Freeze", frozen, "sc_freeze") {
         setter.begin_set_parameter(&params.freeze);
         setter.set_parameter(&params.freeze, !frozen);
         setter.end_set_parameter(&params.freeze);
     }
-    // Clear (v2.43): empty the delay now — the panic button.
-    if button(ui, r(o, s, ab_x - 16.0 - 96.0 - 8.0 - 72.0, y, 72.0, h), "Clear", false, "sc_clear") {
-        params.clear_request.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    // light / dark
-    let tb = r(o, s, l.w - l.pad - 38.0, y, 38.0, h);
-    let tresp = ui.interact(tb, ui.id().with("sc_theme"), Sense::click());
-    outline(ui.painter(), tb, false, s);
-    let col = if tresp.hovered() { INK() } else { INK2() };
-    softsystems_ui::paint::theme_icon(ui.painter(), tb.center(), col);
-    if epo::tap_or_click(ui, &tresp) {
-        st.scope.look.toggle_dark();
-        st.scope.save_look();
+    // A / B
+    if let Some(i) = seg(ui, sl.right[2], &["A", "B"], st.ab_active as usize, "sc_ab", true) {
+        crate::gui::ab_switch(st, params, setter, i as u8);
     }
 }
 
@@ -2733,7 +2708,10 @@ fn options_panel(
 ) {
     let ios = cfg!(target_os = "ios");
     let at = o + Vec2::new(l.pad, g::HEAD_Y + g::HEAD_H + 8.0) * s;
-    let burger = r(o, s, l.pad, g::HEAD_Y, 38.0, g::HEAD_H);
+    // the ☰ button header::head drew: the panel hangs from it
+    let strip = header::strip(Rect::from_min_size(o, Vec2::new(l.w, l.h) * s));
+    let sq = header::HEADER_SQ * s;
+    let burger = Rect::from_center_size(Pos2::new(strip.left() + sq * 0.5, strip.center().y), Vec2::splat(sq));
     let mut accent_changed = false;
     let mut reveal = false;
     let ScopeState { look, accent, options, .. } = sc;
@@ -2863,12 +2841,23 @@ mod tests {
             assert!(fits(l.colour.1 - 41.0, 1.0) && fits(l.output.1 - 38.0, 1.0));
             let (lane_h, ctl_rows, ctl_h, tap_h) = (l.lane.3, 2.0, l.lane.3 - 48.0, l.lane.3 - 48.0);
             assert!(fits(ctl_h, ctl_rows) && fits(tap_h, 2.0), "lane {lane_h}, {}×{}", l.w, l.h);
-            // header: tabs end before the preset box, which ends before A/B
-            let tabs_end = l.pad + 176.0 + l.tabs_w;
-            let preset = ((l.w - l.preset_w) * 0.5, (l.w + l.preset_w) * 0.5);
-            // … and before Clear, Freeze and A/B
-            let ab_x = l.w - l.pad - 38.0 - 10.0 - 80.0;
-            assert!(tabs_end < preset.0 && preset.1 < ab_x - 16.0 - 96.0 - 8.0 - 72.0);
+            // header: the channel modes, the preset box and Clear · Freeze · A/B all get their
+            // width, with a title and a beta badge as wide as they come (about 190 px)
+            let window = Rect::from_min_size(Pos2::ZERO, Vec2::new(l.w, l.h));
+            let strip = header::strip(window);
+            let sq = header::HEADER_SQ;
+            let title = Rect::from_min_size(Pos2::new(strip.left() + sq + header::TITLE_GAP, strip.top()), Vec2::new(190.0, 20.0));
+            let h = header::Head {
+                strip,
+                menu_rect: Rect::from_min_size(strip.min, Vec2::splat(sq)),
+                theme_rect: Rect::from_min_size(Pos2::new(strip.right() - sq, strip.top()), Vec2::splat(sq)),
+                title,
+                menu: false,
+                theme: false,
+                window,
+            };
+            let sl = header::slots(&h, title.right(), &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W });
+            assert!(sl.fits, "{sl:?}");
         }
     }
 
