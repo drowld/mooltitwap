@@ -815,13 +815,14 @@ fn header(
     preset_sheet::preset_box(ui, sl.preset, params, setter, st);
 
     // Clear (v2.43): empty the delay now — the panic button.
-    if button(ui, sl.right[0], "Clear", false, "sc_clear") {
+    // the header's chips are bare (owner, 2026-11-17: "Bare, no outline")
+    if header::chip(ui, sl.right[0], "Clear", false, ui.id().with(("btn", "sc_clear"))) {
         params.clear_request.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     // Freeze: a performance switch, so it sits up here in reach whatever the
     // lane shows. Ink when it holds.
     let frozen = params.freeze.value();
-    if button(ui, sl.right[1], "Freeze", frozen, "sc_freeze") {
+    if header::chip(ui, sl.right[1], "Freeze", frozen, ui.id().with(("btn", "sc_freeze"))) {
         setter.begin_set_parameter(&params.freeze);
         setter.set_parameter(&params.freeze, !frozen);
         setter.end_set_parameter(&params.freeze);
