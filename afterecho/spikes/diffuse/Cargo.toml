@@ -1,0 +1,17 @@
+[package]
+name = "diffuse_spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline listening test for Afterecho's Diffuse (Colour). Not part of the plug-in."
+
+# Standalone: NOT a member of the plug-in workspace, so the plug-in's build,
+# Cargo.lock and version are untouched.
+[workspace]
+
+[dependencies]
+realfft = "3.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

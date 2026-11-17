@@ -2,6 +2,72 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-16 · Slope in 6 dB steps; Resonance on one stage
+- **Slope is 6 to 48 dB/oct in 6 dB steps** (owner): exact, from SVFs and a one-pole. Rejected:
+  a continuous Slope. Blending two orders keeps the lower slope; the tilt version works but is an
+  approximation and needs more DSP (`spikes/slope/`). Motion can't sweep Slope smoothly.
+- **Resonance is on the first SVF only**; the other stages run at Q 0.707. Before, every stage
+  took it and the peaks stacked (+48 dB at Q 4 and 48 dB/oct, about +86 at Q 12). At the default
+  Resonance nothing changes. Above it, 24 and 48 dB sound gentler than before. 6 dB has no
+  resonance (a one-pole).
+- **Compatibility:** sessions store the enum's id, so they keep their Slope. Presets stored the
+  index and are moved (`values_format` 2). Host automation already recorded on Slope shifts, which
+  was accepted for the beta.
+
+## 2026-11-16 · Curve on a stepper, Swing on the Euclid ring
+- **Saturate's Curve is the shared stepper**, not a menu (owner agreed): six unordered choices
+  picked by ear, and a drag steps through them while the sound plays. Cross, Mode and Route stay
+  segmented: three choices are all visible and one tap away. Rejected: draggable segmented rows
+  (a crate change for little gain at three choices).
+- **Euclid swings like Lin** (owner): the 1st, 3rd, 5th… tap moves toward the next, and the last
+  toward the first a loop later. Before, only taps on odd steps moved (drum-machine 16th swing),
+  so on-the-beat patterns, the default 8 in 16 among them, didn't swing at all. Rejected: keeping
+  it. Euclid presets with Swing and a tap on an odd step sound different. The ring and the Field
+  view draw it from `topology::compute_positions`.
+- **Continuous Slope: measured, not built** (`spikes/slope/`). It's the owner's call (a param
+  change). The spike also found that Resonance stacks across stages.
+
+## 2026-11-16 · Beta passes 10, 11, 12, 6 and 7 (owner: "do all of those passes")
+
+Built without listening; every choice below is cheap to change and waits for the owner's ears.
+- **Pass 10, routing from the page (Strata's way):** ↗ on a tile arms it (again, or Escape,
+  disarms); a press on a target knob makes its route, a drag sizes it, a tap leaves the crate's
+  drop amount; a tile dragged onto a knob routes there. Target knobs show a dot per route, the
+  halo of their reach and live position (a tap knob shows the shown tap's), and their routes on a
+  right-click. Feedback is now the crate's knob too, keeping its stop at 100 % and its red arc
+  above it; its value text is ink until the crate's `Knob::over` lands. **Colour has dots but no
+  halo:** its route scales the colour amounts, it doesn't move the Amount knob.
+- **Pass 11, one slot moving another:** every slot setting (Rate, Phase, Amount…) is a target,
+  "mod.0.rate", from the editor (armed touch, right-click menu) and in Routes, where its row reads
+  "LFO 1 Rate" (the sheet draws no group headings). The engine takes them; the matrix ignores them.
+  Routes hold up to 156 (`ROUTE_CAP`), and the matrix is that size, since it keeps routes by place.
+  A Rate route's full half-range is the crate's 4 octaves (16× or ÷16).
+- **Pass 12, Dub:** the shared `dub_loop` on every pass of both loops, after Saturate and before
+  Tone; no gain compensation (heavy at 95 % rings and the soft clip holds it). Defaults are the
+  spike's "medium" band and swirl (150 Hz–2.5 kHz, 2 swirls at 600 Hz); Intensity starts at 0
+  (off). Dub fades in over the first tenth of Intensity, so switching it on doesn't jump to its
+  band. The allpasses' sharpness stays Cumulus's 0.4 (no knob). Motion's Colour scales Intensity.
+- **Pass 6, Saturate:** a Curve choice: Classic (today's tanh, the default, so nothing saved
+  changes) and the crate's five, 8× oversampled with their own make-up: Tube, Smooth (the
+  crate's TAPE, renamed so it doesn't read as Colour's Tape tab), Grit, Amp, Transfo. All six
+  stay until the owner picks by ear; then drop the rest. The crate's chain is 20 samples late: in
+  the loops the read takes it back (the cycle holds, tested); on In and Out the echoes land
+  0.4 ms later, not reported to the host (the dry isn't delayed). Release gate unchanged: TUBE
+  and TRANSFO's constants need clearance before a public build.
+- **Pass 7, Diffuse:** today's chain stays, as the spike's numbers advise (the crate's
+  DIFFUSION flutters as a short diffuser; SPACES lands 77–92 ms late in the loop). Not built: a
+  SPACES Room on In/Out as a second character, if the owner wants it after listening.
+
+## 2026-11-16 · Knob stops: Feedback at 100 %, tap Gain at 0 dB
+
+Owner picked the crate's look (UI chat, `Knob::over`): a tick across the track at the stop, the
+pill as an outline only, and a red of its own (`tokens::WARN`) above the stop. Tap Gain gets the
+same stop and red at 0 dB as Feedback at 100 % (owner confirmed 2026-11-16): landing on unity is the
+usual need, and above 0 dB is a boost that can clip. Only a drag obeys the stop; automation and
+presets pass. Rejected: Gain with the red but no stop. Afterecho adopts it once the crate commits
+(branch `claude/ui-detent-pill`); Feedback's own `FB_DETENT` code goes then. Open: on the dark
+FF5A36 accent the crate falls back to ink above the stop, which reads weakly.
+
 ## 2026-11-15 · Motion on the shared modulation crate (beta pass 8)
 
 Following the owner's answers (2026-11-13/14): six fixed slots (LFO 1–3, Follow, Step 1–2), each

@@ -33,7 +33,7 @@ mod preset_sheet;
 /// Element sizes (logical px), the same on every page shape — Tide's, so the
 /// plug-ins match.
 pub(crate) mod g {
-    pub const HEAD_Y: f32 = 16.0;
+    pub const HEAD_Y: f32 = softsystems_ui::tokens::PAGE_MARGIN;
     pub const HEAD_H: f32 = 38.0;
     pub const R_CARD: f32 = softsystems_ui::tokens::R_CARD;
     pub const R_CTL: f32 = softsystems_ui::tokens::R_CTL;
@@ -74,20 +74,31 @@ pub struct Layout {
 /// as tight as Tide's. The shared frame (owner, 2026-11-02): a 16 px page
 /// margin round the outer blocks (the header strip is one) and 12 px between
 /// blocks.
-const LAYOUT: Layout = Layout {
-    w: 1366.0,
+const LAYOUT: Layout = {
+    // the crate's frame: PAGE_MARGIN round the outer blocks, BLOCK_GAP between them
+    const M: f32 = softsystems_ui::tokens::PAGE_MARGIN;
+    const GAP: f32 = softsystems_ui::tokens::BLOCK_GAP;
+    const W: f32 = 1366.0;
+    const LEFT_W: f32 = 806.0;
+    const TOP: f32 = M + g::HEAD_H + GAP; // 66: the first row of cards
+    const PIC_H: f32 = 320.0;
+    const LANE_Y: f32 = TOP + PIC_H + GAP; // 398
+    const COLOUR_H: f32 = 117.0;
+    Layout {
+    w: W,
     h: 660.0,
-    pad: 16.0,
+    pad: M,
     // the field ends with the Time card, the lane starts with Colour
-    picture: (16.0, 66.0, 806.0, 320.0),
-    lane: (16.0, 398.0, 806.0, 246.0),
-    right_x: 834.0,
-    right_w: 516.0,
-    time: (66.0, 320.0),
-    colour: (398.0, 117.0),
-    output: (527.0, 117.0),
+    picture: (M, TOP, LEFT_W, PIC_H),
+    lane: (M, LANE_Y, LEFT_W, 246.0),
+    right_x: M + LEFT_W + GAP, // 834
+    right_w: W - (M + LEFT_W + GAP) - M, // 516
+    time: (TOP, PIC_H),
+    colour: (LANE_Y, COLOUR_H),
+    output: (LANE_Y + COLOUR_H + GAP, 117.0), // 527
     tabs_w: 220.0,
     preset_w: 270.0,
+    }
 };
 
 /// Afterecho, as the shared Soft Systems UI sees it: its own palette (Mono
@@ -105,8 +116,6 @@ pub const PRODUCT: Product = Product {
     support: None,
 };
 
-/// ☰ → Size: the page zooms (desktop; the window follows).
-const ZOOMS: [f32; 5] = [0.75, 1.0, 1.25, 1.5, 2.0];
 
 /// ☰ → Accent: Afterecho's own first, then five of the shared ones; the
 /// user's own colour is the seventh swatch.
@@ -205,6 +214,8 @@ pub struct ScopeState {
     motion: motion_tab::MotionUi,
     /// Preview: route a few slots on the first frame, to see the matrix.
     mx_demo: bool,
+    /// Preview only (`armed`): slot 1 armed, to see the rings.
+    arm_demo: bool,
     /// Colour card tab: 0 Diffuse · 1 Tape · 2 Saturate.
     colour_tab: usize,
     /// The Taps menu (pattern tools, v2.37): open, and its button (a click
@@ -224,6 +235,14 @@ pub struct ScopeState {
     pat_undo: [Vec<[f32; NUM_TAPS]>; 7],
     /// Preview: apply a shape on the first frame, to see it without clicking.
     pat_demo: bool,
+    /// Preview only (`euclid`): Euclid, 5 taps in 8 steps, Swing at 0.7.
+    euclid_demo: bool,
+    /// Preview only (`swing`): Swing at 0.7, the spacing as it is.
+    swing_demo: bool,
+    /// Preview only (`sync`): Time synced.
+    sync_demo: bool,
+    /// Preview only (`over`): Feedback at 104 %, tap 1's Gain at +3 dB (the stops' over-range).
+    over_demo: bool,
     /// The preset browser's state (the loaded preset, Try, the sheet's view).
     pub(crate) presets: preset_sheet::PresetUi,
     /// Preview only (`nobeta`): the beta pop-up isn't drawn, to see the page under it.
@@ -353,8 +372,14 @@ pub fn frame(
                         "detune" => sc.y_axis = 6,
                         "menu" => sc.options.set_open(true),
                         "pattern" => (sc.pat_open, sc.pat_demo) = (true, true),
+                        "euclid" => sc.euclid_demo = true,
+                        "swing" => sc.swing_demo = true,
+                        "sync" => sc.sync_demo = true,
+                        "over" => sc.over_demo = true,
                         "tap" => sc.lane_tab = 2,
                         "motion" => sc.lane_tab = 1,
+                        "echo" => sc.lane_tab = 0,
+                        "armed" => sc.arm_demo = true,
                         "mxdemo" => (sc.lane_tab, sc.mx_demo) = (1, true),
                         "step" => (sc.lane_tab, sc.motion.sel) = (1, 4),
                         "step2" => (sc.lane_tab, sc.motion.sel) = (1, 5),
@@ -368,6 +393,8 @@ pub fn frame(
                         "light" => sc.look.dark = false,
                         "nobeta" => sc.no_beta = true,
                         "tape" => sc.colour_tab = 1,
+                        "dub" => sc.colour_tab = 3,
+                        "sat" => sc.colour_tab = 2,
                         _ => {
                             if let Some(n) = t.strip_prefix("sel").and_then(|n| n.parse::<usize>().ok()) {
                                 sc.sel = n.checked_sub(1);
@@ -460,6 +487,10 @@ fn page(
         if std::mem::take(&mut st.scope.mx_demo) {
             mx_demo(params);
         }
+        if std::mem::take(&mut st.scope.arm_demo) {
+            motion_tab::arm_demo(ui.ctx());
+        }
+        motion_tab::follow_wiring(ui.ctx(), &mut st.scope);
         // Motion's Routes sheet covers the picture and the lane
         if st.scope.motion.routes {
             motion_tab::routes_sheet(ui, o, s, l, params, setter, &mut st.scope);
@@ -585,10 +616,23 @@ fn dial_arc(c: Pos2, rad: f32, v0: f32, v1: f32) -> Vec<Pos2> {
 /// Stepped params of up to 16 positions show a dot per step.
 #[allow(clippy::too_many_arguments)]
 fn knob_cell<P: Param>(
-    ui: &mut egui::Ui, cell: Rect, _s: f32, setter: &ParamSetter, param: &P, id: &str,
+    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &P, id: &str,
     label: &str, bip: bool, enabled: bool, disp: Option<String>, focus: &mut Option<String>,
 ) {
-    use softsystems_ui::knob::{self, Kind, Knob};
+    knob_cell_m(ui, cell, s, setter, param, id, label, bip, enabled, disp, focus, None, None);
+}
+
+/// A Motion target's knob (beta pass 10): [`knob_cell`] plus a dot per route after its name,
+/// the halo of its reach and live position, the armed slot's ring (a press then makes the
+/// route, a drag sizes it), a tile's drop, and its routes on a right-click. `modu` is the
+/// motion params, the target, and for a tap target the tap shown.
+#[allow(clippy::too_many_arguments)]
+fn knob_cell_m<P: Param>(
+    ui: &mut egui::Ui, cell: Rect, _s: f32, setter: &ParamSetter, param: &P, id: &str,
+    label: &str, bip: bool, enabled: bool, disp: Option<String>, focus: &mut Option<String>,
+    modu: Option<(&crate::modulation::MotionParams, usize, Option<usize>)>, over: Option<f32>,
+) -> Rect {
+    use softsystems_ui::knob::{self, Kind, Knob, Reach};
     let n = param.modulated_normalized_value();
     let text = disp.unwrap_or_else(|| param.normalized_value_to_string(n, true));
     let kind = match param.step_count() {
@@ -596,9 +640,32 @@ fn knob_cell<P: Param>(
         Some(c) if (1..=15).contains(&c) => Kind::Stepped(c + 1),
         _ => Kind::Plain,
     };
-    let k = Knob::new(label, &text).kind(kind).default(param.default_normalized_value()).live(enabled);
+    let base = param.unmodulated_normalized_value();
+    let marks = modu.map(|(m, t, tap)| motion_tab::marks(m, t, tap));
+    let dots = marks.as_ref().map(motion_tab::route_dots).unwrap_or_default();
+    let halo = marks.as_ref().and_then(|mk| motion_tab::halo(mk, base));
+    let live = halo.map(|h| [h.1]);
+    let mut k = Knob::new(label, &text)
+        .kind(kind)
+        .default(param.default_normalized_value())
+        .live(enabled)
+        .routes(&dots)
+        .armed(modu.and_then(|_| motion_tab::armed(ui.ctx())));
+    if let (Some((reach, _, col)), Some(live)) = (halo, live.as_ref()) {
+        k = k.halo(Reach { reach, dots: live, col });
+    }
+    // a stop (normalised) on the way up, the arc and value above it in the over-range colour
+    // (the crate's `Knob::over`; owner 2026-11-16: Feedback at 100 %, tap Gain at 0 dB)
+    if let Some(at) = over {
+        k = k.over(at);
+    }
     let mut v = n;
     let out = knob::knob(ui, cell, ui.id().with(("knob", id)), &k, &mut v);
+    if let Some((m, t, _)) = modu {
+        motion_tab::place(ui.ctx(), t, cell);
+        motion_tab::route_knob(ui.ctx(), setter, m, t, out.route_touch, out.route_drag, out.route_release, out.route_tap);
+        motion_tab::routes_menu(ui, setter, m, t, base, out.menu, out.dial);
+    }
     if out.began {
         setter.begin_set_parameter(param);
     }
@@ -609,6 +676,7 @@ fn knob_cell<P: Param>(
     if out.ended {
         setter.end_set_parameter(param);
     }
+    out.dial
 }
 
 /// A BoolParam toggle cell: the button shows the state, the name sits above.
@@ -654,6 +722,50 @@ fn enum_cell_ex<E: Enum + PartialEq + Copy + 'static>(
     }
     let alpha = if enabled.contains(&true) { 255 } else { 90 };
     text(ui.painter(), lab, Align2::CENTER_CENTER, label, 11.0, s, theme::with_alpha(INK2(), alpha));
+}
+
+/// A small IntParam as a segmented choice (Dub's Swirls: Off, 1, 2, 3), name above.
+#[allow(clippy::too_many_arguments)]
+fn int_seg_cell(
+    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &IntParam, id: &str, label: &str, names: &[&str],
+    focus: &mut Option<String>,
+) {
+    let (ctl, lab, _) = cell_parts(cell, s);
+    let b = Rect::from_center_size(ctl.center(), Vec2::new(cell.width() - 8.0 * s, g::CTL_H * s));
+    let lo = param.range().unnormalize(0.0);
+    let cur = (param.value() - lo).clamp(0, names.len() as i32 - 1) as usize;
+    if let Some(i) = seg(ui, b, names, cur, id, true) {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, lo + i as i32);
+        setter.end_set_parameter(param);
+        *focus = Some(id.to_string());
+    }
+    text(ui.painter(), lab, Align2::CENTER_CENTER, label, 11.0, s, INK2());
+}
+
+/// An enum as the shared stepper (Saturate's Curve, six choices; owner 2026-11-16): ‹ name ›,
+/// name above. A drag up or down steps through the choices while the sound plays, so they can
+/// be compared by ear; the arrows step too. As wide as its longest name and its arrows.
+#[allow(clippy::too_many_arguments)]
+fn enum_stepper_cell<E: Enum + PartialEq + Copy + 'static>(
+    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &EnumParam<E>, id: &str, label: &str, names: &[&str],
+    focus: &mut Option<String>,
+) {
+    let (ctl, lab, _) = cell_parts(cell, s);
+    let widest = names.iter().map(|n| softsystems_ui::paint::text_width(ui.painter(), n, 11.0)).fold(0.0, f32::max);
+    // the label sits between the two 22 px arrow zones, with a little air
+    let w = (widest + (2.0 * 22.0 + 12.0) * s).min(cell.width() - 8.0 * s);
+    let b = Rect::from_center_size(ctl.center(), Vec2::new(w, g::CTL_H * s));
+    let n = names.len();
+    let cur = enum_index(param, n);
+    if let controls::Step::By(d) = controls::stepper(ui, b, names[cur], ui.id().with(("step", id)), controls::Ends::of(cur, n), true) {
+        let i = (cur as i32 + d).clamp(0, n as i32 - 1) as usize;
+        if i != cur {
+            set_norm(setter, param, i as f32 / (n - 1) as f32);
+            *focus = Some(id.to_string());
+        }
+    }
+    text(ui.painter(), lab, Align2::CENTER_CENTER, label, 11.0, s, INK2());
 }
 
 /// A group's heading inside a card: small capitals, quiet, so groups read apart
@@ -793,7 +905,7 @@ impl Axis {
     fn get(self, tap: &TapParams) -> f32 {
         match (self.float(tap), self) {
             (Some(p), _) => p.value(),
-            (None, Axis::Slope) => enum_index(&tap.filter_slope, 3) as f32,
+            (None, Axis::Slope) => enum_index(&tap.filter_slope, SLOPES) as f32,
             (None, _) => enum_index(&tap.filter_type, 3) as f32,
         }
     }
@@ -866,14 +978,15 @@ impl Axis {
 
     /// A value → 0 (top) … 1 (bottom). Pan has L / Mid at the top and gain the
     /// DAW-fader skew (0 dB at 75 % height), both as in v3; cutoff and Q are
-    /// log; Type has HP on top, LP at the bottom; Slope 48 dB on top, 12 at the bottom.
+    /// log; Type has HP on top, LP at the bottom; Slope 48 dB on top, 6 at the bottom.
     fn norm(self, v: f32) -> f32 {
         let n = match self {
             Axis::Pan => (v + 1.0) * 0.5,
             Axis::Gain => 1.0 - gain_db_to_pos(v),
             Axis::Cutoff => 1.0 - (v / 20.0).max(1.0).ln() / 1000f32.ln(),
             Axis::Reso => 1.0 - (v / 0.1).max(1.0).ln() / 120f32.ln(),
-            Axis::Type | Axis::Slope => 1.0 - v / 2.0,
+            Axis::Type => 1.0 - v / 2.0,
+            Axis::Slope => 1.0 - v / (SLOPES - 1) as f32,
             Axis::Detune => 0.5 - v / 200.0,
         };
         n.clamp(0.0, 1.0)
@@ -886,7 +999,8 @@ impl Axis {
             Axis::Gain => pos_to_gain_db(1.0 - n),
             Axis::Cutoff => 20.0 * 1000f32.powf(1.0 - n),
             Axis::Reso => 0.1 * 120f32.powf(1.0 - n),
-            Axis::Type | Axis::Slope => ((1.0 - n) * 2.0).round(),
+            Axis::Type => ((1.0 - n) * 2.0).round(),
+            Axis::Slope => ((1.0 - n) * (SLOPES - 1) as f32).round(),
             Axis::Detune => ((0.5 - n) * 2000.0).round() / 10.0,
         }
     }
@@ -898,7 +1012,7 @@ impl Axis {
     }
 
     /// The range a shape spreads over until the pins are moved: L 70 to R 70,
-    /// −24 to 0 dB, 500 Hz to 20 kHz, Q 0.7 to 6, LP to HP, 12 to 48 dB.
+    /// −24 to 0 dB, 500 Hz to 20 kHz, Q 0.7 to 6, LP to HP, 6 to 48 dB.
     fn default_range(self) -> [f32; 2] {
         let u = |v: f32| self.u_norm(self.norm(v));
         match self {
@@ -952,7 +1066,7 @@ impl Axis {
             Axis::Cutoff => at(&[(20000.0, "20k"), (5000.0, "5k"), (1000.0, "1k"), (200.0, "200"), (50.0, "50")]),
             Axis::Reso => at(&[(12.0, "Q 12"), (4.0, "4"), (1.2, "1.2"), (0.4, "0.4"), (0.1, "0.1")]),
             Axis::Type => at(&[(2.0, "HP"), (1.0, "BP"), (0.0, "LP")]),
-            Axis::Slope => at(&[(2.0, "48 dB"), (1.0, "24"), (0.0, "12")]),
+            Axis::Slope => at(&[(7.0, "48 dB"), (5.0, "36"), (3.0, "24"), (1.0, "12"), (0.0, "6")]),
             // in cents at a one-semitone range (±100 ct), else in semitones
             Axis::Detune => [100.0, 50.0, 0.0, -50.0, -100.0]
                 .into_iter()
@@ -980,9 +1094,14 @@ fn type_name(v: f32) -> &'static str {
     ["LP", "BP", "HP"][v.round().clamp(0.0, 2.0) as usize]
 }
 
-/// The filter slope for a Slope value (0 12 dB · 1 24 dB · 2 48 dB).
+/// Slope's steps: 6 to 48 dB/oct in 6 dB steps (owner, 2026-11-16).
+const SLOPES: usize = 8;
+const SLOPE_DB: [&str; SLOPES] = ["6 dB", "12 dB", "18 dB", "24 dB", "30 dB", "36 dB", "42 dB", "48 dB"];
+const SLOPE_NAMES: [&str; SLOPES] = ["6", "12", "18", "24", "30", "36", "42", "48"];
+
+/// The filter slope for a Slope value (its step, 0 = 6 dB … 7 = 48 dB).
 fn slope_of(v: f32) -> FilterSlope {
-    FilterSlope::from_index(v.round().clamp(0.0, 2.0) as usize)
+    FilterSlope::from_index(v.round().clamp(0.0, (SLOPES - 1) as f32) as usize)
 }
 
 /// A tap's Detune (% of the range, `range` semitones) as heard: cents
@@ -1020,7 +1139,7 @@ impl Labels {
 }
 
 fn slope_name(v: f32) -> &'static str {
-    ["12", "24", "48"][v.round().clamp(0.0, 2.0) as usize]
+    SLOPE_NAMES[v.round().clamp(0.0, (SLOPES - 1) as f32) as usize]
 }
 
 fn pan_text(v: f32, ch: ChannelMode) -> String {
@@ -1302,6 +1421,30 @@ fn picture(
     }
 
     let axis = Axis::ALL[axis_i];
+    if std::mem::take(&mut sc.over_demo) {
+        for (p, v) in [(&params.feedback, 1.04), (&params.taps[0].gain_db, 3.0)] {
+            setter.begin_set_parameter(p);
+            setter.set_parameter(p, v);
+            setter.end_set_parameter(p);
+        }
+    }
+    if std::mem::take(&mut sc.sync_demo) {
+        set_norm(setter, &params.sync_mode, 1.0);
+    }
+    if std::mem::take(&mut sc.swing_demo) {
+        setter.begin_set_parameter(&params.swing);
+        setter.set_parameter(&params.swing, 0.7);
+        setter.end_set_parameter(&params.swing);
+    }
+    if std::mem::take(&mut sc.euclid_demo) {
+        set_norm(setter, &params.spacing_mode, 1.0);
+        setter.begin_set_parameter(&params.swing);
+        setter.set_parameter(&params.swing, 0.7);
+        setter.end_set_parameter(&params.swing);
+        setter.begin_set_parameter(&params.num_taps_active);
+        setter.set_parameter(&params.num_taps_active, 5);
+        setter.end_set_parameter(&params.num_taps_active);
+    }
     if std::mem::take(&mut sc.pat_demo) {
         sc.pat_shape = Some(PatShape::RampDown);
         pattern_apply(params, setter, sc, axis_i);
@@ -1736,57 +1879,35 @@ fn lane(
         (c(0, 0, 1), c(0, 1, 1), c(0, 2, 2), c(1, 0, 1), c(1, 1, 1), c(1, 2, 2))
     };
     stepper_cell(ui, c_rep, s, setter, &params.repeats, "repeats", "Repeats", if finite { "then stops" } else { "loops" }, &mut sc.focus);
-    feedback_cell(ui, c_fb, s, setter, &params.feedback, !params.freeze.value(), &mut sc.focus);
+    feedback_cell(ui, c_fb, s, setter, &params.feedback, !params.freeze.value(), &mut sc.focus, &params.motion);
     // Curve shapes the loop's decay, so only ∞ has one.
     enum_cell(ui, c_curve, s, setter, &params.fb_curve, "fb_curve", "Curve", &["Natural", "Bloom", "Gate"], !finite, &mut sc.focus);
     // Left darkens each repeat, right thins it, the centre is off.
-    knob_cell(ui, c_tone, s, setter, &params.loop_tone, "loop_tone", "Tone", true, true, None, &mut sc.focus);
+    knob_cell_m(ui, c_tone, s, setter, &params.loop_tone, "loop_tone", "Tone", true, true, None, &mut sc.focus, Some((&params.motion, crate::modulation::T_TONE, None)), None);
     // In Ping, X-feed is the bounce's width; Mono has no sides to bounce between.
     let ping = params.crossfeed_mode.value() == CrossfeedMode::PingPong;
     let mono = params.channel_mode.value() == ChannelMode::Mono;
     let xf_label = if ping { "Width" } else { "X-feed" };
-    knob_cell(ui, c_xf, s, setter, &params.crossfeed, "crossfeed", xf_label, false, !(ping && mono), None, &mut sc.focus);
+    knob_cell_m(ui, c_xf, s, setter, &params.crossfeed, "crossfeed", xf_label, false, !(ping && mono), None, &mut sc.focus, Some((&params.motion, crate::modulation::T_CROSS, None)), None);
     enum_cell_ex(ui, c_mode, s, setter, &params.crossfeed_mode, "crossfeed_mode", "Cross", &["Mix", "Ping", "Diffuse"], &[true, !mono, true], &mut sc.focus);
 }
 
-/// Feedback's knob (v2.43): it stops at 100 % on the way up — past it only
-/// by dragging on — and draws the self-oscillating range above 100 % in the
-/// warning colour.
-fn feedback_cell(ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &FloatParam, enabled: bool, focus: &mut Option<String>) {
-    let (ctl, lab, val) = cell_parts(cell, s);
-    let dial = Rect::from_center_size(ctl.center(), Vec2::splat(g::DIAL * s));
-    let hit = if theme::touch() { dial.expand(((theme::TOUCH_MIN_HIT - g::DIAL) * 0.5).max(0.0) * s) } else { dial };
-    let resp = ui.interact(hit, ui.id().with(("knob", "feedback")), Sense::click_and_drag());
-    if enabled {
-        let resp = resp.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-        let before = param.value();
-        if epo::knob_drive(ui, setter, param, hit, &resp) {
-            *focus = Some("feedback".into());
-        }
-        let v = param.value();
-        if (resp.dragged() || theme::touch()) && before <= 1.0 && v > 1.0 && v < FB_DETENT {
-            setter.set_parameter(param, 1.0);
-        }
-    }
-    let n = param.modulated_normalized_value();
-    let alpha = if enabled { 255 } else { 90 };
-    let p = ui.painter();
-    // the crate's dial (the arc in the accent); over 100 %, the self-oscillating
-    // range on top in the warning colour
-    let al = if enabled { 1.0 } else { softsystems_ui::tokens::DIM };
-    softsystems_ui::knob::dial(p, dial.center(), g::DIAL * s, softsystems_ui::knob::Kind::Plain, n, softsystems_ui::t().c.accent, al);
-    let unity = param.preview_normalized(1.0);
-    if n > unity + 1e-4 {
-        let arc = dial_arc(dial.center(), g::DIAL * 0.5 * s, unity, n);
-        p.add(egui::Shape::line(arc, Stroke::new(3.0 * s, theme::with_alpha(theme::accent(1), alpha))));
-    }
-    text(p, lab, Align2::CENTER_CENTER, "Feedback", 11.0, s, theme::with_alpha(INK2(), alpha));
-    let col = if param.value() > 1.0 { readable(theme::accent(1), PANEL()) } else { INK() };
-    mono(p, val, Align2::CENTER_CENTER, &param.normalized_value_to_string(n, true), 11.5, s, theme::with_alpha(col, alpha));
+/// Feedback's knob (v2.43): it stops at 100 % on the way up — past it only by dragging on —
+/// and draws the self-oscillating range above 100 % in the warning colour. A Motion target
+/// like the others (pass 10).
+#[allow(clippy::too_many_arguments)]
+fn feedback_cell(
+    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &FloatParam, enabled: bool, focus: &mut Option<String>,
+    m: &crate::modulation::MotionParams,
+) {
+    // the crate's stop at 100 %, the self-oscillating range above it in the over-range colour
+    let modu = Some((m, crate::modulation::T_FDBK, None));
+    knob_cell_m(ui, cell, s, setter, param, "feedback", "Feedback", false, enabled, None, focus, modu, Some(param.preview_normalized(1.0)));
 }
 
-/// Feedback stops at 100 % on the way up until a drag carries it this far.
-const FB_DETENT: f32 = 1.02;
+/// The lane's Feedback drag stops at 100 % on the way up until it carries this far: the
+/// crate's knob stop (`DETENT_PASS` of the knob's travel) in Feedback's units (0–105 %).
+const FB_DETENT: f32 = 1.0 + softsystems_ui::knob::DETENT_PASS * 1.05;
 
 /// A count stepper cell (Repeats): ‹ value ›, the name above, a word below.
 /// The arrows step; dragging the value moves it like a knob.
@@ -1815,16 +1936,28 @@ fn stepper_cell(
     text(p, val, Align2::CENTER_CENTER, sub, 11.0, s, SOFT());
 }
 
-/// A small value pill (Amount, Polarity): its name and value; drag it ↕.
+/// A value pill (Routes' Depth and Time): the crate's `knob::value_pill`, "Name value" in an
+/// outline, dragged ↕ like a knob (Shift fine, double-click to its default).
 #[allow(clippy::too_many_arguments)]
-fn pill_drag(ui: &mut egui::Ui, rect: Rect, s: f32, setter: &ParamSetter, param: &FloatParam, id: &str, label: &str, focus: &mut Option<String>) {
-    let resp = ui.interact(rect, ui.id().with(("pill", id)), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeVertical);
-    if epo::knob_drive(ui, setter, param, rect, &resp) {
+fn pill_drag(ui: &mut egui::Ui, rect: Rect, _s: f32, setter: &ParamSetter, param: &FloatParam, id: &str, label: &str, focus: &mut Option<String>) {
+    use softsystems_ui::knob::{self, Kind, Knob};
+    let n = param.unmodulated_normalized_value();
+    let shown = param.normalized_value_to_string(n, true);
+    // a range either side of zero (Depth's −100…+100 %) is bipolar: its default sits mid-track
+    let bip = param.preview_plain(0.0) < 0.0 && param.preview_plain(1.0) > 0.0;
+    let k = Knob::new(label, &shown).kind(if bip { Kind::Bipolar } else { Kind::Plain }).default(param.default_normalized_value());
+    let mut v = n;
+    let out = knob::value_pill(ui, rect, ui.id().with(("pill", id)), &k, &mut v);
+    if out.began {
+        setter.begin_set_parameter(param);
+    }
+    if out.changed {
+        setter.set_parameter_normalized(param, v);
         *focus = Some(id.to_string());
     }
-    outline(ui.painter(), rect, false, s);
-    let v = param.normalized_value_to_string(param.unmodulated_normalized_value(), true);
-    text(ui.painter(), rect.center(), Align2::CENTER_CENTER, &format!("{label} {v}"), 11.5, s, INK());
+    if out.ended {
+        setter.end_set_parameter(param);
+    }
 }
 
 /// Where Motion has tap `i` right now on `axis` (v2.42): its set value `v`
@@ -1835,8 +1968,8 @@ fn pill_drag(ui: &mut egui::Ui, rect: Rect, s: f32, setter: &ParamSetter, param:
 fn mx_demo(params: &AfterechoParams) {
     let m = &params.motion;
     if let Ok(mut g) = m.patch.lock() {
-        for (slot, t, a) in [(0u16, "pan", 0.3), (0, "cutoff", -0.15), (1, "colour", 0.25), (2, "tone", -0.2), (4, "gain", 0.2)] {
-            g.routes.set(slot, t, a, crate::modulation::CAPACITY);
+        for (slot, t, a) in [(0u16, "pan", 0.3), (0, "cutoff", -0.15), (1, "colour", 0.25), (2, "tone", -0.2), (4, "gain", 0.2), (1, "fdbk", 0.15), (3, "mix", 0.25), (1, "mod.0.rate", 0.2)] {
+            g.routes.set(slot, t, a, crate::modulation::ROUTE_CAP);
         }
         if let softsystems_mod::Modulator::Steps(st) = &mut g.modulators[4] {
             for (i, v) in st.levels.iter_mut().enumerate() {
@@ -1875,17 +2008,18 @@ fn tap_panel(
     let id = |base: &str| format!("{base}_{}", i + 1);
     let time = secs_text(viz.times_l_grid[i] * viz.grid_range_secs_taps_only);
     knob_cell(ui, c(0, 0), s, setter, &tap.time_offset, &id("time_offset"), "Time", true, true, Some(time), focus);
-    knob_cell(ui, c(0, 1), s, setter, &tap.pan, &id("pan"), "Pan", true, ch != ChannelMode::Mono, Some(pan_text(tap.pan.value(), ch)), focus);
-    knob_cell(ui, c(0, 2), s, setter, &tap.gain_db, &id("gain_db"), "Gain", false, true, Some(db_text(tap.gain_db.value())), focus);
+    knob_cell_m(ui, c(0, 1), s, setter, &tap.pan, &id("pan"), "Pan", true, ch != ChannelMode::Mono, Some(pan_text(tap.pan.value(), ch)), focus, Some((&params.motion, crate::modulation::T_PAN, Some(i))), None);
+    knob_cell_m(ui, c(0, 2), s, setter, &tap.gain_db, &id("gain_db"), "Gain", false, true, Some(db_text(tap.gain_db.value())), focus, Some((&params.motion, crate::modulation::T_GAIN, Some(i))), Some(tap.gain_db.preview_normalized(0.0)));
     let det = detune_text(tap.detune.value(), params.detune_range.value() as f32);
     knob_cell(ui, c(0, 3), s, setter, &tap.detune, &id("tap_detune"), "Detune", true, true, Some(det), focus);
     // the range is every tap's (v2.46)
     stepper_cell(ui, c(0, 4), s, setter, &params.detune_range, "detune_range", "Range", "all taps", focus);
     toggle_cell(ui, c(1, 4), s, setter, &tap.active, &id("active"), "Tap", "On", "Muted", focus);
     enum_cell(ui, c(1, 0), s, setter, &tap.filter_type, &id("tap_filter_type"), "Filter", &["LP", "BP", "HP"], true, focus);
-    knob_cell(ui, c(1, 1), s, setter, &tap.filter_cutoff, &id("tap_filter_cutoff"), "Cutoff", false, true, Some(hz_text(tap.filter_cutoff.value())), focus);
-    knob_cell(ui, c(1, 2), s, setter, &tap.filter_q, &id("tap_filter_q"), "Reso", false, true, Some(format!("Q {:.1}", tap.filter_q.value())), focus);
-    enum_cell(ui, c(1, 3), s, setter, &tap.filter_slope, &id("tap_filter_slope"), "Slope", &["12", "24", "48"], true, focus);
+    knob_cell_m(ui, c(1, 1), s, setter, &tap.filter_cutoff, &id("tap_filter_cutoff"), "Cutoff", false, true, Some(hz_text(tap.filter_cutoff.value())), focus, Some((&params.motion, crate::modulation::T_CUTOFF, Some(i))), None);
+    knob_cell_m(ui, c(1, 2), s, setter, &tap.filter_q, &id("tap_filter_q"), "Reso", false, true, Some(format!("Q {:.1}", tap.filter_q.value())), focus, Some((&params.motion, crate::modulation::T_RESO, Some(i))), None);
+    // eight steps don't fit a segmented row: the shared stepper, dragged ↕ (owner, 2026-11-16)
+    enum_stepper_cell(ui, c(1, 3), s, setter, &tap.filter_slope, &id("tap_filter_slope"), "Slope", &SLOPE_DB, focus);
 }
 
 /// "Feedback 60 % · −4.4 dB per repeat · 13 to −60 dB", from the same
@@ -2234,17 +2368,29 @@ fn euclid_ring(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoPara
     p.circle_filled(c, rad, INSET());
     let r = rad - 11.0 * s;
     p.circle_stroke(c, r, Stroke::new(1.0 * s, theme::line()));
-    let at = |i: usize| {
-        let a = i as f32 / n as f32 * TAU - FRAC_PI_2;
+    let at = |i: f32| {
+        let a = i / n as f32 * TAU - FRAC_PI_2;
         c + Vec2::new(a.cos(), a.sin()) * r
     };
-    p.circle_stroke(at(0), 7.5 * s, Stroke::new(1.5 * s, INK()));
+    // Swing as the DSP plays it (topology::compute_positions): the 1st, 3rd, 5th… tap moves
+    // toward the next one, so its dot moves round the ring, a faint mark left on the straight
+    // step
+    let pos = topology::compute_positions(params.spacing(false), heard);
+    let step = 1.0 / NUM_TAPS as f32;
+    p.circle_stroke(at(0.0), 7.5 * s, Stroke::new(1.5 * s, INK()));
     for i in 0..n {
-        let (dot, col) = match (0..count).find(|&j| steps[j] % n == i) {
-            Some(j) => (5.0, tap_col(j, heard)),
-            None => (2.0, theme::FAINT()),
-        };
-        p.circle_filled(at(i), dot * s, col);
+        match (0..count).find(|&j| steps[j] % n == i) {
+            Some(j) => {
+                let played = pos[j] / step;
+                if (played - steps[j] as f32).abs() > 0.001 {
+                    p.circle_filled(at(i as f32), 2.0 * s, theme::FAINT());
+                }
+                p.circle_filled(at(played), 5.0 * s, tap_col(j, heard));
+            }
+            None => {
+                p.circle_filled(at(i as f32), 2.0 * s, theme::FAINT());
+            }
+        }
     }
     mono(&p, c - Vec2::new(0.0, 7.0 * s), Align2::CENTER_CENTER, &count.to_string(), 18.0, s, INK());
     let sub = if asked > heard { format!("of {n} · {} silent", asked - heard) } else { format!("of {n}") };
@@ -2347,14 +2493,20 @@ fn shape_pad(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams
 fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState) {
     let rect = r(o, s, l.right_x, l.colour.0, l.right_w, l.colour.1);
     let inner = card(ui, rect, "Colour", s);
-    let tabs = Rect::from_min_size(Pos2::new(rect.right() - 254.0 * s, rect.top() + 7.0 * s), Vec2::new(240.0, 26.0) * s);
-    if let Some(i) = seg(ui, tabs, &["Diffuse", "Tape", "Saturate"], sc.colour_tab, "sc_colour", true) {
+    const NAMES: [&str; 4] = ["Diffuse", "Tape", "Saturate", "Dub"];
+    let tabs = Rect::from_min_size(Pos2::new(rect.right() - 314.0 * s, rect.top() + 7.0 * s), Vec2::new(300.0, 26.0) * s);
+    if let Some(i) = seg(ui, tabs, &NAMES, sc.colour_tab, "sc_colour", true) {
         sc.colour_tab = i;
     }
     // each stage's on/off dot sits just after its name
-    let on = [params.diffuse_amount.value() > 0.0, params.degrade_amount.value() > 0.0, params.sat_amount.value() > 0.0];
-    let seg_w = tabs.width() / 3.0;
-    for (i, (&is_on, name)) in on.iter().zip(["Diffuse", "Tape", "Saturate"]).enumerate() {
+    let on = [
+        params.diffuse_amount.value() > 0.0,
+        params.degrade_amount.value() > 0.0,
+        params.sat_amount.value() > 0.0,
+        params.dub_intensity.value() > 0.0,
+    ];
+    let seg_w = tabs.width() / NAMES.len() as f32;
+    for (i, (&is_on, name)) in on.iter().zip(NAMES).enumerate() {
         let tw = ui.painter().layout_no_wrap(name.into(), FontId::proportional(fs(12.0, s)), INK()).size().x;
         let c = Pos2::new(tabs.left() + (i as f32 + 0.5) * seg_w + tw * 0.5 + 7.0 * s, tabs.center().y);
         ui.painter().circle_filled(c, 2.5 * s, if is_on { INK() } else { theme::line2() });
@@ -2367,20 +2519,33 @@ fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Afte
     let routes = ["In", "FB", "Out"];
     match sc.colour_tab {
         0 => {
-            knob_cell(ui, c(0, 1), s, setter, &params.diffuse_amount, "diffuse_amount", "Amount", false, true, None, f);
+            knob_cell_m(ui, c(0, 1), s, setter, &params.diffuse_amount, "diffuse_amount", "Amount", false, true, None, f, Some((&params.motion, crate::modulation::T_COLOUR, None)), None);
             knob_cell(ui, c(1, 1), s, setter, &params.diffuse_size, "diffuse_size", "Size", false, true, None, f);
             enum_cell(ui, c(4, 2), s, setter, &params.diffuse_routing, "diffuse_routing", "Route", &routes, true, f);
         }
         1 => {
-            knob_cell(ui, c(0, 1), s, setter, &params.degrade_amount, "degrade_amount", "Amount", false, true, None, f);
+            knob_cell_m(ui, c(0, 1), s, setter, &params.degrade_amount, "degrade_amount", "Amount", false, true, None, f, Some((&params.motion, crate::modulation::T_COLOUR, None)), None);
             knob_cell(ui, c(1, 1), s, setter, &params.degrade_drive, "degrade_drive", "Drive", false, true, None, f);
             knob_cell(ui, c(2, 1), s, setter, &params.degrade_wear, "degrade_wear", "Wear", false, true, None, f);
             enum_cell(ui, c(3, 1), s, setter, &params.degrade_type, "degrade_type", "Type", &["I", "II", "IV"], true, f);
             enum_cell(ui, c(4, 2), s, setter, &params.degrade_routing, "degrade_routing", "Route", &routes, true, f);
         }
+        3 => {
+            // Dub (beta pass 12): always in the loop, so no Route; the swirl's centre greys
+            // with no allpass
+            let col = Some((&params.motion, crate::modulation::T_COLOUR, None));
+            knob_cell_m(ui, c(0, 1), s, setter, &params.dub_intensity, "dub_intensity", "Intensity", false, true, None, f, col, None);
+            knob_cell(ui, c(1, 1), s, setter, &params.dub_low, "dub_low", "Low cut", false, true, Some(hz_text(params.dub_low.value())), f);
+            knob_cell(ui, c(2, 1), s, setter, &params.dub_high, "dub_high", "High cut", false, true, Some(hz_text(params.dub_high.value())), f);
+            let swirls = params.dub_swirls.value() > 0;
+            knob_cell(ui, c(3, 1), s, setter, &params.dub_swirl, "dub_swirl", "Swirl", false, swirls, Some(hz_text(params.dub_swirl.value())), f);
+            int_seg_cell(ui, c(4, 2), s, setter, &params.dub_swirls, "dub_swirls", "Swirls", &["Off", "1", "2", "3"], f);
+        }
         _ => {
-            knob_cell(ui, c(0, 1), s, setter, &params.sat_amount, "sat_amount", "Amount", false, true, None, f);
+            knob_cell_m(ui, c(0, 1), s, setter, &params.sat_amount, "sat_amount", "Amount", false, true, None, f, Some((&params.motion, crate::modulation::T_COLOUR, None)), None);
             knob_cell(ui, c(1, 1), s, setter, &params.sat_drive, "sat_drive", "Drive", false, true, None, f);
+            let curves = ["Classic", "Tube", "Smooth", "Grit", "Amp", "Transfo"];
+            enum_stepper_cell(ui, c(2, 2), s, setter, &params.sat_curve, "sat_curve", "Curve", &curves, f);
             enum_cell(ui, c(4, 2), s, setter, &params.sat_routing, "sat_routing", "Route", &routes, true, f);
         }
     }
@@ -2393,7 +2558,7 @@ fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Afte
     // Route uses above it.
     let c = |col| cell_at(inner, 6, 1, 0, col, 1, s);
     knob_cell(ui, c(0), s, setter, &params.input_gain, "input_gain", "In", true, true, None, focus);
-    knob_cell(ui, c(1), s, setter, &params.dry_wet, "dry_wet", "Mix", false, true, None, focus);
+    knob_cell_m(ui, c(1), s, setter, &params.dry_wet, "dry_wet", "Mix", false, true, None, focus, Some((&params.motion, crate::modulation::T_MIX, None)), None);
     knob_cell(ui, c(2), s, setter, &params.output_gain, "output_gain", "Out", true, true, None, focus);
     // Ear guard (v2.43), and how far it has the echoes down right now
     toggle_cell(ui, c(3), s, setter, &params.ear_guard, "ear_guard", "Ear guard", "On", "Off", focus);
@@ -2404,7 +2569,7 @@ fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Afte
     }
     let xr = c(4).left() - 4.0 * s;
     rule(ui.painter(), Pos2::new(xr, inner.top() + 8.0 * s), Pos2::new(xr, inner.bottom() - 4.0 * s), s);
-    knob_cell(ui, c(4), s, setter, &params.duck, "duck", "Duck", false, true, None, focus);
+    knob_cell_m(ui, c(4), s, setter, &params.duck, "duck", "Duck", false, true, None, focus, Some((&params.motion, crate::modulation::T_DUCK, None)), None);
     knob_cell(ui, c(5), s, setter, &params.duck_release, "duck_release", "Release", false, true, None, focus);
     // How far the echoes dip right now: a thin arc inside the Duck dial, on
     // the knob's own scale (its full sweep is 24 dB).
@@ -2494,7 +2659,11 @@ fn taps_menu(ui: &mut egui::Ui, s: f32, params: &Arc<AfterechoParams>, setter: &
             let d = drag_at(ui, Id::new("sc_pat_range"), track.expand2(Vec2::new(10.0, 6.0) * s));
             let u_at = |x: f32| {
                 let u = ((x - track.left()) / track.width()).clamp(0.0, 1.0);
-                if matches!(axis, Axis::Type | Axis::Slope) { (u * 2.0).round() / 2.0 } else { u }
+                match axis {
+                    Axis::Type => (u * 2.0).round() / 2.0,
+                    Axis::Slope => (u * (SLOPES - 1) as f32).round() / (SLOPES - 1) as f32,
+                    _ => u,
+                }
             };
             if d.started {
                 if let Some(pos) = d.pos {
@@ -2568,7 +2737,7 @@ fn options_panel(
     let mut accent_changed = false;
     let mut reveal = false;
     let ScopeState { look, accent, options, .. } = sc;
-    let env = Env { product: &PRODUCT, look, zoom: (!ios).then_some(Zoom { now: zoom, steps: &ZOOMS }), licence: lic };
+    let env = Env { product: &PRODUCT, look, zoom: (!ios).then_some(Zoom { now: zoom, steps: &options::ZOOM_STEPS }), licence: lic };
     let out = options.show(ui, at, burger, env, |rows| {
         let colors: Vec<Color32> = ACCENTS.iter().map(|a| a.get(softsystems_ui::t().dark)).collect();
         accent_changed = rows.accent("Accent", &colors, &mut accent.on, &mut accent.custom);

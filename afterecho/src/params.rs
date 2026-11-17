@@ -167,14 +167,26 @@ pub enum DetuneQuality {
     Clean,
 }
 
-/// Per-tap filter slope. Each step roughly doubles the roll-off rate by
-/// cascading more SVF stages: 12 dB = 1×, 24 dB = 2×, 48 dB = 4×.
+/// Per-tap filter slope, 6 to 48 dB/oct in 6 dB steps (owner, 2026-11-16; before, 12, 24 and
+/// 48): SVF stages (12 dB each) and a one-pole for an odd step (`filter::TapLayout`). The order
+/// is the slope's, so the index is `dB / 6 − 1`. Ids are stable (sessions store them); presets
+/// store the index, so files from before are moved by `presets::Store::migrate`.
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum FilterSlope {
+    #[id = "db6"]
+    Db6,
     #[id = "db12"]
     Db12,
+    #[id = "db18"]
+    Db18,
     #[id = "db24"]
     Db24,
+    #[id = "db30"]
+    Db30,
+    #[id = "db36"]
+    Db36,
+    #[id = "db42"]
+    Db42,
     #[id = "db48"]
     Db48,
 }
@@ -199,6 +211,26 @@ pub enum DiffuseRouting {
     Feedback,
     #[id = "output"]
     Output,
+}
+
+/// Saturate's curve (beta pass 6): today's blended tanh, or one of the shared crate's five
+/// (softsystems-fx SATURATE, 8× oversampled, level held by its make-up). All six stay until
+/// the owner has picked by ear (DECISIONS 2026-11-16). The crate's TAPE is "Smooth" here, so
+/// it doesn't read as Colour's Tape tab.
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum SatCurve {
+    #[id = "classic"]
+    Classic,
+    #[id = "tube"]
+    Tube,
+    #[id = "smooth"]
+    Smooth,
+    #[id = "grit"]
+    Grit,
+    #[id = "amp"]
+    Amp,
+    #[id = "transfo"]
+    Transfo,
 }
 
 /// IEC cassette tape types for the DEGRADE block (v2.21.0, re-deemer port).
@@ -403,6 +435,26 @@ pub struct AfterechoParams {
     /// Where the saturate block is inserted (same grammar as DIFFUSE).
     #[id = "sat_routing"]
     pub sat_routing: EnumParam<DiffuseRouting>,
+    /// Saturate's curve (beta pass 6).
+    #[id = "sat_curve"]
+    pub sat_curve: EnumParam<SatCurve>,
+
+    // ---- Dub (beta pass 12): Cumulus's Dub Delay feedback path, always in the loop ----
+    /// How hard each pass is driven and how much the low-pass rings; 0 is off.
+    #[id = "dub_intensity"]
+    pub dub_intensity: FloatParam,
+    /// The band each pass is cut to: its high-pass…
+    #[id = "dub_low"]
+    pub dub_low: FloatParam,
+    /// …and its resonant low-pass.
+    #[id = "dub_high"]
+    pub dub_high: FloatParam,
+    /// The allpasses' centre: where each pass smears.
+    #[id = "dub_swirl"]
+    pub dub_swirl: FloatParam,
+    /// How many allpasses, 0–3.
+    #[id = "dub_swirls"]
+    pub dub_swirls: IntParam,
 
     // ---- Feedback decay curve ----
     /// Decay shape of the feedback repeats: Natural / Bloom / Gate.
@@ -731,6 +783,29 @@ impl Default for AfterechoParams {
             .with_value_to_string(formatters::v2s_f32_rounded(1))
             .with_smoother(SmoothingStyle::Linear(20.0)),
             sat_routing: EnumParam::new("Saturate Routing", DiffuseRouting::Output),
+            sat_curve: EnumParam::new("Saturate Curve", SatCurve::Classic),
+            // the listening spike's "Dub medium" band and swirl (not heard yet, TASKS)
+            dub_intensity: FloatParam::new("Dub Intensity", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_unit(" %")
+                .with_value_to_string(formatters::v2s_f32_percentage(0))
+                .with_string_to_value(formatters::s2v_f32_percentage())
+                .with_smoother(SmoothingStyle::Linear(20.0)),
+            dub_low: FloatParam::new("Dub Low Cut", 150.0, FloatRange::Skewed { min: 20.0, max: 2000.0, factor: FloatRange::skew_factor(-2.0) })
+                .with_unit(" Hz")
+                .with_value_to_string(formatters::v2s_f32_hz_then_khz(1))
+                .with_string_to_value(formatters::s2v_f32_hz_then_khz())
+                .with_smoother(SmoothingStyle::Linear(20.0)),
+            dub_high: FloatParam::new("Dub High Cut", 2500.0, FloatRange::Skewed { min: 200.0, max: 16000.0, factor: FloatRange::skew_factor(-2.0) })
+                .with_unit(" Hz")
+                .with_value_to_string(formatters::v2s_f32_hz_then_khz(1))
+                .with_string_to_value(formatters::s2v_f32_hz_then_khz())
+                .with_smoother(SmoothingStyle::Linear(20.0)),
+            dub_swirl: FloatParam::new("Dub Swirl", 600.0, FloatRange::Skewed { min: 20.0, max: 16000.0, factor: FloatRange::skew_factor(-2.0) })
+                .with_unit(" Hz")
+                .with_value_to_string(formatters::v2s_f32_hz_then_khz(1))
+                .with_string_to_value(formatters::s2v_f32_hz_then_khz())
+                .with_smoother(SmoothingStyle::Linear(20.0)),
+            dub_swirls: IntParam::new("Dub Swirls", 2, IntRange::Linear { min: 0, max: 3 }),
 
             fb_curve: EnumParam::new("Feedback Curve", FbCurve::Natural),
             loop_tone: FloatParam::new("Loop Tone", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })

@@ -59,8 +59,12 @@ pub const N_TGT: usize = 10;
 pub const TGT_IDS: [&str; N_TGT] = ["pan", "gain", "cutoff", "reso", "colour", "fdbk", "cross", "tone", "mix", "duck"];
 pub const TGT_NAMES: [&str; N_TGT] = ["Pan", "Gain", "Cutoff", "Reso", "Colour", "Feedback", "X-feed", "Tone", "Mix", "Duck"];
 
-/// Routes the matrix holds at most: every slot into every target.
+/// The plug-in's own routes at most: every slot into every target.
 pub const CAPACITY: usize = N_SLOTS * N_TGT;
+
+/// Routes a patch holds at most: the matrix's, and routes into the slots' own settings
+/// (beta pass 11, "mod.2.rate"): every slot into each other slot's settings is far under it.
+pub const ROUTE_CAP: usize = CAPACITY + 96;
 
 pub fn slots() -> Slots {
     // every kind per voice: the taps are its read-heads
@@ -257,8 +261,10 @@ impl ModRt {
         };
         let mut mods = patch.modulators.clone();
         p.mods.pull(&mut mods, |_, _| {});
-        let engine = Engine::new(sample_rate, NUM_TAPS, &mods);
-        let mut matrix = Matrix::new(&targets, NUM_TAPS, CAPACITY);
+        let mut engine = Engine::new(sample_rate, NUM_TAPS, &mods);
+        // routes into the slots' own settings (pass 11); the matrix leaves them alone
+        engine.set_mod_routes(&patch.routes);
+        let mut matrix = Matrix::new(&targets, NUM_TAPS, ROUTE_CAP);
         matrix.load(&patch.routes, &targets);
         let targeted = targeted(&patch.routes);
         Self { engine, matrix, targets, mods, seen: p.shared.version.load(Relaxed), heads: (f32::NAN, 0), targeted }
@@ -297,6 +303,8 @@ impl ModRt {
                     }
                 }
                 self.matrix.load(&g.routes, &self.targets);
+                // allocates nothing; parses the ids, only when the patch changed
+                self.engine.set_mod_routes(&g.routes);
                 self.targeted = targeted(&g.routes);
                 // a kind change restarts a slot: place its heads again
                 self.heads.1 = usize::MAX;

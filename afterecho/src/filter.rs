@@ -4,6 +4,87 @@ use crate::params::FilterType;
 /// state-variable filter from `softsystems-fx`, with Afterecho's three outputs.
 pub use softsystems_fx::filter::svf::Svf;
 
+pub use softsystems_fx::filter::svf::OnePole;
+use crate::params::FilterSlope;
+
+/// Which stages a tap filter runs (owner, 2026-11-16: Slope in 6 dB steps, 6 to 48 dB/oct):
+/// `svfs` SVFs (12 dB/oct each) and, for an odd step, a one-pole (6 dB/oct).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TapLayout {
+    pub svfs: usize,
+    pub pole: bool,
+}
+
+impl TapLayout {
+    pub fn of(slope: FilterSlope) -> Self {
+        // 6·m dB/oct: m / 2 SVFs, and a one-pole when m is odd
+        let m = slope as usize + 1;
+        TapLayout { svfs: m / 2, pole: m % 2 == 1 }
+    }
+}
+
+/// The Q every SVF after the first runs at: Butterworth's 0.707 (k = √2). Only the first stage
+/// takes the tap's Resonance, so the peak follows the knob at any Slope instead of stacking
+/// (before 2026-11-16 every stage took it: +48 dB at Q 4 and 48 dB/oct; spikes/slope/).
+pub const K_FLAT: f32 = core::f32::consts::SQRT_2;
+
+/// One channel of a tap's filter: up to four SVFs and the one-pole step (two one-poles for
+/// band-pass: a low-pass into a high-pass at the cutoff, 6 dB/oct on each side).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TapChain {
+    svf: [Svf; 4],
+    pole: [OnePole; 2],
+}
+
+impl TapChain {
+    /// The cutoff's `g` for every stage; Resonance's `k` for the first SVF only.
+    pub fn set_gk(&mut self, g: f32, k: f32) {
+        for (st, f) in self.svf.iter_mut().enumerate() {
+            f.set_gk(g, if st == 0 { k } else { K_FLAT });
+        }
+        for p in self.pole.iter_mut() {
+            p.set_g(g);
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.svf.iter_mut().for_each(Svf::reset);
+        self.pole.iter_mut().for_each(OnePole::reset);
+    }
+
+    /// Stages `to` runs that `from` didn't start from rest, not from whatever they held the
+    /// last time they ran.
+    pub fn wake(&mut self, from: TapLayout, to: TapLayout) {
+        for f in self.svf.iter_mut().take(to.svfs).skip(from.svfs) {
+            f.reset();
+        }
+        if to.pole && !from.pole {
+            self.pole.iter_mut().for_each(OnePole::reset);
+        }
+    }
+
+    #[inline]
+    pub fn tick(&mut self, x: f32, kind: FilterType, lay: TapLayout) -> f32 {
+        let mut y = x;
+        for f in self.svf.iter_mut().take(lay.svfs) {
+            y = svf_tick(f, y, kind);
+        }
+        if lay.pole {
+            y = match kind {
+                FilterType::LowPass => self.pole[0].lp(y),
+                FilterType::HighPass => self.pole[0].hp(y),
+                // the pair peaks at ½ at the cutoff; ×√2 puts it where an SVF band-pass at
+                // the default Resonance peaks (0.707), so a band-pass step is as loud as a whole one
+                FilterType::BandPass => {
+                    let lp = self.pole[0].lp(y);
+                    core::f32::consts::SQRT_2 * self.pole[1].hp(lp)
+                }
+            };
+        }
+        y
+    }
+}
+
 /// One tick of `f`, the output `kind` picks.
 #[inline]
 pub fn svf_tick(f: &mut Svf, x: f32, kind: FilterType) -> f32 {
@@ -166,6 +247,82 @@ mod tests {
                 (seed >> 8) as f32 / 16_777_216.0 - 0.5
             })
             .collect()
+    }
+
+    /// The steady gain (dB) of a tap chain at `f` Hz: a sine, measured after it settles.
+    fn chain_db(kind: FilterType, slope: FilterSlope, q: f32, f: f32) -> f32 {
+        let sr = 48_000.0;
+        let mut svf = Svf::default();
+        svf.set(1000.0, q, sr);
+        let mut ch = TapChain::default();
+        ch.set_gk(svf.g(), svf.k());
+        let lay = TapLayout::of(slope);
+        // the sine's phase in f64: f32's runs out of precision this many samples in, a noise
+        // floor near −66 dB that a 48 dB/oct stop band reaches
+        let w = core::f64::consts::TAU * f as f64 / sr as f64;
+        let (mut peak, n) = (0.0f32, 48_000);
+        for i in 0..n {
+            let y = ch.tick((w * i as f64).sin() as f32, kind, lay);
+            if i > n / 2 {
+                peak = peak.max(y.abs());
+            }
+        }
+        20.0 * peak.log10()
+    }
+
+    const SLOPES: [FilterSlope; 8] = [
+        FilterSlope::Db6,
+        FilterSlope::Db12,
+        FilterSlope::Db18,
+        FilterSlope::Db24,
+        FilterSlope::Db30,
+        FilterSlope::Db36,
+        FilterSlope::Db42,
+        FilterSlope::Db48,
+    ];
+
+    #[test]
+    fn each_slope_rolls_off_at_its_rate() {
+        // the drop over an octave past the cutoff: 2 to 4 kHz for LP, 500 to 250 Hz for HP (further
+        // out a 48 dB/oct stop band nears f32's own floor)
+        for (k, &slope) in SLOPES.iter().enumerate() {
+            let want = 6.0 * (k + 1) as f32;
+            let lp = chain_db(FilterType::LowPass, slope, 0.707, 2000.0) - chain_db(FilterType::LowPass, slope, 0.707, 4000.0);
+            let hp = chain_db(FilterType::HighPass, slope, 0.707, 500.0) - chain_db(FilterType::HighPass, slope, 0.707, 250.0);
+            // the bilinear transform steepens a low-pass near Nyquist a little
+            assert!((lp - want).abs() < 0.12 * want + 1.0, "LP {want} dB/oct: {lp:.1}");
+            assert!((hp - want).abs() < 0.08 * want + 0.5, "HP {want} dB/oct: {hp:.1}");
+        }
+    }
+
+    #[test]
+    fn resonance_does_not_stack_with_slope() {
+        // Q 4 peaks about +12 dB on one SVF. Before 2026-11-16 every stage took Q: +24 at
+        // 24 dB/oct, +48 at 48. Now only the first does, and each further stage (an SVF at
+        // 0.707, or the one-pole) is −3 dB at the cutoff, as at the default Resonance: the peak
+        // never passes +12.6 and comes down 3 dB a stage. 6 dB has no SVF, so no peak.
+        for (k, &slope) in SLOPES.iter().enumerate().skip(1) {
+            let lay = TapLayout::of(slope);
+            let more = (lay.svfs - 1) as f32 + if lay.pole { 1.0 } else { 0.0 };
+            for kind in [FilterType::LowPass, FilterType::HighPass] {
+                let peak = [900.0, 950.0, 1000.0, 1050.0, 1100.0].map(|f| chain_db(kind, slope, 4.0, f)).into_iter().fold(f32::MIN, f32::max);
+                let floor = 12.0 - 3.0 * more - 1.5;
+                assert!(peak < 12.6 && peak > floor, "{} dB/oct {kind:?}: peak {peak:.1} dB", 6 * (k + 1));
+            }
+        }
+        // and at the default Q a whole step is as it was: −3 dB at the cutoff per SVF
+        let db48 = chain_db(FilterType::LowPass, FilterSlope::Db48, 0.707, 1000.0);
+        assert!((db48 + 12.0).abs() < 0.5, "48 dB/oct at the cutoff: {db48:.1}");
+    }
+
+    #[test]
+    fn a_band_pass_step_is_as_loud_as_a_whole_one() {
+        let at = |slope| chain_db(FilterType::BandPass, slope, 0.707, 1000.0);
+        for pair in SLOPES.windows(2) {
+            let (a, b) = (at(pair[0]), at(pair[1]));
+            // each step adds 6 dB/oct a side and loses 3 dB at the centre, as an SVF stage does
+            assert!((a - b).abs() < 4.0, "{:?} {a:.1} dB, {:?} {b:.1} dB", pair[0], pair[1]);
+        }
     }
 
     #[test]

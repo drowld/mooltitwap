@@ -68,6 +68,22 @@ impl Plugin for Store {
         PLAIN_FLOATS.contains(&id)
     }
 
+    /// 2: Slope has eight steps (owner, 2026-11-16).
+    const VALUES_FORMAT: u32 = 2;
+
+    /// Files from before `values_format` 2 stored Slope as 0, 1, 2 for 12, 24 and 48 dB/oct;
+    /// those are now steps 1, 3 and 7 of 6…48 (`FilterSlope`).
+    fn migrate(p: &mut Preset) {
+        if p.values_format < 2 {
+            for (id, v) in p.values.iter_mut() {
+                if id.starts_with("tap_filter_slope") {
+                    *v = slope_v2(*v);
+                }
+            }
+            p.values_format = 2;
+        }
+    }
+
     /// Both facets are derived from the sound when saving (§3.4).
     fn facets(values: &Values) -> Facets {
         Facets::from([
@@ -93,6 +109,15 @@ impl Plugin for Store {
             *g = patch;
         }
         params.motion.shared.changed();
+    }
+}
+
+/// A Slope stored before `values_format` 2 (0, 1, 2 = 12, 24, 48 dB/oct) as today's step.
+fn slope_v2(old: f32) -> f32 {
+    match old.round() as i32 {
+        i if i <= 0 => 1.0,
+        1 => 3.0,
+        _ => 7.0,
     }
 }
 
@@ -263,6 +288,25 @@ pub fn open_default() -> Library {
 pub(crate) mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn an_older_presets_slope_keeps_its_steepness() {
+        // values_format 1 stored Slope as 0, 1, 2 for 12, 24, 48 dB/oct
+        let mut p = Preset::new::<Store>("old", softsystems_presets::Sound::default(), Kind::User);
+        p.values_format = 1;
+        for (k, old) in [(1, 0.0), (2, 1.0), (3, 2.0)] {
+            p.values.insert(format!("tap_filter_slope_{k}"), old);
+        }
+        p.values.insert("feedback".into(), 0.3);
+        Store::migrate(&mut p);
+        let got: Vec<f32> = (1..=3).map(|k| p.values[&format!("tap_filter_slope_{k}")]).collect();
+        assert_eq!(got, [1.0, 3.0, 7.0]);
+        assert_eq!(p.values["feedback"], 0.3);
+        assert_eq!(p.values_format, 2);
+        // a file already at format 2 is left alone
+        Store::migrate(&mut p);
+        assert_eq!(p.values["tap_filter_slope_3"], 7.0);
+    }
     use std::path::Path;
 
     /// The live params still match `snap` (the crate's check, on the step grid).

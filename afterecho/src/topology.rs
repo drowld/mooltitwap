@@ -51,10 +51,10 @@ pub struct Spacing {
     /// how many steps it's turned against the dry note.
     pub steps: usize,
     pub rotate: usize,
-    /// 0.5 straight … 0.75: a tap on an odd step (the "e" of each beat, the
-    /// dry note being step 0) lands late by (2·swing − 1) of a step; in Lin
-    /// of its gap to the next tap, so a bent Shape still swings. Lin and
-    /// Euclid only: Exp and Log have no grid.
+    /// 0.5 straight … 0.75: the 1st, 3rd, 5th… tap lands late by
+    /// (2·swing − 1) of its gap to the next tap, so a bent Shape and any
+    /// Euclid pattern swing (in Euclid the last tap's next is the first, a
+    /// loop later). Lin and Euclid only: Exp and Log have no grid.
     pub swing: f32,
 }
 
@@ -99,12 +99,17 @@ pub fn compute_positions(sp: Spacing, n_active: usize) -> [f32; NUM_TAPS] {
     if sp.mode == SpacingMode::Euclidean {
         let (steps, count) = euclid_steps(n_active, sp.steps, sp.rotate);
         for (i, p) in positions.iter_mut().enumerate() {
-            *p = if i < count {
-                let st = steps[i];
-                (st as f32 + if st % 2 == 1 { late } else { 0.0 }) * step
-            } else {
-                (i + 1) as f32 * step
-            };
+            *p = if i < count { steps[i] as f32 * step } else { (i + 1) as f32 * step };
+        }
+        // Swing as in Lin (owner, 2026-11-16; before, only taps on odd steps moved, so an
+        // on-the-beat pattern such as the default 8 in 16 never swung): the 1st, 3rd, 5th… tap
+        // moves toward the next one, the last toward the pattern's first hit one loop later.
+        if late != 0.0 && count > 0 {
+            let first_again = (sp.steps.max(1) as f32 * step) + positions[0];
+            for i in (0..count).step_by(2) {
+                let next = if i + 1 < count { positions[i + 1] } else { first_again };
+                positions[i] += late * (next - positions[i]);
+            }
         }
         return positions;
     }
@@ -240,9 +245,19 @@ mod tests {
     #[test]
     fn swing_pushes_the_odd_steps_late() {
         let step = 1.0 / NUM_TAPS as f32;
-        // Euclid, steps 3, 6, 8 at 75 %: the 3 lands half a step late, the rest stay
+        // Euclid, steps 3, 6, 8 at 75 %: the 1st and 3rd taps go halfway to the next, the 3rd's
+        // next being the 3 again a loop (8 steps) later
         let sp = Spacing { mode: SpacingMode::Euclidean, steps: 8, swing: 0.75, ..Spacing::LINEAR };
-        assert_eq!(&compute_positions(sp, 3)[..3], &[3.5 * step, 6.0 * step, 8.0 * step]);
+        let got = compute_positions(sp, 3);
+        let want = [4.5, 6.0, 9.5].map(|x| x * step);
+        assert!(got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "{:?}", &got[..3]);
+        // the default 8 in 16 (every tap on an even step) swings too: 2→3, 4, 6→7, 8…
+        let even = Spacing { mode: SpacingMode::Euclidean, steps: 16, swing: 0.75, ..Spacing::LINEAR };
+        let (plain, swung) = (compute_positions(Spacing { swing: 0.5, ..even }, 8), compute_positions(even, 8));
+        for i in 0..8 {
+            let moved = (swung[i] - plain[i]) / step;
+            assert!((moved - if i % 2 == 0 { 1.0 } else { 0.0 }).abs() < 1e-5, "tap {i} moved {moved} steps");
+        }
         // Lin, straight: the taps on steps 1…4; swung, the 1st and 3rd move half a step
         assert_eq!(&compute_positions(Spacing::LINEAR, 4)[..4], &[1.0, 2.0, 3.0, 4.0].map(|x| x * step));
         let lin = compute_positions(Spacing { swing: 0.75, ..Spacing::LINEAR }, 4);

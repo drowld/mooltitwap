@@ -264,7 +264,7 @@ fn build(r: &Recipe) -> Preset {
             c.clock.trigger = if rate.unit.is_tempo() { Trigger::Sync } else { Trigger::Free };
         }
         for &(slot, target, amount) in routes.iter() {
-            g.routes.set(slot, target, amount, crate::modulation::CAPACITY);
+            g.routes.set(slot, target, amount, crate::modulation::ROUTE_CAP);
         }
         // the rate's value is a host param (its position in the unit)
         if let Some((_, ptr, _)) = map.iter().find(|(pid, _, _)| pid == "mod1_rate") {

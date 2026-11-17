@@ -20,12 +20,14 @@ use std::sync::Arc;
 use crate::delay::{ChannelTaps, DelayLine, ReadLine, SlewedTime};
 use crate::detune::{Pv, Wsola};
 use crate::diffusion::Diffusion;
-use crate::filter::{soft_clip, svf_tick, DcBlock, LoopTone, PeakLimiter, Svf, ToneCoefs};
+use crate::filter::{soft_clip, DcBlock, LoopTone, PeakLimiter, Svf, TapChain, TapLayout, ToneCoefs};
 use crate::modulation::{ModRt, N_TGT, T_COLOUR, T_CROSS, T_CUTOFF, T_DUCK, T_FDBK, T_GAIN, T_MIX, T_PAN, T_RESO, T_TONE};
 use crate::params::{
-    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, AfterechoParams, TapeType, NUM_TAPS, REPEATS_LOOP,
+    ChannelMode, CrossfeedMode, DelayMode, DiffuseRouting, FbCurve, AfterechoParams, SatCurve, TapeType, NUM_TAPS, REPEATS_LOOP,
 };
 use crate::tape::{TapeDegrade, TapeDegradeParams, TapeKind};
+use softsystems_fx::dub_loop::{DubLoop, Params as DubParams};
+use softsystems_fx::saturate::{self as crate_sat, curve::Engine as SatEngine, Saturate};
 use crate::topology::TopologyEngine;
 
 /// Smoothstep: the shape of every mode fade (no corner where it starts or
@@ -73,6 +75,14 @@ impl LogGlide {
     }
 }
 
+/// Dub's allpass sharpness: Cumulus's fixed 0.4 (Q 1.7), not a knob (DECISIONS 2026-11-16).
+const DUB_COLOR: f32 = 0.4;
+
+/// Dub's share of each pass at Intensity `i`: it fades in over the first tenth.
+fn dub_wet(i: f32) -> f32 {
+    (i / 0.1).clamp(0.0, 1.0)
+}
+
 /// What the feedback path does to each pass: Diffuse, Tape and Saturate
 /// when they're routed to it (set per block), and the loop tone (which
 /// glides per sample).
@@ -84,6 +94,11 @@ struct LoopColour {
     diffuse: Option<f32>,
     tape: bool,
     sat: bool,
+    /// Saturate runs one of the crate's curves (beta pass 6), not today's tanh.
+    sat_crate: bool,
+    /// Dub's share of each pass (beta pass 12): 0 off; it fades in over the first tenth of
+    /// Intensity, so turning it on doesn't jump to its band.
+    dub: f32,
     tone: ToneCoefs,
 }
 
@@ -93,7 +108,7 @@ impl LoopColour {
     #[allow(clippy::too_many_arguments)]
     fn apply(
         self, mut l: f32, mut r: f32, diff_l: &mut Diffusion, diff_r: &mut Diffusion, tape: &mut TapeDegrade,
-        tone: &mut LoopTone, sat: &impl Fn(f32) -> f32,
+        tone: &mut LoopTone, sat: &impl Fn(f32) -> f32, dub: &mut [DubLoop; 2], crate_sat: &mut Saturate<2>,
     ) -> (f32, f32) {
         // DIFFUSE routing = Feedback: smear the recirculating signal so
         // each cluster repeat picks up more allpass density.
@@ -110,9 +125,18 @@ impl LoopColour {
         // SATURATE routing = Feedback: drive the recirculating signal —
         // each repeat picks up another pass of harmonics (tape-loop
         // buildup). Sits before the fixed safety tanh.
-        if self.sat {
+        if self.sat && self.sat_crate {
+            crate_sat.process_stereo(&mut l, &mut r);
+        } else if self.sat {
             l = sat(l);
             r = sat(r);
+        }
+        // DUB (beta pass 12): Cumulus's Dub Delay feedback path — the band, the swirl and its
+        // PolSat — on every pass. No gain compensation (the owner's rule): with Intensity up
+        // its low-pass peak adds loop gain, and the soft clip below holds the loop.
+        if self.dub > 0.0 {
+            l += (dub[0].process(l) - l) * self.dub;
+            r += (dub[1].process(r) - r) * self.dub;
         }
         // Loop tone: after the drive, as a tape echo's playback loses highs
         // after the tape saturates. Off (bit-exact) at the centre.
@@ -188,6 +212,15 @@ pub struct Afterecho {
     diff_odd: Diffusion,
     diff_even: Diffusion,
     tape_bounce: TapeDegrade,
+    /// Saturate on the crate's curves (beta pass 6): on In, on Out, and in each loop. Boxed
+    /// (a few KB each), made off the audio thread.
+    sat_in: Box<Saturate<2>>,
+    sat_out: Box<Saturate<2>>,
+    sat_main: Box<Saturate<2>>,
+    sat_bounce: Box<Saturate<2>>,
+    /// Dub's loop processors (beta pass 12): the main loop's L/R, the bounce loop's odd/even.
+    dub_main: [DubLoop; 2],
+    dub_bounce: [DubLoop; 2],
     /// The loop tone's filters, one set per loop (main L/R, bounce odd/even),
     /// and the knob as it glides to the param (a unit per 20 ms).
     tone_main: LoopTone,
@@ -278,11 +311,10 @@ pub struct Afterecho {
     x_feed: f32,
     x_warm: usize,
 
-    // Per-tap filters. Each tap has up to 4 cascaded SVFs for slope control
-    // (1 stage = 12 dB/oct, 2 = 24, 4 = 48). The "filter slope" enum picks
-    // how many stages to actually run per sample.
-    tap_svf_l: [[Svf; 4]; NUM_TAPS],
-    tap_svf_r: [[Svf; 4]; NUM_TAPS],
+    // Per-tap filters (`filter::TapChain`): up to four SVFs and a one-pole, Slope's
+    // `TapLayout` picking which run (6 to 48 dB/oct), Resonance on the first SVF only.
+    tap_chain_l: [TapChain; NUM_TAPS],
+    tap_chain_r: [TapChain; NUM_TAPS],
 
     /// Per-tap glides (v2.37), so a pattern that moves every tap at once
     /// (or stepped automation) doesn't click: each tap's gain and pan gains
@@ -297,13 +329,15 @@ pub struct Afterecho {
     tap_pan_now: [(f32, f32); NUM_TAPS],
     tap_cut: [LogGlide; NUM_TAPS],
     tap_q: [LogGlide; NUM_TAPS],
-    /// A filter-type change crossfades over 10 ms (`tap_type_xf` 0..1) from
-    /// a copy of the filter still running the old type to the new one.
+    /// A filter-type or Slope change crossfades over 10 ms (`tap_type_xf` 0..1)
+    /// from a copy of the filter still running the old type and stages to the new.
     tap_type_now: [crate::params::FilterType; NUM_TAPS],
     tap_type_old: [crate::params::FilterType; NUM_TAPS],
+    tap_layout_now: [TapLayout; NUM_TAPS],
+    tap_layout_old: [TapLayout; NUM_TAPS],
     tap_type_xf: [f32; NUM_TAPS],
-    tap_svf_old_l: [[Svf; 4]; NUM_TAPS],
-    tap_svf_old_r: [[Svf; 4]; NUM_TAPS],
+    tap_chain_old_l: [TapChain; NUM_TAPS],
+    tap_chain_old_r: [TapChain; NUM_TAPS],
 
     // Cross → Diffuse's chain (`diffusion.rs`), one per side.
     // Used exclusively by CrossfeedMode::Diffuse (feedback path).
@@ -387,6 +421,12 @@ impl Default for Afterecho {
             diff_odd: Diffusion::new(0),
             diff_even: Diffusion::new(1),
             tape_bounce: TapeDegrade::new(48_000.0),
+            sat_in: Box::new(Saturate::new(48_000.0)),
+            sat_out: Box::new(Saturate::new(48_000.0)),
+            sat_main: Box::new(Saturate::new(48_000.0)),
+            sat_bounce: Box::new(Saturate::new(48_000.0)),
+            dub_main: [DubLoop::new(48_000.0), DubLoop::new(48_000.0)],
+            dub_bounce: [DubLoop::new(48_000.0), DubLoop::new(48_000.0)],
             tone_main: LoopTone::default(),
             tone_bounce: LoopTone::default(),
             tone_t: 0.0,
@@ -428,8 +468,8 @@ impl Default for Afterecho {
             wet_diff_on: false,
             x_feed: 0.0,
             x_warm: 0,
-            tap_svf_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
-            tap_svf_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
+            tap_chain_l: [TapChain::default(); NUM_TAPS],
+            tap_chain_r: [TapChain::default(); NUM_TAPS],
             tap_gain_mid: [0.0; NUM_TAPS],
             tap_gain_now: [0.0; NUM_TAPS],
             tap_pan_mid: [(1.0, 1.0); NUM_TAPS],
@@ -438,9 +478,11 @@ impl Default for Afterecho {
             tap_q: [LogGlide::at(0.707); NUM_TAPS],
             tap_type_now: [crate::params::FilterType::LowPass; NUM_TAPS],
             tap_type_old: [crate::params::FilterType::LowPass; NUM_TAPS],
+            tap_layout_now: [TapLayout::of(crate::params::FilterSlope::Db12); NUM_TAPS],
+            tap_layout_old: [TapLayout::of(crate::params::FilterSlope::Db12); NUM_TAPS],
             tap_type_xf: [1.0; NUM_TAPS],
-            tap_svf_old_l: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
-            tap_svf_old_r: core::array::from_fn(|_| core::array::from_fn(|_| Svf::default())),
+            tap_chain_old_l: [TapChain::default(); NUM_TAPS],
+            tap_chain_old_r: [TapChain::default(); NUM_TAPS],
             diff_l: Diffusion::new(0),
             diff_r: Diffusion::new(1),
             diff_wet_l: Diffusion::new(0),
@@ -458,6 +500,17 @@ impl Default for Afterecho {
 }
 
 impl Afterecho {
+    /// Tap `i`'s filter coefficients at its gliding cutoff and Resonance, on both channels and
+    /// the old copies (a crossfade's old filter follows the knobs too).
+    fn set_tap_coefs(&mut self, i: usize, sr: f32) {
+        let mut c = Svf::default();
+        c.set(self.tap_cut[i].now, self.tap_q[i].now, sr);
+        let (g, k) = (c.g(), c.k());
+        for ch in [&mut self.tap_chain_l[i], &mut self.tap_chain_r[i], &mut self.tap_chain_old_l[i], &mut self.tap_chain_old_r[i]] {
+            ch.set_gk(g, k);
+        }
+    }
+
     /// Allocate everything for `sample_rate` (initialize's work; tests call it
     /// directly).
     fn prepare(&mut self, sample_rate: f32) {
@@ -488,6 +541,12 @@ impl Afterecho {
         // calibration, which is why it happens here and not per block.
         self.tape = TapeDegrade::new(self.sample_rate);
         self.tape_bounce = TapeDegrade::new(self.sample_rate);
+        let sr = self.sample_rate;
+        self.dub_main = [DubLoop::new(sr), DubLoop::new(sr)];
+        for s in [&mut self.sat_in, &mut self.sat_out, &mut self.sat_main, &mut self.sat_bounce] {
+            **s = Saturate::new(sr);
+        }
+        self.dub_bounce = [DubLoop::new(sr), DubLoop::new(sr)];
     }
 
     /// What goes round, read `at` samples back: [main L, main R, bounce odd,
@@ -630,6 +689,10 @@ impl Plugin for Afterecho {
         self.diff_odd.reset();
         self.diff_even.reset();
         self.tape_bounce.reset();
+        self.dub_main.iter_mut().chain(self.dub_bounce.iter_mut()).for_each(DubLoop::reset);
+        for s in [&mut self.sat_in, &mut self.sat_out, &mut self.sat_main, &mut self.sat_bounce] {
+            s.reset();
+        }
         self.tone_main.reset();
         self.tone_bounce.reset();
         self.freeze_w = 0.0;
@@ -644,8 +707,7 @@ impl Plugin for Afterecho {
         self.xf_mix = 0.0;
         self.xf_diffuse = 0.0;
         (self.x_feed, self.x_warm) = (0.0, 0);
-        for st in self.tap_svf_l.iter_mut() { for s in st.iter_mut() { s.reset(); } }
-        for st in self.tap_svf_r.iter_mut() { for s in st.iter_mut() { s.reset(); } }
+        self.tap_chain_l.iter_mut().chain(self.tap_chain_r.iter_mut()).for_each(TapChain::reset);
         self.tap_type_xf = [1.0; NUM_TAPS];
         self.diff_l.reset();
         self.diff_r.reset();
@@ -808,34 +870,28 @@ impl Plugin for Afterecho {
         // new type starts a crossfade from a copy of the filter as it was.
         let mut tap_cut = [0.0f32; NUM_TAPS];
         let mut tap_q = [0.0f32; NUM_TAPS];
-        let mut tap_filter_stages = [1usize; NUM_TAPS];
         for i in 0..NUM_TAPS {
             let tap = &p.taps[i];
             (tap_cut[i], tap_q[i]) = (tap.filter_cutoff.value(), tap.filter_q.value());
             let ty = tap.filter_type.value();
+            let lay = TapLayout::of(tap.filter_slope.value());
             if initial_snap {
                 (self.tap_cut[i], self.tap_q[i]) = (LogGlide::at(tap_cut[i]), LogGlide::at(tap_q[i]));
                 self.tap_type_now[i] = ty;
+                self.tap_layout_now[i] = lay;
                 self.tap_type_xf[i] = 1.0;
-            } else if ty != self.tap_type_now[i] {
-                self.tap_svf_old_l[i] = self.tap_svf_l[i];
-                self.tap_svf_old_r[i] = self.tap_svf_r[i];
+            } else if ty != self.tap_type_now[i] || lay != self.tap_layout_now[i] {
+                self.tap_chain_old_l[i] = self.tap_chain_l[i];
+                self.tap_chain_old_r[i] = self.tap_chain_r[i];
                 self.tap_type_old[i] = self.tap_type_now[i];
+                self.tap_layout_old[i] = self.tap_layout_now[i];
+                self.tap_chain_l[i].wake(self.tap_layout_now[i], lay);
+                self.tap_chain_r[i].wake(self.tap_layout_now[i], lay);
                 self.tap_type_now[i] = ty;
+                self.tap_layout_now[i] = lay;
                 self.tap_type_xf[i] = 0.0;
             }
-            for st in 0..4 {
-                self.tap_svf_l[i][st].set(self.tap_cut[i].now, self.tap_q[i].now, sr);
-                let (g, k) = (self.tap_svf_l[i][st].g(), self.tap_svf_l[i][st].k());
-                self.tap_svf_r[i][st].set_gk(g, k);
-                self.tap_svf_old_l[i][st].set_gk(g, k);
-                self.tap_svf_old_r[i][st].set_gk(g, k);
-            }
-            tap_filter_stages[i] = match tap.filter_slope.value() {
-                crate::params::FilterSlope::Db12 => 1,
-                crate::params::FilterSlope::Db24 => 2,
-                crate::params::FilterSlope::Db48 => 4,
-            };
+            self.set_tap_coefs(i, sr);
         }
 
         let input_gain = nice_plug::util::db_to_gain(p.input_gain.value());
@@ -882,7 +938,51 @@ impl Plugin for Afterecho {
         let sat_routing = p.sat_routing.value();
         let sat_gain = nice_plug::util::db_to_gain(p.sat_drive.value());
         let sat_on = sat_base > 1e-4;
+        // the crate's curve, if one is picked (beta pass 6): its make-up holds the level, its
+        // Mix is Amount; Drive is the same knob
+        let sat_engine = match p.sat_curve.value() {
+            SatCurve::Classic => None,
+            SatCurve::Tube => Some(SatEngine::Tube),
+            SatCurve::Smooth => Some(SatEngine::Tape),
+            SatCurve::Grit => Some(SatEngine::Grit),
+            SatCurve::Amp => Some(SatEngine::Amp),
+            SatCurve::Transfo => Some(SatEngine::Transformer),
+        };
+        let sat_drive_db = p.sat_drive.value();
+        let sat_settings = move |mix: f32| -> Option<crate_sat::Settings> {
+            sat_engine.map(|engine| crate_sat::Settings {
+                engine,
+                drive_db: sat_drive_db,
+                mix,
+                ..crate_sat::map::settings(&crate_sat::map::DEFAULT_CELLS)
+            })
+        };
+        if let (true, Some(s)) = (sat_on, sat_settings(sat_base)) {
+            match sat_routing {
+                DiffuseRouting::Input => self.sat_in.set(&s),
+                DiffuseRouting::Output => self.sat_out.set(&s),
+                DiffuseRouting::Feedback => {
+                    self.sat_main.set(&s);
+                    self.sat_bounce.set(&s);
+                }
+            }
+        }
         // (the stage itself, `sat`, is made per sample: Motion can move its amount)
+        // DUB block (beta pass 12): always in the loop; on while Intensity is up
+        let dub_base = p.dub_intensity.value();
+        let dub_on = dub_base > 1e-4;
+        let dub_params = |intensity: f32| DubParams {
+            hp_hz: p.dub_low.value(),
+            lp_hz: p.dub_high.value(),
+            intensity,
+            ap_hz: p.dub_swirl.value(),
+            ap_stages: p.dub_swirls.value().clamp(0, 3) as usize,
+            color: DUB_COLOR,
+        };
+        if dub_on {
+            let dp = dub_params(dub_base);
+            self.dub_main.iter_mut().chain(self.dub_bounce.iter_mut()).for_each(|d| d.set(&dp));
+        }
 
         // FB CURVE — decay shape of the repeats. One-pole envelope follower
         // coefficients (5 ms attack / 150 ms release).
@@ -1127,9 +1227,11 @@ impl Plugin for Afterecho {
             diffuse: (diffuse_routing == DiffuseRouting::Feedback).then_some(diffuse_amount),
             tape: degrade_on && degrade_routing == DiffuseRouting::Feedback,
             sat: sat_on && sat_routing == DiffuseRouting::Feedback,
+            sat_crate: sat_engine.is_some(),
+            dub: if dub_on { dub_wet(dub_base) } else { 0.0 },
             tone: ToneCoefs::new(self.tone_t, sr),
         };
-        let ring_len = if colour.diffuse.is_some() || colour.tape {
+        let ring_len = if colour.diffuse.is_some() || colour.tape || dub_on {
             (3.0 * sr) as usize
         } else if tone_target != 0.0 || self.tone_t != 0.0 || routed_to[T_TONE] {
             (0.1 * sr) as usize
@@ -1202,6 +1304,17 @@ impl Plugin for Afterecho {
                     diffuse_amount = modulation::colour(diffuse_base, c);
                     colour.diffuse = (diffuse_routing == DiffuseRouting::Feedback).then_some(diffuse_amount);
                     sat_amount = modulation::colour(sat_base, c);
+                    if let (true, Some(s)) = (sat_on, sat_settings(sat_amount)) {
+                        for st in [&mut self.sat_in, &mut self.sat_out, &mut self.sat_main, &mut self.sat_bounce] {
+                            st.set(&s);
+                        }
+                    }
+                    if dub_on {
+                        let i = modulation::colour(dub_base, c);
+                        colour.dub = dub_wet(i);
+                        let dp = dub_params(i);
+                        self.dub_main.iter_mut().chain(self.dub_bounce.iter_mut()).for_each(|d| d.set(&dp));
+                    }
                     if degrade_on {
                         let cfg = tape_cfg(modulation::colour(degrade_amount, c));
                         self.tape.set_params(&cfg);
@@ -1276,8 +1389,13 @@ impl Plugin for Afterecho {
 
             // SATURATE routing = Input: drive the dry input into the buffer.
             if sat_on && sat_routing == DiffuseRouting::Input {
-                x_l = sat(x_l);
-                x_r = sat(x_r);
+                if colour.sat_crate {
+                    // 20 samples (0.4 ms) later into the line: the echoes, not the dry
+                    self.sat_in.process_stereo(&mut x_l, &mut x_r);
+                } else {
+                    x_l = sat(x_l);
+                    x_r = sat(x_r);
+                }
             }
 
             // ─── Cluster-Delay–style feedback (v2.11.0 architecture) ─────
@@ -1309,7 +1427,9 @@ impl Plugin for Afterecho {
             // Cross → Diffuse adds its own chain to the main loop: while it
             // fades in or out the loop is read at both times, `plain` without
             // it and `crossed` with it.
-            let comp = if colour.diffuse.is_some() { self.diff_wet_l.bulk() } else { 0.0 };
+            let comp = if colour.diffuse.is_some() { self.diff_wet_l.bulk() } else { 0.0 }
+                // the crate's Saturate in the loop delays each pass by its oversampling (pass 6)
+                + if colour.sat && colour.sat_crate { crate_sat::LATENCY as f32 } else { 0.0 };
             let x_w = s_curve(self.xf_diffuse);
             let at_plain = (fb_at - comp).max(2.0);
             let at_crossed = (at_plain - self.diff_l.bulk()).max(2.0);
@@ -1435,6 +1555,13 @@ impl Plugin for Afterecho {
                     if colour.tape {
                         self.tape.reset();
                     }
+                    self.dub_main.iter_mut().for_each(DubLoop::reset);
+                    if colour.sat && colour.sat_crate {
+                        self.sat_main.reset();
+                        if let Some(s) = sat_settings(sat_amount) {
+                            self.sat_main.set(&s);
+                        }
+                    }
                     self.tone_main.reset();
                 }
                 let mut fb_in_l = fb_main[0];
@@ -1459,6 +1586,8 @@ impl Plugin for Afterecho {
                     &mut self.tape,
                     &mut self.tone_main,
                     &sat,
+                    &mut self.dub_main,
+                    &mut self.sat_main,
                 );
             }
 
@@ -1469,6 +1598,13 @@ impl Plugin for Afterecho {
                     self.diff_odd.reset();
                     self.diff_even.reset();
                     self.tape_bounce.reset();
+                    self.dub_bounce.iter_mut().for_each(DubLoop::reset);
+                    if colour.sat && colour.sat_crate {
+                        self.sat_bounce.reset();
+                        if let Some(s) = sat_settings(sat_amount) {
+                            self.sat_bounce.set(&s);
+                        }
+                    }
                     self.tone_bounce.reset();
                 }
                 (odd_out, even_out) = colour.apply(
@@ -1479,6 +1615,8 @@ impl Plugin for Afterecho {
                     &mut self.tape_bounce,
                     &mut self.tone_bounce,
                     &sat,
+                    &mut self.dub_bounce,
+                    &mut self.sat_bounce,
                 );
             }
 
@@ -1625,32 +1763,19 @@ impl Plugin for Afterecho {
                     None => lines.read(&hl, &hr, linked),
                 };
 
-                let stages = tap_filter_stages[i];
                 let moved = self.tap_cut[i].step(tap_cut[i], tap_glide) | self.tap_q[i].step(tap_q[i], tap_glide);
                 if moved {
-                    let mut c = Svf::default();
-                    c.set(self.tap_cut[i].now, self.tap_q[i].now, sr);
-                    for st in 0..4 {
-                        let (g, k) = (c.g(), c.k());
-                        self.tap_svf_l[i][st].set_gk(g, k);
-                        self.tap_svf_r[i][st].set_gk(g, k);
-                        self.tap_svf_old_l[i][st].set_gk(g, k);
-                        self.tap_svf_old_r[i][st].set_gk(g, k);
-                    }
+                    self.set_tap_coefs(i, sr);
                 }
-                let ty = self.tap_type_now[i];
+                let (ty, lay) = (self.tap_type_now[i], self.tap_layout_now[i]);
                 let (dry_l, dry_r) = (sl, sr_s);
-                for st in 0..stages {
-                    sl = svf_tick(&mut self.tap_svf_l[i][st], sl, ty);
-                    sr_s = svf_tick(&mut self.tap_svf_r[i][st], sr_s, ty);
-                }
-                // a new filter type: the old one (a copy, still running) fades out
+                sl = self.tap_chain_l[i].tick(sl, ty, lay);
+                sr_s = self.tap_chain_r[i].tick(sr_s, ty, lay);
+                // a new filter type or Slope: the old one (a copy, still running) fades out
                 if self.tap_type_xf[i] < 1.0 {
-                    let (old, mut ol, mut or) = (self.tap_type_old[i], dry_l, dry_r);
-                    for st in 0..stages {
-                        ol = svf_tick(&mut self.tap_svf_old_l[i][st], ol, old);
-                        or = svf_tick(&mut self.tap_svf_old_r[i][st], or, old);
-                    }
+                    let (old, old_lay) = (self.tap_type_old[i], self.tap_layout_old[i]);
+                    let ol = self.tap_chain_old_l[i].tick(dry_l, old, old_lay);
+                    let or = self.tap_chain_old_r[i].tick(dry_r, old, old_lay);
                     let w = s_curve(self.tap_type_xf[i]);
                     sl = ol + (sl - ol) * w;
                     sr_s = or + (sr_s - or) * w;
@@ -1687,8 +1812,12 @@ impl Plugin for Afterecho {
 
             // SATURATE routing = Output: drive the wet mix once, before dry/wet.
             if sat_on && sat_routing == DiffuseRouting::Output {
-                wet_l = sat(wet_l);
-                wet_r = sat(wet_r);
+                if colour.sat_crate {
+                    self.sat_out.process_stereo(&mut wet_l, &mut wet_r);
+                } else {
+                    wet_l = sat(wet_l);
+                    wet_r = sat(wet_r);
+                }
             }
 
             // Ducking: only the echoes dip, after the output colour and before
@@ -1897,7 +2026,7 @@ mod tests {
     /// through the patch, as the editor makes one.
     fn route(plug: &Afterecho, slot: u16, target: &str, amount: f32) {
         let m = &plug.params.motion;
-        m.patch.lock().unwrap().routes.set(slot, target, amount, crate::modulation::CAPACITY);
+        m.patch.lock().unwrap().routes.set(slot, target, amount, crate::modulation::ROUTE_CAP);
         m.shared.changed();
     }
 
@@ -2207,6 +2336,67 @@ mod tests {
     }
 
     #[test]
+    fn dub_drops_each_return_to_its_band() {
+        // beta pass 12: the taps' pass is left alone and every return leans darker than the
+        // plain loop's (the band at 150 Hz–2.5 kHz, the spike's medium)
+        let run = |intensity: f32| {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "feedback", 0.8);
+            set(&plug, "dub_intensity", intensity);
+            let out = render(&mut plug, &click(0.2), |_, _| {});
+            (0..4).map(|k| lean(&out, 20.0 + 20.0 * k as f32)).collect::<Vec<_>>()
+        };
+        let (off, dub) = (run(0.0), run(0.6));
+        assert!((dub[0] / off[0] - 1.0).abs() < 0.05, "the taps' pass: off {off:?}, dub {dub:?}");
+        for k in 1..4 {
+            assert!(dub[k] < 0.5 * off[k], "return {k}: off {off:?}, dub {dub:?}");
+        }
+    }
+
+    #[test]
+    fn dub_at_zero_changes_nothing() {
+        let run = |dub: bool| {
+            let mut plug = plugin(&[-0.3, 0.5]);
+            set(&plug, "feedback", 0.7);
+            if dub {
+                // its band and swirl set, but Intensity at 0
+                set(&plug, "dub_low", 800.0);
+                set(&plug, "dub_swirls", 3.0);
+            }
+            render(&mut plug, &noise_burst(0.5), |_, _| {})
+        };
+        assert!(run(true) == run(false));
+    }
+
+    #[test]
+    fn dub_heavy_rings_and_stays_bounded() {
+        // the owner's rule: no ÷Q, so Intensity's low-pass peak adds loop gain and a hot loop
+        // self-oscillates, held by the loop's soft clip; in Mix and in Ping
+        for mode in [0.0, PING] {
+            let mut plug = plugin(&[0.0, 0.4]);
+            set(&plug, "feedback", 0.95);
+            set(&plug, "crossfeed_mode", mode);
+            set(&plug, "crossfeed", 1.0);
+            set(&plug, "dub_intensity", 1.0);
+            set(&plug, "dub_low", 200.0);
+            set(&plug, "dub_high", 1500.0);
+            set(&plug, "dub_swirls", 3.0);
+            let out = render(&mut plug, &noise_burst(3.0), |_, _| {});
+            let half = (SR / 2.0) as usize;
+            let last = &out[out.len() - half..];
+            assert!(last.iter().all(|s| s.0.is_finite() && s.1.is_finite()));
+            let rms = (last.iter().map(|s| s.0 * s.0 + s.1 * s.1).sum::<f32>() / half as f32).sqrt();
+            let lines = if mode == PING {
+                plug.ping_odd.buffer_peak().max(plug.ping_even.buffer_peak())
+            } else {
+                (1..half).fold(0.0f32, |m, d| m.max(plug.main_l.delay.read(d as f32).abs()).max(plug.main_r.delay.read(d as f32).abs()))
+            };
+            println!("Dub heavy at 95 %, mode {mode}: rms {rms:.3}, loop peak {lines:.3}");
+            assert!(rms > 0.005 && lines <= 2.0, "mode {mode}: rms {rms}, loop peak {lines}");
+        }
+    }
+
+    #[test]
     fn turning_the_tone_does_not_click() {
         // The held tone in the loop, the knob jumping 0 → −1 → +1 → −1 → 0 a
         // second each (as stepped automation can), against it held at each.
@@ -2495,6 +2685,35 @@ mod tests {
     }
 
     #[test]
+    fn changing_slope_does_not_click() {
+        // The held tone through eight resonant low-passed taps; Slope jumps between 6 and
+        // 48 dB/oct (stages switching in and out) four times, against the tone held at each:
+        // the crossfade from the old stages keeps it from clicking.
+        let input = held_tone();
+        let n = input.len();
+        let slopes = |plug: &Afterecho, steep: bool| {
+            for k in 1..=8 {
+                set(plug, &format!("tap_filter_cutoff_{k}"), 700.0);
+                set(plug, &format!("tap_filter_q_{k}"), 2.0);
+                set(plug, &format!("tap_filter_slope_{k}"), if steep { 7.0 } else { 0.0 });
+            }
+        };
+        let sharpest = |schedule: [bool; 4]| {
+            let mut plug = plugin(&[0.0; 8]);
+            set(&plug, "feedback", 0.4);
+            sharpest_bend(&render(&mut plug, &input, |s, plug| slopes(plug, schedule[s * 4 / n])))
+        };
+        let held = [[false; 4], [true; 4]].map(|s| sharpest(s).0).into_iter().fold(0.0, f32::max);
+        let (switched, at) = sharpest([false, true, false, true]);
+        assert!(
+            switched < 1.5 * held,
+            "{:.1}× the held slopes' sharpest bend, at {:.3} s",
+            switched / held,
+            at as f32 / SR + 0.3
+        );
+    }
+
+    #[test]
     fn freezing_and_letting_go_do_not_click() {
         // The held tone through three spread taps, frozen and let go a second
         // at a time, against it never frozen: in Mix and in Ping, plain and
@@ -2523,6 +2742,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn swing_moves_the_odd_taps_late_in_the_audio() {
+        // A click through 4 taps on 20 ms steps in Lin, then 3 taps in 8 Euclid steps: Swing
+        // 75 % moves the 1st and 3rd echoes halfway to the next, in what plays (in Euclid the
+        // last one's next is the first, a loop later).
+        let arrivals = |mode: f32, swing: f32| {
+            let mut plug = plugin(&[0.0; 4]);
+            set(&plug, "feedback", 0.0);
+            set(&plug, "spacing_mode", mode);
+            if mode == 3.0 {
+                set(&plug, "num_taps_active", 3.0);
+                set(&plug, "euclid_steps", 8.0);
+            }
+            set(&plug, "swing", swing);
+            let out = render(&mut plug, &click(0.25), |_, _| {});
+            // each echo: the loudest sample of each burst, in ms, over the first 230 ms
+            let env: Vec<f32> = out.iter().take((0.23 * SR) as usize).map(|s| s.0.abs()).collect();
+            let top = env.iter().fold(0.0f32, |m, &v| m.max(v));
+            let mut at = vec![];
+            for i in 24..env.len() - 24 {
+                let v = env[i];
+                if v > 0.3 * top && env[i - 24..i + 24].iter().all(|&w| w <= v) && at.last().is_none_or(|&a: &f32| i as f32 / SR * 1000.0 - a > 1.0) {
+                    at.push((i as f32 / SR * 1000.0 * 10.0).round() / 10.0);
+                }
+            }
+            at
+        };
+        assert_eq!(arrivals(0.0, 0.5), [20.0, 40.0, 60.0, 80.0]);
+        assert_eq!(arrivals(0.0, 0.75), [30.0, 40.0, 70.0, 80.0]);
+        assert_eq!(arrivals(3.0, 0.5), [60.0, 120.0, 160.0]);
+        assert_eq!(arrivals(3.0, 0.75), [90.0, 120.0, 190.0]);
     }
 
     #[test]
@@ -2963,6 +3215,49 @@ mod tests {
     }
 
     #[test]
+    fn the_crates_saturate_in_the_loop_keeps_the_cycle() {
+        // pass 6: each crate curve delays a pass by its oversampling (20 samples, 0.42 ms);
+        // the loop reads that much earlier, so passes land where Classic's do
+        let run = |curve: f32| {
+            let mut plug = plugin(&[0.0]);
+            set(&plug, "base_time_l", 400f32.ln() / 2000f32.ln());
+            set(&plug, "feedback", 0.7);
+            set(&plug, "sat_routing", 1.0);
+            set(&plug, "sat_amount", 0.7);
+            set(&plug, "sat_curve", curve);
+            render(&mut plug, &burst(2.6), |_, _| {})
+        };
+        let classic = run(0.0);
+        for curve in 1..=5 {
+            let offs = repeat_offsets_ms(&classic, &run(curve as f32), 0.4, 0.19);
+            assert!(offs.len() >= 4, "{offs:?}");
+            // without the take-back they'd drift 0.42 ms a pass
+            let ok = offs[..4].iter().all(|o| o.abs() <= 0.25);
+            assert!(ok, "curve {curve}: repeats off by {offs:?} ms");
+        }
+    }
+
+    #[test]
+    fn the_crates_saturate_lets_the_loop_self_oscillate() {
+        // past 100 % with each crate curve on FB: still going (no gain compensation), bounded
+        for curve in 1..=5 {
+            let mut plug = plugin(&[0.0, 0.4]);
+            set(&plug, "feedback", 1.05);
+            set(&plug, "sat_routing", 1.0);
+            set(&plug, "sat_amount", 1.0);
+            set(&plug, "sat_drive", 18.0);
+            set(&plug, "sat_curve", curve as f32);
+            let out = render(&mut plug, &noise_burst(3.0), |_, _| {});
+            let half = (SR / 2.0) as usize;
+            let last = &out[out.len() - half..];
+            assert!(last.iter().all(|s| s.0.is_finite() && s.1.is_finite()));
+            let rms = (last.iter().map(|s| s.0 * s.0 + s.1 * s.1).sum::<f32>() / half as f32).sqrt();
+            let lines = (1..half).fold(0.0f32, |m, d| m.max(plug.main_l.delay.read(d as f32).abs()).max(plug.main_r.delay.read(d as f32).abs()));
+            assert!(rms > 0.005 && lines <= 2.0, "curve {curve}: rms {rms}, loop peak {lines}");
+        }
+    }
+
+    #[test]
     fn diffuse_in_the_loop_at_0_is_the_plain_loop() {
         // Colour on FB at Amount 0 is the chain's delay, taken back by the read
         let run = |routing: f32| {
@@ -3307,6 +3602,39 @@ mod tests {
         set(&other, "feedback", 0.5);
         render(&mut other, &vec![(0.0, 0.0); 4096], |_, _| {});
         assert!(other.modu.reaches(crate::modulation::T_FDBK) && !other.modu.reaches(crate::modulation::T_PAN));
+    }
+
+    #[test]
+    fn a_slot_can_move_another_slots_rate() {
+        // pass 11: LFO 2, held at one end (a square at a slow rate), on LFO 1's Rate runs LFO 1
+        // at another speed than its 1 Hz
+        let travelled = |routed: bool| {
+            let mut plug = plugin(&[0.0]);
+            route(&plug, 0, "pan", 0.3);
+            if routed {
+                slot(&plug, 1, Rate::hz(0.05), |m| {
+                    if let Modulator::Curve(c) = m {
+                        c.shape = softsystems_mod::Shape::Square;
+                    }
+                });
+                route(&plug, 1, &softsystems_mod::Param::Rate.id(0), 0.5);
+            }
+            let mut pos = Vec::new();
+            render(&mut plug, &vec![(0.0, 0.0); 4800], |_, p| pos.push(p.params.motion.shared.monitor.position(0)));
+            // how far LFO 1 went round in 0.1 s, its wraps counted
+            let mut turns = 0.0f32;
+            for w in pos.windows(2) {
+                let d = w[1] - w[0];
+                turns += if d < -0.5 { d + 1.0 } else { d };
+            }
+            turns
+        };
+        let (plain, moved) = (travelled(false), travelled(true));
+        assert!(plain > 0.0, "{plain}");
+        // the square sits at one end for the whole render: half the range is the crate's 4 octaves, 16× (or ÷16)
+        let ratio = (moved / plain).max(plain / moved);
+        println!("LFO 1 in 0.1 s: plain {plain:.3} turns, routed {moved:.3}");
+        assert!(ratio > 1.5, "plain {plain}, routed {moved}");
     }
 
     #[test]

@@ -1,0 +1,17 @@
+[package]
+name = "diffuse_crate_spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline listening test for Afterecho's Diffuse against the crate's DIFFUSION and SPACES (crate adoption pass 4). Not part of the plug-in."
+
+# Standalone: NOT a member of the plug-in workspace.
+[workspace]
+
+[dependencies]
+realfft = "3.5"
+softsystems-fx = { path = "../../../../Dev/nice-plug/crates/softsystems-fx", features = ["diffusion", "reverb"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

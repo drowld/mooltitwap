@@ -4,17 +4,17 @@
 //! as a sheet over the picture and the lane, with Depth and Time in its header.
 
 use super::{button, knob_cell, pill_drag, r, rule, text, Layout, ScopeState};
-use crate::modulation::{self, ALLOWED, FOLLOW_INPUTS, N_SLOTS, N_TGT};
+use crate::modulation::{self, ALLOWED, FOLLOW_INPUTS, N_SLOTS, N_TGT, TGT_IDS};
 use crate::params::AfterechoParams;
 use crate::ui::theme;
 use nice_plug::prelude::*;
 use egui::{Align2, Pos2, Rect, Vec2};
-use softsystems_mod::{Modulator, Patch};
+use softsystems_mod::{mod_target_base, mod_targets, Assign, Modulator, Param as ModParam, Patch, Port, Routes, Target, Targets};
 use softsystems_ui::modulation::curve::{self, CurveIn, CurveState};
 use softsystems_ui::modulation::follow::{self, FollowIn};
-use softsystems_ui::modulation::header::{EditOut, HeaderIn, Marks};
+use softsystems_ui::modulation::header::{EditOut, HeaderIn, Marks as HeadMarks, RouteGesture};
 use softsystems_ui::modulation::steps::{self, StepsIn, StepsState};
-use softsystems_ui::modulation::tiles::{self, TileIn};
+use softsystems_ui::modulation::tiles::{self, TileIn, DROP_AMOUNT};
 use softsystems_ui::modulation::trace::Trace;
 use softsystems_ui::modulation::{grid, CellLook, Column, Grid, GridState, Headings, Widths};
 use std::sync::Arc;
@@ -29,6 +29,8 @@ pub(crate) struct MotionUi {
     traces: Vec<Trace>,
     grid: GridState,
     look: CellLook,
+    /// A slot setting's routes menu, open (pass 11): the slot, the setting, its anchor.
+    mod_menu: Option<(usize, ModParam, Rect)>,
 }
 
 impl Default for MotionUi {
@@ -41,6 +43,7 @@ impl Default for MotionUi {
             traces: (0..N_SLOTS).map(|_| Trace::default()).collect(),
             grid: GridState::default(),
             look: CellLook::default(),
+            mod_menu: None,
         }
     }
 }
@@ -83,7 +86,8 @@ pub(super) fn motion_panel(
     let names: Vec<String> = (0..N_SLOTS).map(|i| slot_name(&patch, i)).collect();
     let mon = &m.shared.monitor;
 
-    // the tiles: a tap opens a slot
+    // the tiles: a tap opens a slot, ↗ arms it, a drag carries it to a control
+    let armed_port = wiring(ui.ctx(), |w| w.assign.armed());
     let items: Vec<TileIn> = (0..N_SLOTS)
         .map(|i| TileIn {
             generator: &patch.modulators[i],
@@ -92,7 +96,7 @@ pub(super) fn motion_panel(
             value: mon.value(i),
             outputs: &[],
             position: mon.position(i),
-            armed: false,
+            armed: armed_port == Some(Port::slot(i as u16)),
             armed_output: None,
             open: mu.sel == i,
         })
@@ -102,6 +106,19 @@ pub(super) fn motion_panel(
     if let Some(i) = outs.iter().position(|o| o.open) {
         mu.sel = i;
     }
+    for (i, o) in outs.iter().enumerate() {
+        let port = Port::slot(i as u16);
+        if o.arm {
+            wiring(ui.ctx(), |w| w.assign.arm(port));
+        }
+        if let Some((_, hit)) = o.drag.and_then(|at| target_at(ui.ctx(), at)) {
+            light(ui.ctx(), hit, slot_col(i), s);
+        }
+        if let Some((t, _)) = o.drop.and_then(|at| target_at(ui.ctx(), at)) {
+            patch.routes.set(port, TGT_IDS[t], DROP_AMOUNT, modulation::ROUTE_CAP);
+            edited(setter, m, true);
+        }
+    }
     let p = ui.painter().clone();
     for xr in [x + 220.0, x + 712.0] {
         rule(&p, Pos2::new(o.x + xr * s, o.y + (y + 52.0) * s), Pos2::new(o.x + xr * s, o.y + (y + 232.0) * s), s);
@@ -109,6 +126,12 @@ pub(super) fn motion_panel(
 
     // the open slot's editor, a playhead per tap
     let sel = mu.sel.min(N_SLOTS - 1);
+    // routes into this slot's own settings, and the armed slot (pass 11)
+    let into: Vec<(ModParam, egui::Color32)> = patch
+        .routes
+        .iter()
+        .filter_map(|r| ModParam::parse(&r.target).filter(|(slot, _)| *slot as usize == sel).map(|(_, p)| (p, slot_col(r.source.slot as usize))))
+        .collect();
     let head = HeaderIn {
         name: &names[sel],
         col: slot_col(sel),
@@ -116,7 +139,7 @@ pub(super) fn motion_panel(
         voices: false,
         tempo: m.shared.tempo(),
         sig: m.shared.sig(),
-        marks: Marks::NONE,
+        marks: HeadMarks { routes: &into, armed: armed_port.map(|p| slot_col(p.slot as usize)) },
         kinds: &ALLOWED,
     };
     let er = r(o, s, x + 230.0, y + 46.0, 472.0, 194.0);
@@ -151,6 +174,41 @@ pub(super) fn motion_panel(
     } else if out.ended {
         m.mods.push(setter, sel, &g, true);
         edited(setter, m, true);
+    }
+    // a setting touched with a slot armed makes or sizes its route; a right-click lists them
+    if let Some(gesture) = out.route {
+        wiring(ui.ctx(), |w| match gesture {
+            RouteGesture::Touch(p) => {
+                w.assign.touch(&p.id(sel as u16), &mut patch.routes, modulation::ROUTE_CAP);
+            }
+            RouteGesture::Drag(d) => {
+                w.assign.drag(&mut patch.routes, d);
+            }
+            RouteGesture::Release => w.assign.release(),
+        });
+        edited(setter, m, matches!(gesture, RouteGesture::Release));
+    }
+    if let Some((p, anchor)) = out.menu {
+        mu.mod_menu = Some((sel, p, anchor));
+    }
+    if let Some((slot, p, anchor)) = mu.mod_menu {
+        let gens = patch.modulators.clone();
+        let names: Vec<String> = (0..N_SLOTS).map(|i| slot_name(&patch, i)).collect();
+        let targets = Targets::new(mod_targets(&gens, &names));
+        let id = p.id(slot as u16);
+        let base = mod_target_base(&gens, &id).unwrap_or(0.5);
+        let columns: Vec<Column> = (0..N_SLOTS).map(|i| Column::new(&names[i], slot_col(i))).collect();
+        let mid = ui.id().with(("mo_mod_menu", slot, id.as_str()));
+        let o = softsystems_ui::modulation::knob_menu(ui, mid, anchor, &id, &targets, &columns, base, &mut patch.routes);
+        if o.changed {
+            edited(setter, m, true);
+        }
+        if o.matrix {
+            mu.routes = true;
+        }
+        if o.closed || o.matrix || slot != sel {
+            mu.mod_menu = None;
+        }
     }
     drop(patch);
 
@@ -200,17 +258,32 @@ pub(super) fn routes_sheet(
     }
     let Ok(mut patch) = m.patch.lock() else { return };
     let columns: Vec<Column> = (0..N_SLOTS).map(|i| Column::new(&slot_name(&patch, i), slot_col(i)).per_voice()).collect();
-    let bases: [f32; N_TGT] = std::array::from_fn(|t| knob_base(params, t, shown_tap));
-    let active = [true; N_TGT];
+    // the plug-in's targets, then every slot setting (pass 11: a row once routed or added)
+    let names: Vec<String> = (0..N_SLOTS).map(|i| slot_name(&patch, i)).collect();
+    let mut settings = mod_targets(&patch.modulators, &names);
+    // the sheet draws no group headings (a rule between groups), so a setting's row says whose
+    // it is: "LFO 1 Rate"
+    for tg in &mut settings {
+        tg.name = format!("{} {}", tg.group, tg.name);
+    }
+    let mut bases: Vec<f32> = (0..N_TGT).map(|t| knob_base(params, t, shown_tap)).collect();
+    bases.extend(settings.iter().map(|tg| mod_target_base(&patch.modulators, &tg.id).unwrap_or(0.5)));
+    let mut list: Vec<Target> = TARGETS.with(|t| t.iter().cloned().collect());
+    list.extend(settings);
+    let targets = Targets::new(list);
+    let active = vec![true; bases.len()];
+    // rows touched with a slot armed show before they hold a route
+    let added: Vec<String> = wiring(ui.ctx(), |w| w.assign.added().iter().map(|s| s.to_string()).collect());
+    let added: Vec<&str> = added.iter().map(String::as_str).collect();
     let gr = Rect::from_min_max(rect.min + Vec2::new(14.0, 48.0) * s, rect.max - Vec2::new(14.0, 12.0) * s);
-    let out = TARGETS.with(|targets| {
+    let out = {
         let g = Grid {
-            targets,
+            targets: &targets,
             sources: &columns,
             bases: &bases,
             active: &active,
-            added: &[],
-            cap: modulation::CAPACITY,
+            added: &added,
+            cap: modulation::ROUTE_CAP,
             look: mu.look,
             columns: &[],
             row_order: &[],
@@ -219,7 +292,7 @@ pub(super) fn routes_sheet(
             headings: Headings::Rule,
         };
         grid(ui, gr, &g, &mut patch.routes, &mut mu.grid, ui.id().with("mo_grid"))
-    });
+    };
     if let Some(look) = out.look {
         mu.look = look;
     }
@@ -237,4 +310,298 @@ pub(super) fn routes_sheet(
     let depth = time.translate(Vec2::new(-pw - 8.0 * s, 0.0));
     pill_drag(ui, depth, s, setter, &m.depth, "mx_depth", "Depth", &mut sc.focus);
     pill_drag(ui, time, s, setter, &m.time, "mx_time", "Time", &mut sc.focus);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Arm-and-touch, drag-to-knob, the halo and the routes menu (beta pass 10, Strata's way)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The page's routing state, in the editor's own egui context: the crate's `Assign` (the armed
+/// slot, the knob being sized), the target controls laid out this frame and the last (for a
+/// tile's drop and for lighting the control under a carried tile), a tapped route dot, and
+/// the routes menu open on a control.
+#[derive(Clone, Default)]
+struct Wiring {
+    assign: Assign,
+    pass: u64,
+    hits: Vec<(usize, Rect)>,
+    hits_prev: Vec<(usize, Rect)>,
+    /// A route dot was tapped: open this slot (`u16::MAX`: open Routes).
+    show: Option<u16>,
+    menu: Option<(usize, Rect)>,
+}
+
+fn wiring<R>(ctx: &egui::Context, f: impl FnOnce(&mut Wiring) -> R) -> R {
+    ctx.data_mut(|d| f(d.get_temp_mut_or_default::<Wiring>(egui::Id::new("afterecho_wiring"))))
+}
+
+/// Target `tgt`'s control is at `r` this frame (a drop on it routes there).
+pub(super) fn place(ctx: &egui::Context, tgt: usize, r: Rect) {
+    let nr = ctx.cumulative_pass_nr();
+    wiring(ctx, |w| {
+        if w.pass != nr {
+            w.hits_prev = std::mem::take(&mut w.hits);
+            w.pass = nr;
+        }
+        w.hits.push((tgt, r));
+    });
+}
+
+/// The target control under `at`, laid out this frame or the last.
+fn target_at(ctx: &egui::Context, at: Pos2) -> Option<(usize, Rect)> {
+    wiring(ctx, |w| w.hits.iter().chain(w.hits_prev.iter()).copied().find(|(_, r)| r.contains(at)))
+}
+
+/// The armed slot's colour, for the controls' ring.
+pub(super) fn armed(ctx: &egui::Context) -> Option<egui::Color32> {
+    wiring(ctx, |w| w.assign.armed()).map(|p| slot_col(p.slot as usize))
+}
+
+/// A control's arm-and-touch: the press makes the armed slot's route at 0 (or takes the one
+/// there), the drag sizes it, a release with no drag leaves it at the crate's drop amount. The
+/// slot stays armed for the next control; ↗ again (or Escape) disarms. A tapped route dot
+/// opens its slot.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn route_knob(
+    ctx: &egui::Context, setter: &ParamSetter, m: &modulation::MotionParams, tgt: usize, touch: bool, drag: f32, release: bool,
+    tap: Option<u16>,
+) {
+    if touch || drag != 0.0 || release {
+        let Ok(mut patch) = m.patch.lock() else { return };
+        wiring(ctx, |w| touch_route(&mut w.assign, &mut patch.routes, tgt, touch, drag, release));
+        drop(patch);
+        edited(setter, m, release);
+    }
+    if tap.is_some() {
+        wiring(ctx, |w| w.show = tap);
+    }
+}
+
+fn touch_route(a: &mut Assign, routes: &mut Routes, tgt: usize, touch: bool, drag: f32, release: bool) {
+    if touch {
+        a.touch(TGT_IDS[tgt], routes, modulation::ROUTE_CAP);
+    }
+    if drag != 0.0 {
+        a.drag(routes, drag);
+    }
+    if release {
+        if let Some(port) = a.armed() {
+            if let Some(r) = routes.find(port, TGT_IDS[tgt]).and_then(|i| routes.get_mut(i)) {
+                if r.amount == 0.0 {
+                    r.amount = DROP_AMOUNT;
+                }
+            }
+        }
+        a.release();
+    }
+}
+
+/// A target's routes menu (the crate's `knob_menu`), on a right-click or a long press: a row
+/// per route into it (a pick clears it), Clear every route, Show in Routes. `base` is the
+/// control's position, for the amounts' units.
+pub(super) fn routes_menu(ui: &mut egui::Ui, setter: &ParamSetter, m: &modulation::MotionParams, tgt: usize, base: f32, open: bool, anchor: Rect) {
+    if open {
+        wiring(ui.ctx(), |w| w.menu = Some((tgt, anchor)));
+    }
+    let Some(anchor) = wiring(ui.ctx(), |w| w.menu.filter(|(t, _)| *t == tgt).map(|(_, r)| r)) else { return };
+    let Ok(mut patch) = m.patch.lock() else { return };
+    let columns: Vec<Column> = (0..N_SLOTS).map(|i| Column::new(&slot_name(&patch, i), slot_col(i))).collect();
+    let id = ui.id().with(("afterecho_routes_menu", tgt));
+    let out = TARGETS.with(|t| softsystems_ui::modulation::knob_menu(ui, id, anchor, TGT_IDS[tgt], t, &columns, base, &mut patch.routes));
+    drop(patch);
+    if out.changed {
+        edited(setter, m, true);
+    }
+    wiring(ui.ctx(), |w| {
+        if out.matrix {
+            w.show = Some(u16::MAX);
+        }
+        if out.closed {
+            w.menu = None;
+        }
+    });
+}
+
+/// A carried tile lights the control under it: a ring in the slot's colour, over everything.
+fn light(ctx: &egui::Context, r: Rect, col: egui::Color32, s: f32) {
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("afterecho_lit")));
+    p.rect_stroke(r.expand(3.0 * s), 8.0 * s, egui::Stroke::new(2.0 * s, col), egui::StrokeKind::Outside);
+}
+
+/// Every frame, whatever tab is open: a tapped route dot opens its slot in the Motion tab
+/// ("+N" or Show in Routes opens the sheet); Escape disarms.
+pub(super) fn follow_wiring(ctx: &egui::Context, sc: &mut ScopeState) {
+    match wiring(ctx, |w| w.show.take()) {
+        Some(u16::MAX) => {
+            sc.lane_tab = 1;
+            sc.motion.routes = true;
+        }
+        Some(src) if (src as usize) < N_SLOTS => {
+            sc.lane_tab = 1;
+            sc.motion.sel = src as usize;
+        }
+        _ => {}
+    }
+    if !sc.motion.routes && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        wiring(ctx, |w| w.assign.disarm());
+    }
+}
+
+/// Preview only: slot 1 armed.
+pub(super) fn arm_demo(ctx: &egui::Context) {
+    wiring(ctx, |w| w.assign.arm(Port::slot(0)));
+}
+
+/// What modulation marks on one target's control.
+pub(super) struct Marks {
+    tgt: usize,
+    routes: Routes,
+    generators: Vec<Modulator>,
+    depth: f32,
+    /// The live modulation now (Depth applied): the target's, or the shown tap's.
+    offset: f32,
+    /// The target does nothing now (the matrix says inactive): dots faint, no halo.
+    dim: bool,
+}
+
+impl Marks {
+    fn deepest(&self) -> Option<u16> {
+        self.routes.iter().max_by(|a, b| a.amount.abs().total_cmp(&b.amount.abs())).map(|r| r.source.slot)
+    }
+}
+
+/// Target `tgt`'s marks; a tap target's live position is tap `tap`'s.
+pub(super) fn marks(m: &modulation::MotionParams, tgt: usize, tap: Option<usize>) -> Marks {
+    let (routes, generators) = match m.patch.lock() {
+        Ok(g) => {
+            let mut r = Routes::new();
+            for x in g.routes.iter().filter(|x| x.target == TGT_IDS[tgt] && x.amount != 0.0) {
+                r.set(x.source, &x.target, x.amount, usize::MAX);
+            }
+            (r, g.modulators.clone())
+        }
+        Err(_) => (Routes::new(), Vec::new()),
+    };
+    let mx = &m.shared.matrix;
+    let offset = match tap {
+        Some(v) => mx.voice_offset(tgt, v),
+        None => mx.offset(tgt),
+    };
+    Marks { tgt, routes, generators, depth: m.depth.value(), offset, dim: !mx.is_active(tgt) }
+}
+
+/// The routes as the shared knob's dots: filled when the route pushes up, a ring when it pulls
+/// down (Depth's sign included); faint while the target does nothing.
+pub(super) fn route_dots(m: &Marks) -> Vec<softsystems_ui::knob::RouteDot> {
+    m.routes
+        .iter()
+        .map(|r| {
+            let col = slot_col(r.source.slot as usize);
+            softsystems_ui::knob::RouteDot {
+                source: r.source.slot,
+                col: if m.dim || m.depth == 0.0 { theme::with_alpha(col, 90) } else { col },
+                neg: r.amount * m.depth < 0.0,
+            }
+        })
+        .collect()
+}
+
+/// The halo for a control at `n`: how far its routes can move it (Depth included), the live
+/// position, the deepest route's colour. None while nothing can move it. Colour has no halo:
+/// its route scales the colour amounts, it doesn't move a knob (DECISIONS 2026-11-16).
+pub(super) fn halo(m: &Marks, n: f32) -> Option<((f32, f32), f32, egui::Color32)> {
+    if m.dim || m.tgt == modulation::T_COLOUR {
+        return None;
+    }
+    let src = m.deepest()?;
+    let reach = TARGETS.with(|t| t.reach(m.tgt, n, &m.routes, &m.generators, m.depth));
+    if reach.1 - reach.0 < 0.003 {
+        return None;
+    }
+    let live = if m.offset.is_finite() { (n + m.offset).clamp(0.0, 1.0) } else { n };
+    Some((reach, live, theme::with_alpha(slot_col(src as usize), 200)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use modulation::{T_COLOUR, T_CUTOFF, T_FDBK, T_PAN};
+
+    #[test]
+    fn an_armed_touch_makes_a_route() {
+        let mut a = Assign::new();
+        let mut routes = Routes::new();
+        // nothing armed: no route
+        touch_route(&mut a, &mut routes, T_PAN, true, 0.0, true);
+        assert_eq!(routes.iter().count(), 0);
+        // armed, a tap: the drop amount
+        a.arm(Port::slot(2));
+        touch_route(&mut a, &mut routes, T_PAN, true, 0.0, true);
+        let r = routes.find(Port::slot(2), TGT_IDS[T_PAN]).and_then(|i| routes.get(i)).expect("made");
+        assert_eq!(r.amount, DROP_AMOUNT);
+        // still armed: a press and a drag on Feedback sizes its route
+        assert_eq!(a.armed(), Some(Port::slot(2)));
+        touch_route(&mut a, &mut routes, T_FDBK, true, 0.0, false);
+        touch_route(&mut a, &mut routes, T_FDBK, false, -0.4, false);
+        touch_route(&mut a, &mut routes, T_FDBK, false, 0.0, true);
+        let r = routes.find(Port::slot(2), TGT_IDS[T_FDBK]).and_then(|i| routes.get(i)).expect("made");
+        assert!((r.amount + 0.4).abs() < 0.02, "{}", r.amount);
+    }
+
+    #[test]
+    fn a_drop_finds_the_control_under_it() {
+        let ctx = egui::Context::default();
+        place(&ctx, T_CUTOFF, Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::splat(40.0)));
+        assert_eq!(target_at(&ctx, Pos2::new(30.0, 30.0)).map(|h| h.0), Some(T_CUTOFF));
+        assert!(target_at(&ctx, Pos2::new(80.0, 30.0)).is_none());
+    }
+
+    #[test]
+    fn dots_follow_the_sign_of_the_route() {
+        let p = AfterechoParams::default();
+        p.motion.patch.lock().unwrap().routes.set(2u16, "cutoff", -0.4, modulation::ROUTE_CAP);
+        let dots = route_dots(&marks(&p.motion, T_CUTOFF, Some(0)));
+        assert_eq!(dots.len(), 1);
+        assert_eq!(dots[0].source, 2);
+        assert!(dots[0].neg);
+        assert!(route_dots(&marks(&p.motion, T_PAN, Some(0))).is_empty());
+    }
+
+    #[test]
+    fn the_halo_is_the_routes_reach_and_colour_has_none() {
+        let p = AfterechoParams::default();
+        {
+            let mut g = p.motion.patch.lock().unwrap();
+            g.routes.set(0u16, "fdbk", 0.25, modulation::ROUTE_CAP);
+            g.routes.set(0u16, "colour", 0.5, modulation::ROUTE_CAP);
+        }
+        let ((lo, hi), _, _) = halo(&marks(&p.motion, T_FDBK, None), 0.5).expect("a route reaches");
+        assert!(lo < 0.5 && hi > 0.5, "{lo}..{hi}");
+        assert!(halo(&marks(&p.motion, T_PAN, Some(0)), 0.5).is_none());
+        assert!(halo(&marks(&p.motion, T_COLOUR, None), 0.5).is_none());
+        assert_eq!(route_dots(&marks(&p.motion, T_COLOUR, None)).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod mod_to_mod {
+    use super::*;
+
+    /// Pass 11: a slot's setting is a target like a knob; its route rides in the patch and the
+    /// matrix leaves it to the engine.
+    #[test]
+    fn an_armed_touch_on_a_setting_makes_a_mod_route() {
+        let mut a = Assign::new();
+        let mut routes = Routes::new();
+        a.arm(Port::slot(1));
+        let id = ModParam::Rate.id(0);
+        a.touch(&id, &mut routes, modulation::ROUTE_CAP);
+        a.drag(&mut routes, 0.3);
+        a.release();
+        let r = routes.find(Port::slot(1), &id).and_then(|i| routes.get(i)).expect("made");
+        assert!((r.amount - 0.3).abs() < 0.02, "{}", r.amount);
+        assert!(softsystems_mod::is_mod_target(&r.target));
+        // it isn't one of the plug-in's targets: no knob shows it
+        assert!(!TGT_IDS.contains(&r.target.as_str()));
+    }
 }

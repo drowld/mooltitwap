@@ -1,0 +1,4 @@
+target/
+# Renders are regenerated with `cargo run --release -- render` (≈150 MB of WAVs).
+renders/
+material/

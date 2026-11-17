@@ -1,0 +1,18 @@
+[package]
+name = "dub_spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Offline listening test for Afterecho's Dub Colour tab (softsystems-fx dub_loop). Not part of the plug-in."
+
+# Standalone: NOT a member of the plug-in workspace.
+[workspace]
+
+[dependencies]
+realfft = "3.5"
+# The Dub loop is on nice-plug branch claude/fx-grain-delay (0236993), not on main yet.
+softsystems-fx = { path = "../../../../Dev/nice-plug/.claude/worktrees/fx-grain-delay/crates/softsystems-fx", features = ["dub-loop"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
