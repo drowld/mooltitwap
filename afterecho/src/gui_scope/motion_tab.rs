@@ -141,6 +141,8 @@ pub(super) fn motion_panel(
         sig: m.shared.sig(),
         marks: HeadMarks { routes: &into, armed: armed_port.map(|p| slot_col(p.slot as usize)) },
         kinds: &ALLOWED,
+        // Afterecho's slots keep nothing fixed: every kind, ±, trigger stays editable
+        lock: softsystems_mod::Lock::NONE,
     };
     let er = r(o, s, x + 230.0, y + 46.0, 472.0, 194.0);
     let id = ui.id().with(("mo_editor", sel));

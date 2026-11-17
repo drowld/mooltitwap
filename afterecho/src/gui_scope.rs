@@ -109,6 +109,8 @@ pub const PRODUCT: Product = Product {
     accent: accents::AFTERECHO,
     presets: &[ss_presets::AFTERECHO],
     dark_default: true,
+    // Afterecho's own colour, first in ACCENTS (a test checks it)
+    default_accent: 0,
     manual: None,
     support: None,
 };
@@ -170,6 +172,45 @@ impl OldAccent {
     }
 }
 
+/// Notices a resize from the window's corner (the host's on desktop: Afterecho never sees
+/// the release) and reports the width once it has held still for [`SizeWatch::SETTLE`]
+/// seconds. The width the window opens at is the baseline, so a project reopening at its
+/// own size reports nothing.
+#[derive(Default)]
+struct SizeWatch {
+    /// The width last seen (none before the first frame).
+    w: Option<u32>,
+    /// When it last changed, if it hasn't settled since.
+    moved: Option<f64>,
+}
+
+impl SizeWatch {
+    const SETTLE: f64 = 0.4;
+
+    /// This frame's width at time `now` (s): the settled width when a resize has just
+    /// settled, else nothing.
+    fn step(&mut self, w: u32, now: f64) -> Option<u32> {
+        match self.w {
+            None => self.w = Some(w),
+            Some(prev) if prev != w => {
+                self.w = Some(w);
+                self.moved = Some(now);
+            }
+            _ => {}
+        }
+        let t = self.moved?;
+        (now - t >= Self::SETTLE).then(|| {
+            self.moved = None;
+            w
+        })
+    }
+
+    /// Still waiting for a resize to settle.
+    fn waiting(&self) -> bool {
+        self.moved.is_some()
+    }
+}
+
 /// A fresh install's look: Afterecho's own palette, dark.
 fn default_look() -> Appearance {
     Appearance { palette: 1, ..Appearance::default_for(&PRODUCT) }
@@ -191,6 +232,8 @@ pub struct ScopeState {
     /// The banner's height with its gap, logical px, last frame: the cards and the window
     /// move down by it in the beta's last 7 days (0 otherwise).
     banner_h: f32,
+    /// A corner resize: its size is kept for new instances, like ☰ → Size (desktop).
+    size_watch: SizeWatch,
     /// Param id of the control last touched. Nothing reads it since the
     /// last-touched card went (v2.42); the cells still record it.
     focus: Option<String>,
@@ -426,6 +469,18 @@ pub fn frame(
         let want_h = (w as f32 * (lay.h + st.scope.banner_h) / lay.w).round() as u32;
         if h.abs_diff(want_h) > 2 {
             egui_state.set_requested_size((w, want_h));
+        }
+        // a corner drag sets the size a new instance opens at, as ☰ → Size does (owner,
+        // 2026-11-17); a project keeps its own (#[persist] editor_state)
+        let now = ui.ctx().input(|i| i.time);
+        if let Some(w) = st.scope.size_watch.step(w, now) {
+            let z = (w as f32 / lay.w).clamp(0.5, 2.5);
+            if st.scope.look.size.is_none_or(|s| (s - z).abs() > 0.005) {
+                st.scope.look.size = Some(z);
+                st.scope.save_look();
+            }
+        } else if st.scope.size_watch.waiting() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
@@ -2866,6 +2921,28 @@ mod tests {
             let sl = header::slots(&h, title.right(), &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W });
             assert!(sl.fits, "{sl:?}");
         }
+    }
+
+    #[test]
+    fn the_default_accent_is_afterechos_own_colour() {
+        let own = &ACCENTS[PRODUCT.default_accent as usize];
+        assert_eq!((own.dark, own.light), (PRODUCT.accent.dark, PRODUCT.accent.light));
+    }
+
+    #[test]
+    fn a_corner_resize_is_reported_once_it_settles() {
+        let mut w = SizeWatch::default();
+        // the size a project opens at is the baseline, not a resize
+        assert_eq!(w.step(1366, 0.0), None);
+        assert_eq!(w.step(1366, 5.0), None);
+        // a drag: nothing while the width moves, then the last width once it holds still
+        assert_eq!(w.step(1400, 6.0), None);
+        assert_eq!(w.step(1500, 6.2), None);
+        assert_eq!(w.step(1500, 6.5), None);
+        assert_eq!(w.step(1500, 6.7), Some(1500));
+        // reported once
+        assert_eq!(w.step(1500, 7.0), None);
+        assert!(!w.waiting());
     }
 
     #[test]
