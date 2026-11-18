@@ -304,6 +304,8 @@ pub(super) fn routes_sheet(
             // off, like Cumulus: every one of Afterecho's targets has a knob, and the crate's menu
             // leaves slot settings out, so "+ Target" would only show greyed with nothing to add
             add_menu: false,
+            // today's grid (nice-plug e419dad)
+            focus: None,
         };
         grid(ui, gr, &g, &mut patch.routes, &mut mu.grid, ui.id().with("mo_grid"))
     };
