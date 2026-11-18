@@ -543,13 +543,14 @@ fn page(
             motion_tab::arm_demo(ui.ctx());
         }
         motion_tab::follow_wiring(ui.ctx(), &mut st.scope);
-        // Motion's Routes sheet covers the picture and the lane
+        // Motion's Routes sheet sits on the picture's card, box on box (owner, 2026-11-18): the
+        // lane stays, so a slot armed there routes by touching its knobs with the grid in view
         if st.scope.motion.routes {
             motion_tab::routes_sheet(ui, o, s, l, params, setter, &mut st.scope);
         } else {
             picture(ui, o, s, l, params, setter, &mut st.scope, tempo);
-            lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
         }
+        lane(ui, o, s, l, params, setter, &mut st.scope, tempo);
         time_card(ui, o, s, l, params, setter, &mut st.scope.focus, tempo);
         colour_card(ui, o, s, l, params, setter, &mut st.scope);
         output_card(ui, o, s, l, params, setter, &mut st.scope.focus);

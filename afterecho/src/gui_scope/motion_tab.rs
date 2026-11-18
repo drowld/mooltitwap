@@ -1,7 +1,7 @@
 //! The Motion tab on the shared crate's editors (beta pass 8, layout A, owner 2026-11-14):
 //! in the lane, the six slot tiles left (2 × 3), the open slot's editor (curve, steps or
 //! follow; its kind menu on its name), Scatter at the right edge; "Routes…" opens the grid
-//! as a sheet over the picture and the lane, with Depth and Time in its header.
+//! as a sheet on the picture's card (the lane stays), with Depth and Time in its header.
 
 use super::{button, knob_cell, n_active, pill_drag, r, rule, tap_col, text, Layout, ScopeState};
 use crate::modulation::{self, ALLOWED, FOLLOW_INPUTS, N_SLOTS, N_TGT, TGT_IDS};
@@ -245,21 +245,24 @@ thread_local! {
     static TARGETS: softsystems_mod::Targets = modulation::targets();
 }
 
-/// The Routes sheet over the picture and the lane: every slot into every target, Depth
+/// The Routes sheet on the picture's card (the lane stays): every slot into every target, Depth
 /// and Time in its header. ✕ or Escape closes it.
 pub(super) fn routes_sheet(
     ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<AfterechoParams>, setter: &ParamSetter, sc: &mut ScopeState,
 ) {
-    let (x, y, w, _) = l.picture;
-    let bottom = l.lane.1 + l.lane.3;
-    let rect = r(o, s, x, y, w, bottom - y);
+    let (x, y, w, h) = l.picture;
+    let rect = r(o, s, x, y, w, h);
     let p = ui.painter().clone();
     softsystems_ui::paint::card(&p, rect, "");
-    text(&p, rect.min + Vec2::new(16.0, 24.0) * s, Align2::LEFT_CENTER, "Routes", 14.0, s, theme::INK());
+    // one line (owner, 2026-11-18): "Routes", the grid's header (Depth, Time, Numbers/Dots),
+    // then the crate's ×, so all ten rows fit the picture's card
+    text(&p, rect.min + Vec2::new(16.0, 26.0) * s, Align2::LEFT_CENTER, "Routes", 14.0, s, theme::INK());
+    let bh = softsystems_ui::sheet::BTN_H;
+    let close_r = r(o, s, x + w - 14.0 - bh, y + 12.0, bh, bh);
     let m = &params.motion;
     let shown_tap = sc.sel.unwrap_or(sc.last_tap);
     let mu = &mut sc.motion;
-    let close = button(ui, r(o, s, x + w - 14.0 - 64.0, y + 10.0, 64.0, 28.0), "Close", false, "mo_routes_close");
+    let close = softsystems_ui::sheet::button(ui, close_r, "×", ui.id().with("mo_routes_close"), softsystems_ui::sheet::Look::Plain, true);
     if close || (!mu.grid.menu_open() && ui.input(|i| i.key_pressed(egui::Key::Escape))) {
         mu.routes = false;
     }
@@ -282,7 +285,8 @@ pub(super) fn routes_sheet(
     // the pending row: the last knob touched or "+ Target" pick (none or one)
     let added: Vec<String> = wiring(ui.ctx(), |w| w.assign.added().iter().map(|s| s.to_string()).collect());
     let added: Vec<&str> = added.iter().map(String::as_str).collect();
-    let gr = Rect::from_min_max(rect.min + Vec2::new(14.0, 48.0) * s, rect.max - Vec2::new(14.0, 12.0) * s);
+    // the grid's 34 px header shares the title's line, centred with the ×
+    let gr = Rect::from_min_max(rect.min + Vec2::new(14.0, 9.0) * s, Pos2::new(close_r.left() - 8.0 * s, rect.bottom() - 12.0 * s));
     let out = {
         let g = Grid {
             targets: &targets,
