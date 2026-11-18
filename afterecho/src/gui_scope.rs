@@ -708,6 +708,10 @@ fn knob_cell_m<P: Param>(
     }
     if out.began {
         setter.begin_set_parameter(param);
+        // a modulatable knob touched with nothing armed: the Matrix's pending row
+        if let Some((_, t, _)) = modu {
+            motion_tab::seen(ui.ctx(), t);
+        }
     }
     if out.changed {
         setter.set_parameter_normalized(param, v);

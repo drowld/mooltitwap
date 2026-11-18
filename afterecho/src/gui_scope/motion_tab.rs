@@ -9,7 +9,7 @@ use crate::params::AfterechoParams;
 use crate::ui::theme;
 use nice_plug::prelude::*;
 use egui::{Align2, Pos2, Rect, Vec2};
-use softsystems_mod::{mod_target_base, mod_targets, Assign, Modulator, Param as ModParam, Patch, Port, Routes, Target, Targets};
+use softsystems_mod::{mod_target_base, mod_targets, Assign, Modulator, Param as ModParam, Patch, Port, Routes, Target, Targets, Touch};
 use softsystems_ui::modulation::curve::{self, CurveIn, CurveState};
 use softsystems_ui::modulation::follow::{self, FollowIn};
 use softsystems_ui::modulation::header::{EditOut, HeaderIn, Marks as HeadMarks, RouteGesture};
@@ -279,7 +279,7 @@ pub(super) fn routes_sheet(
     list.extend(settings);
     let targets = Targets::new(list);
     let active = vec![true; bases.len()];
-    // rows touched with a slot armed show before they hold a route
+    // the pending row: the last knob touched or "+ Target" pick (none or one)
     let added: Vec<String> = wiring(ui.ctx(), |w| w.assign.added().iter().map(|s| s.to_string()).collect());
     let added: Vec<&str> = added.iter().map(String::as_str).collect();
     let gr = Rect::from_min_max(rect.min + Vec2::new(14.0, 48.0) * s, rect.max - Vec2::new(14.0, 12.0) * s);
@@ -297,14 +297,21 @@ pub(super) fn routes_sheet(
             row_h: None,
             widths: Widths::Equal,
             headings: Headings::Rule,
+            // the slot settings (LFO 1 Rate…) have no knob on the page: "+ Target" reaches them
+            add_menu: true,
         };
         grid(ui, gr, &g, &mut patch.routes, &mut mu.grid, ui.id().with("mo_grid"))
     };
     if let Some(look) = out.look {
         mu.look = look;
     }
-    if out.changed {
-        edited(setter, m, out.ended);
+    // "+ Target": the pick becomes the pending row, and an armed slot routes there
+    let added_route = out.add.and_then(|i| targets.get(i)).is_some_and(|tg| {
+        let id = tg.id.clone();
+        matches!(wiring(ui.ctx(), |w| w.assign.add(&id, &mut patch.routes, modulation::ROUTE_CAP, DROP_AMOUNT)), Touch::Route(_))
+    });
+    if out.changed || added_route {
+        edited(setter, m, out.ended || added_route);
     } else if out.ended {
         setter.mark_state_dirty();
     }
@@ -336,6 +343,12 @@ struct Wiring {
     /// A route dot was tapped: open this slot (`u16::MAX`: open Routes).
     show: Option<u16>,
     menu: Option<(usize, Rect)>,
+}
+
+/// Knob `tgt` was touched with nothing armed (its `KnobOut::began`): it becomes the Matrix's
+/// pending row (owner, 2026-11-17: one row, replaced by the next touch; nice-plug 9d7f979).
+pub(super) fn seen(ctx: &egui::Context, tgt: usize) {
+    wiring(ctx, |w| w.assign.seen(TGT_IDS[tgt]));
 }
 
 fn wiring<R>(ctx: &egui::Context, f: impl FnOnce(&mut Wiring) -> R) -> R {
@@ -593,6 +606,23 @@ mod tests {
 #[cfg(test)]
 mod mod_to_mod {
     use super::*;
+
+    /// One pending row (owner, 2026-11-17): a knob touched with nothing armed shows in the
+    /// Matrix, the next touch replaces it; a "+ Target" pick with a slot armed routes there.
+    #[test]
+    fn a_touched_knob_is_the_one_pending_row() {
+        let mut a = Assign::new();
+        let mut routes = Routes::new();
+        a.seen(TGT_IDS[0]);
+        assert_eq!(a.added(), vec![TGT_IDS[0]]);
+        a.seen(TGT_IDS[2]);
+        assert_eq!(a.added(), vec![TGT_IDS[2]]);
+        assert!(routes.is_empty());
+        a.arm(Port::slot(0));
+        let made = a.add(TGT_IDS[3], &mut routes, modulation::ROUTE_CAP, DROP_AMOUNT);
+        assert!(matches!(made, Touch::Route(_)));
+        assert_eq!(a.added(), vec![TGT_IDS[3]]);
+    }
 
     /// Pass 11: a slot's setting is a target like a knob; its route rides in the patch and the
     /// matrix leaves it to the engine.
