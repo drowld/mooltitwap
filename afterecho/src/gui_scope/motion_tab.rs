@@ -297,8 +297,9 @@ pub(super) fn routes_sheet(
             row_h: None,
             widths: Widths::Equal,
             headings: Headings::Rule,
-            // the slot settings (LFO 1 Rate…) have no knob on the page: "+ Target" reaches them
-            add_menu: true,
+            // off, like Cumulus: every one of Afterecho's targets has a knob, and the crate's menu
+            // leaves slot settings out, so "+ Target" would only show greyed with nothing to add
+            add_menu: false,
         };
         grid(ui, gr, &g, &mut patch.routes, &mut mu.grid, ui.id().with("mo_grid"))
     };
