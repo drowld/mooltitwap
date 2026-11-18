@@ -963,25 +963,6 @@ fn tb_box(ui: &mut egui::Ui) -> (Rect, egui::Response, bool) {
     (rect, resp, hot)
 }
 
-/// Hamburger menu button (3 painted bars). Click returns true.
-pub fn menu_button(ui: &mut egui::Ui) -> bool {
-    let s = ui_scale(ui);
-    let (rect, resp, hot) = tb_box(ui);
-    let painter = ui.painter_at(rect);
-    let col = if hot { INK() } else { INK2() };
-    let bw = 13.0 * s;
-    let bh = 1.5 * s;
-    let gap = 3.0 * s;
-    let cx = rect.center().x;
-    let cy = rect.center().y;
-    for k in [-1.0f32, 0.0, 1.0] {
-        let y = cy + k * (bh + gap);
-        let bar = Rect::from_center_size(Pos2::new(cx, y), Vec2::new(bw, bh));
-        painter.rect_filled(bar, 0.0, col);
-    }
-    resp.clicked()
-}
-
 /// Settings gear button (painted cog). Click returns true.
 pub fn gear_button(ui: &mut egui::Ui) -> bool {
     let s = ui_scale(ui);
