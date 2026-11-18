@@ -706,12 +706,14 @@ fn knob_cell_m<P: Param>(
         motion_tab::route_knob(ui.ctx(), setter, m, t, out.route_touch, out.route_drag, out.route_release, out.route_tap);
         motion_tab::routes_menu(ui, setter, m, t, base, out.menu, out.dial);
     }
-    if out.began {
-        setter.begin_set_parameter(param);
-        // a modulatable knob touched with nothing armed: the Matrix's pending row
+    // a modulatable knob pressed with nothing armed, even at its end: the Matrix's pending row
+    if out.touched {
         if let Some((_, t, _)) = modu {
             motion_tab::seen(ui.ctx(), t);
         }
+    }
+    if out.began {
+        setter.begin_set_parameter(param);
     }
     if out.changed {
         setter.set_parameter_normalized(param, v);

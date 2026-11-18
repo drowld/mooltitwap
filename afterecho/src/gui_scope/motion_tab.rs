@@ -345,7 +345,7 @@ struct Wiring {
     menu: Option<(usize, Rect)>,
 }
 
-/// Knob `tgt` was touched with nothing armed (its `KnobOut::began`): it becomes the Matrix's
+/// Knob `tgt` was pressed with nothing armed (its `KnobOut::touched`): it becomes the Matrix's
 /// pending row (owner, 2026-11-17: one row, replaced by the next touch; nice-plug 9d7f979).
 pub(super) fn seen(ctx: &egui::Context, tgt: usize) {
     wiring(ctx, |w| w.assign.seen(TGT_IDS[tgt]));
