@@ -796,9 +796,9 @@ fn int_seg_cell(
 #[allow(clippy::too_many_arguments)]
 fn enum_stepper_cell<E: Enum + PartialEq + Copy + 'static>(
     ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &EnumParam<E>, id: &str, label: &str, names: &[&str],
-    focus: &mut Option<String>,
+    sub: &str, focus: &mut Option<String>,
 ) {
-    let (ctl, lab, _) = cell_parts(cell, s);
+    let (ctl, lab, val) = cell_parts(cell, s);
     let widest = names.iter().map(|n| softsystems_ui::paint::text_width(ui.painter(), n, 11.0)).fold(0.0, f32::max);
     // the label sits between the two 22 px arrow zones, with a little air
     let w = (widest + (2.0 * 22.0 + 12.0) * s).min(cell.width() - 8.0 * s);
@@ -813,6 +813,10 @@ fn enum_stepper_cell<E: Enum + PartialEq + Copy + 'static>(
         }
     }
     text(ui.painter(), lab, Align2::CENTER_CENTER, label, 11.0, s, INK2());
+    // the unit under the box, as a count stepper's word (Slope's "dB/oct")
+    if !sub.is_empty() {
+        text(ui.painter(), val, Align2::CENTER_CENTER, sub, 11.0, s, SOFT());
+    }
 }
 
 /// A group's heading inside a card: small capitals, quiet, so groups read apart
@@ -1134,7 +1138,6 @@ fn type_name(v: f32) -> &'static str {
 
 /// Slope's steps: 6 to 48 dB/oct in 6 dB steps (owner, 2026-11-16).
 const SLOPES: usize = 8;
-const SLOPE_DB: [&str; SLOPES] = ["6 dB", "12 dB", "18 dB", "24 dB", "30 dB", "36 dB", "42 dB", "48 dB"];
 const SLOPE_NAMES: [&str; SLOPES] = ["6", "12", "18", "24", "30", "36", "42", "48"];
 
 /// The filter slope for a Slope value (its step, 0 = 6 dB … 7 = 48 dB).
@@ -1916,7 +1919,7 @@ fn lane(
         rule(&p, Pos2::new(ctl.left(), ym), Pos2::new(ctl.right(), ym), s);
         (c(0, 0, 1), c(0, 1, 1), c(0, 2, 2), c(1, 0, 1), c(1, 1, 1), c(1, 2, 2))
     };
-    stepper_cell(ui, c_rep, s, setter, &params.repeats, "repeats", "Repeats", if finite { "then stops" } else { "loops" }, &mut sc.focus);
+    stepper_cell(ui, c_rep, s, setter, &params.repeats, "repeats", "Repeats", if finite { "then stops" } else { "loops" }, false, &mut sc.focus);
     feedback_cell(ui, c_fb, s, setter, &params.feedback, !params.freeze.value(), &mut sc.focus, &params.motion);
     // Curve shapes the loop's decay, so only ∞ has one.
     enum_cell(ui, c_curve, s, setter, &params.fb_curve, "fb_curve", "Curve", &["Natural", "Bloom", "Gate"], !finite, &mut sc.focus);
@@ -1952,14 +1955,15 @@ const FB_DETENT: f32 = 1.0 + softsystems_ui::knob::DETENT_PASS * 1.05;
 #[allow(clippy::too_many_arguments)]
 fn stepper_cell(
     ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &IntParam, id: &str,
-    label: &str, sub: &str, focus: &mut Option<String>,
+    label: &str, sub: &str, bare: bool, focus: &mut Option<String>,
 ) {
     let (ctl, lab, val) = cell_parts(cell, s);
     let w = (cell.width() - 4.0 * s).min(76.0 * s);
     let pill = Rect::from_center_size(ctl.center(), Vec2::new(w, g::CTL_H * s));
     let (lo, hi) = (param.range().unnormalize(0.0), param.range().unnormalize(1.0));
     let v = param.value();
-    let shown = param.normalized_value_to_string(param.unmodulated_normalized_value(), false);
+    // `bare`: the number alone in the box, its unit in `sub` below (Range: "12", "st · all taps")
+    let shown = if bare { v.to_string() } else { param.normalized_value_to_string(param.unmodulated_normalized_value(), false) };
     // the shared stepper: ‹ › step (an end's arrow goes at the end) and the
     // value drags up and down; a fast drag can move several steps at once
     let ends = controls::Ends { down: v > lo, up: v < hi };
@@ -2051,13 +2055,15 @@ fn tap_panel(
     let det = detune_text(tap.detune.value(), params.detune_range.value() as f32);
     knob_cell(ui, c(0, 3), s, setter, &tap.detune, &id("tap_detune"), "Detune", true, true, Some(det), focus);
     // the range is every tap's (v2.46)
-    stepper_cell(ui, c(0, 4), s, setter, &params.detune_range, "detune_range", "Range", "all taps", focus);
+    // the number in the box, the unit below, as Slope
+    stepper_cell(ui, c(0, 4), s, setter, &params.detune_range, "detune_range", "Range", "st · all taps", true, focus);
     toggle_cell(ui, c(1, 4), s, setter, &tap.active, &id("active"), "Tap", "On", "Muted", focus);
     enum_cell(ui, c(1, 0), s, setter, &tap.filter_type, &id("tap_filter_type"), "Filter", &["LP", "BP", "HP"], true, focus);
     knob_cell_m(ui, c(1, 1), s, setter, &tap.filter_cutoff, &id("tap_filter_cutoff"), "Cutoff", false, true, Some(hz_text(tap.filter_cutoff.value())), focus, Some((&params.motion, crate::modulation::T_CUTOFF, Some(i))), None);
     knob_cell_m(ui, c(1, 2), s, setter, &tap.filter_q, &id("tap_filter_q"), "Reso", false, true, Some(format!("Q {:.1}", tap.filter_q.value())), focus, Some((&params.motion, crate::modulation::T_RESO, Some(i))), None);
     // eight steps don't fit a segmented row: the shared stepper, dragged ↕ (owner, 2026-11-16)
-    enum_stepper_cell(ui, c(1, 3), s, setter, &tap.filter_slope, &id("tap_filter_slope"), "Slope", &SLOPE_DB, focus);
+    // the number in the box, the unit below (owner, 2026-11-18: labels keep their size and cut)
+    enum_stepper_cell(ui, c(1, 3), s, setter, &tap.filter_slope, &id("tap_filter_slope"), "Slope", &SLOPE_NAMES, "dB/oct", focus);
 }
 
 /// "Feedback 60 % · −4.4 dB per repeat · 13 to −60 dB", from the same
@@ -2583,7 +2589,7 @@ fn colour_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Afte
             knob_cell_m(ui, c(0, 1), s, setter, &params.sat_amount, "sat_amount", "Amount", false, true, None, f, Some((&params.motion, crate::modulation::T_COLOUR, None)), None);
             knob_cell(ui, c(1, 1), s, setter, &params.sat_drive, "sat_drive", "Drive", false, true, None, f);
             let curves = ["Classic", "Tube", "Smooth", "Grit", "Amp", "Transfo"];
-            enum_stepper_cell(ui, c(2, 2), s, setter, &params.sat_curve, "sat_curve", "Curve", &curves, f);
+            enum_stepper_cell(ui, c(2, 2), s, setter, &params.sat_curve, "sat_curve", "Curve", &curves, "", f);
             enum_cell(ui, c(4, 2), s, setter, &params.sat_routing, "sat_routing", "Route", &routes, true, f);
         }
     }
