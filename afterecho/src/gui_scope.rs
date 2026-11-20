@@ -107,7 +107,7 @@ pub const PRODUCT: Product = Product {
     version: env!("AFTERECHO_BUILD"),
     build: env!("AFTERECHO_BUILD_ID"),
     accent: accents::AFTERECHO,
-    presets: &[ss_presets::AFTERECHO],
+    presets: &ss_presets::AFTERECHO_ALL,
     dark_default: true,
     // Afterecho's own colour, first in ACCENTS (a test checks it)
     default_accent: 0,
