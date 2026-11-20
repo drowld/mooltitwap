@@ -278,9 +278,28 @@ pub enum CrossfeedMode {
     Diffuse,
 }
 
-/// In and Out: −24…+12 dB with 0 dB at the knob's top (v2.46), each half
-/// linear in dB, so an untouched knob shows no fill.
-const GAIN_RANGE: FloatRange = FloatRange::SymmetricalSkewed { min: -24.0, max: 12.0, factor: 1.0, center: 0.0 };
+use softsystems_ui::knob::level;
+
+/// In and Out: the shared level knob (nice-plug 627ebb7, owner 2026-11-20: "i want it global"),
+/// −60…+12 dB straight in dB, so the normalised value is `level::norm` of the dB and 0 dB sits
+/// at 3 o'clock. At the bottom the plug-in is silent ("−∞ dB").
+const GAIN_RANGE: FloatRange = FloatRange::Linear { min: level::MIN_DB, max: level::MAX_DB };
+
+/// A level's text, "−∞ dB" at the bottom (the crate's `level::text`).
+fn level_v2s() -> Arc<dyn Fn(f32) -> String + Send + Sync> {
+    Arc::new(|db| level::text(level::norm(db)))
+}
+
+/// A typed level: "+6", "−3.5 dB", "-inf"; the bottom for −∞.
+fn level_s2v() -> Arc<dyn Fn(&str) -> Option<f32> + Send + Sync> {
+    Arc::new(|s| {
+        let t = s.trim().trim_end_matches("dB").trim().replace('\u{2212}', "-");
+        if t.contains('\u{221e}') || t.eq_ignore_ascii_case("-inf") {
+            return Some(level::MIN_DB);
+        }
+        t.parse::<f32>().ok().map(|db| db.clamp(level::MIN_DB, level::MAX_DB))
+    })
+}
 
 #[derive(Params)]
 pub struct AfterechoParams {
@@ -845,8 +864,8 @@ impl Default for AfterechoParams {
                 0.0,
                 GAIN_RANGE,
             )
-            .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_rounded(1))
+            .with_value_to_string(level_v2s())
+            .with_string_to_value(level_s2v())
             .with_smoother(SmoothingStyle::Linear(20.0)),
             dry_wet: FloatParam::new(
                 "Dry/Wet",
@@ -862,8 +881,8 @@ impl Default for AfterechoParams {
                 0.0,
                 GAIN_RANGE,
             )
-            .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_rounded(1))
+            .with_value_to_string(level_v2s())
+            .with_string_to_value(level_s2v())
             .with_smoother(SmoothingStyle::Linear(20.0)),
 
             duck: FloatParam::new("Duck", 0.0, FloatRange::Linear { min: 0.0, max: 24.0 })

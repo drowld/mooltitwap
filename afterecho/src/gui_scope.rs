@@ -652,6 +652,10 @@ fn dial_arc(c: Pos2, rad: f32, v0: f32, v1: f32) -> Vec<Pos2> {
         .collect()
 }
 
+/// The knobs drawn as the shared level knob ([`softsystems_ui::knob::level`]); their params
+/// run −60…+12 dB straight in dB (`params::GAIN_RANGE`).
+const LEVEL_IDS: [&str; 2] = ["input_gain", "output_gain"];
+
 /// A knob cell: the crate's knob (`softsystems_ui::knob`: name, dial, value;
 /// the arc in the accent). `id` is the param's id — the focus card follows it.
 /// Stepped params of up to 16 positions show a dot per step.
@@ -699,6 +703,10 @@ fn knob_cell_m<P: Param>(
     // (the crate's `Knob::over`; owner 2026-11-16: Feedback at 100 %, tap Gain at 0 dB)
     if let Some(at) = over {
         k = k.over(at);
+    }
+    // In and Out are the shared level knob: the mark and the arc's start at 0 dB, 3 o'clock
+    if LEVEL_IDS.contains(&id) {
+        k = k.level();
     }
     let mut v = n;
     let out = knob::knob(ui, cell, ui.id().with(("knob", id)), &k, &mut v);
@@ -2601,9 +2609,9 @@ fn output_card(ui: &mut egui::Ui, o: Pos2, s: f32, l: &Layout, params: &Arc<Afte
     // Levels on the left; ducking after a rule, in the columns Colour's
     // Route uses above it.
     let c = |col| cell_at(inner, 6, 1, 0, col, 1, s);
-    knob_cell(ui, c(0), s, setter, &params.input_gain, "input_gain", "In", true, true, None, focus);
+    knob_cell(ui, c(0), s, setter, &params.input_gain, "input_gain", "In", false, true, None, focus);
     knob_cell_m(ui, c(1), s, setter, &params.dry_wet, "dry_wet", "Mix", false, true, None, focus, Some((&params.motion, crate::modulation::T_MIX, None)), None);
-    knob_cell(ui, c(2), s, setter, &params.output_gain, "output_gain", "Out", true, true, None, focus);
+    knob_cell(ui, c(2), s, setter, &params.output_gain, "output_gain", "Out", false, true, None, focus);
     // Ear guard (v2.43), and how far it has the echoes down right now
     toggle_cell(ui, c(3), s, setter, &params.ear_guard, "ear_guard", "Ear guard", "On", "Off", focus);
     let down = f32::from_bits(params.guard_db.load(std::sync::atomic::Ordering::Relaxed));

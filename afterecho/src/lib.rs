@@ -894,8 +894,10 @@ impl Plugin for Afterecho {
             self.set_tap_coefs(i, sr);
         }
 
-        let input_gain = nice_plug::util::db_to_gain(p.input_gain.value());
-        let output_gain = nice_plug::util::db_to_gain(p.output_gain.value());
+        // the shared level knob: silent at its bottom, not −60 dB
+        use softsystems_ui::knob::level;
+        let input_gain = level::gain(level::norm(p.input_gain.value()));
+        let output_gain = level::gain(level::norm(p.output_gain.value()));
         let dry_wet = p.dry_wet.value();
         let feedback = p.feedback.value();
         // Colour's amounts as set; Motion's Colour target scales them (below).
@@ -3313,13 +3315,19 @@ mod tests {
     }
 
     #[test]
-    fn in_and_out_sit_at_0_db_on_the_knob_top() {
+    fn in_and_out_are_the_shared_level_knob() {
+        use softsystems_ui::knob::level;
         let plug = Afterecho::default();
         for g in [&plug.params.input_gain, &plug.params.output_gain] {
-            for (db, n) in [(-24.0, 0.0), (-12.0, 0.25), (0.0, 0.5), (6.0, 0.75), (12.0, 1.0)] {
-                assert!((g.preview_normalized(db) - n).abs() < 1e-5, "{db} dB at {}", g.preview_normalized(db));
+            for db in [-60.0, -24.0, 0.0, 6.0, 12.0] {
+                assert!((g.preview_normalized(db) - level::norm(db)).abs() < 1e-5, "{db} dB at {}", g.preview_normalized(db));
             }
+            assert!((g.default_normalized_value() - level::ZERO).abs() < 1e-5);
+            assert_eq!(g.normalized_value_to_string(0.0, true), "\u{2212}\u{221e} dB");
+            assert_eq!(g.string_to_normalized_value("-inf"), Some(0.0));
+            assert_eq!(g.string_to_normalized_value("+12 dB"), Some(1.0));
         }
+        assert_eq!(level::gain(level::norm(-60.0)), 0.0, "the bottom is silent");
     }
 
     #[test]
