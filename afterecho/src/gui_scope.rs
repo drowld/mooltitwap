@@ -281,7 +281,7 @@ pub struct ScopeState {
     /// Preview only (`swing`): Swing at 0.7, the spacing as it is.
     swing_demo: bool,
     /// Preview only (`sync`): Time synced.
-    sync_demo: bool,
+    sync_demo: Option<SyncMode>,
     split_demo: bool,
     /// Preview only (`over`): Feedback at 104 %, tap 1's Gain at +3 dB (the stops' over-range).
     over_demo: bool,
@@ -395,7 +395,7 @@ pub fn frame(
                 OldAccent::import(&mut sc.look);
             }
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=bars,menu,split,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
+            // AFTERECHO_PREVIEW=bars,menu,split,sync|dotted,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
             // saveas|trying|deleting (with AFTERECHO_PRESET_DIR, a folder of presets to show)
             // (the Bars view, the Time view or a Y axis, a selected
             // tap, the Tap or Motion tab and its source, the preset browser, the light page, Colour's Tape
@@ -415,7 +415,8 @@ pub fn frame(
                         "pattern" => (sc.pat_open, sc.pat_demo) = (true, true),
                         "euclid" => sc.euclid_demo = true,
                         "swing" => sc.swing_demo = true,
-                        "sync" => sc.sync_demo = true,
+                        "sync" => sc.sync_demo = Some(SyncMode::Sync),
+                        "dotted" => sc.sync_demo = Some(SyncMode::Dotted),
                         "split" => sc.split_demo = true,
                         "over" => sc.over_demo = true,
                         "tap" => sc.lane_tab = 2,
@@ -678,10 +679,22 @@ fn knob_cell<P: Param>(
 /// motion params, the target, and for a tap target the tap shown.
 #[allow(clippy::too_many_arguments)]
 fn knob_cell_m<P: Param>(
-    ui: &mut egui::Ui, cell: Rect, _s: f32, setter: &ParamSetter, param: &P, id: &str,
+    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, param: &P, id: &str,
     label: &str, bip: bool, enabled: bool, disp: Option<String>, focus: &mut Option<String>,
     modu: Option<(&crate::modulation::MotionParams, usize, Option<usize>)>, over: Option<f32>,
 ) -> Rect {
+    knob_cell_u(ui, cell, s, setter, param, id, label, bip, enabled, disp, focus, modu, over, None).0
+}
+
+/// [`knob_cell_m`] with a unit menu on the name (`units`: each unit and the value it would
+/// show, the one now); returns the dial and a unit picked this frame.
+#[allow(clippy::too_many_arguments)]
+fn knob_cell_u<P: Param>(
+    ui: &mut egui::Ui, cell: Rect, _s: f32, setter: &ParamSetter, param: &P, id: &str,
+    label: &str, bip: bool, enabled: bool, disp: Option<String>, focus: &mut Option<String>,
+    modu: Option<(&crate::modulation::MotionParams, usize, Option<usize>)>, over: Option<f32>,
+    units: Option<(&[(&str, &str)], usize)>,
+) -> (Rect, Option<usize>) {
     use softsystems_ui::knob::{self, Kind, Knob, Reach};
     let n = param.modulated_normalized_value();
     let text = disp.unwrap_or_else(|| param.normalized_value_to_string(n, true));
@@ -713,6 +726,9 @@ fn knob_cell_m<P: Param>(
     if is_level(id) {
         k = k.level();
     }
+    if let Some((rows, cur)) = units {
+        k = k.units(rows, cur);
+    }
     let mut v = n;
     let out = knob::knob(ui, cell, ui.id().with(("knob", id)), &k, &mut v);
     if let Some((m, t, _)) = modu {
@@ -736,7 +752,7 @@ fn knob_cell_m<P: Param>(
     if out.ended {
         setter.end_set_parameter(param);
     }
-    out.dial
+    (out.dial, out.unit)
 }
 
 /// A BoolParam toggle cell: the button shows the state, the name sits above.
@@ -1482,8 +1498,8 @@ fn picture(
             setter.end_set_parameter(p);
         }
     }
-    if std::mem::take(&mut sc.sync_demo) {
-        set_norm(setter, &params.sync_mode, 1.0);
+    if let Some(m) = sc.sync_demo.take() {
+        set_norm(setter, &params.sync_mode, m.norm());
     }
     if std::mem::take(&mut sc.split_demo) {
         set_norm(setter, &params.time_linked, 0.0);
@@ -1525,7 +1541,7 @@ fn field(
     sc: &mut ScopeState, viz: &VizData, axis: Axis, tempo: f32,
 ) {
     let p = ui.painter().clone();
-    let is_sync = params.sync_mode.value() == SyncMode::Sync;
+    let is_sync = params.sync_mode.value().synced();
     // The view fits the pattern; while a dot is dragged it holds still, so the
     // dot stays under the pointer even as the pattern grows.
     let fit = viz.grid_range_secs_taps_only.max(1e-4);
@@ -2311,7 +2327,7 @@ fn echo(
 
     // handles and their readouts: the feedback value lives in the lane's header,
     // the cycle's on the time axis, so neither covers the repeats
-    time_grid(&p, plot, range, tempo, params.sync_mode.value() == SyncMode::Sync, s, false);
+    time_grid(&p, plot, range, tempo, params.sync_mode.value().synced(), s, false);
     let mid = plot.center().y;
     p.line_segment([Pos2::new(gx, area.top() + 4.0 * s), Pos2::new(gx, plot.bottom())], Stroke::new(1.4 * s, INK()));
     if viz.frozen {
@@ -2325,8 +2341,8 @@ fn echo(
     p.circle_stroke(h, 6.0 * s, Stroke::new(2.0 * s, INK()));
     let auto = params.feedback_time_locked.value();
     // Manual in Sync names the division too: "↔ Cycle 8/1 · 17.45 s".
-    let div = if !auto && params.sync_mode.value() == SyncMode::Sync {
-        format!("{} · ", crate::params::fb_div(params.feedback_time.value()).1)
+    let div = if !auto && params.sync_mode.value().synced() {
+        format!("{}{} · ", crate::params::fb_div(params.feedback_time.value()).1, params.sync_mode.value().mark())
     } else {
         String::new()
     };
@@ -2362,22 +2378,19 @@ fn time_card(
     let linked = params.time_linked.value();
     let left = Rect::from_min_max(inner.min, Pos2::new(c(0, 2, 1).right(), inner.bottom()));
     let t = |row, col, span| cell_at(left, 3, 3, row, col, span, s);
-    let nl = params.base_time_l.unmodulated_normalized_value();
-    knob_cell(ui, t(0, 0, 1), s, setter, &params.base_time_l, "base_time_l", "Time", false, true, Some(params.format_base_time(nl, tempo)), focus);
-    enum_cell(ui, t(0, 1, 1), s, setter, &params.sync_mode, "sync_mode", "Sync", &["Free", "Sync"], true, focus);
-    toggle_cell(ui, t(0, 2, 1), s, setter, &params.time_linked, "time_linked", "L/R", "Linked", "Split", focus);
-    enum_cell(ui, t(1, 0, 2), s, setter, &params.delay_mode, "delay_mode", "Mode", &["Repitch", "Fade", "Jump"], true, focus);
-    if !linked {
-        let nr = params.base_time_r.unmodulated_normalized_value();
-        let r_txt = AfterechoParams::format_base_time_mode(params.sync_mode_r_eff(), nr, tempo);
-        knob_cell(ui, t(2, 0, 1), s, setter, &params.base_time_r, "base_time_r", "Time R", false, true, Some(r_txt), focus);
-        enum_cell(ui, t(2, 1, 1), s, setter, &params.sync_mode_r, "sync_r", "Sync R", &["Free", "Sync"], true, focus);
-    }
-    // Swing beside Mode, under L/R (spacing pass 2, 2026-11-21: was alone on
-    // the third row). Lin and Euclid have a grid to swing; Exp and Log don't.
+    // Time's unit is the menu on its name (owner 2026-11-21: Milliseconds, Notes, Dotted,
+    // Triplets; it was a Free/Sync segment beside it): one list of straight notes, longer to
+    // the right, and the unit makes them dotted or triplets.
+    time_knob(ui, t(0, 0, 1), s, setter, &params.base_time_l, &params.sync_mode, params.sync_mode.value(), "base_time_l", "Time", tempo, focus);
+    toggle_cell(ui, t(0, 1, 1), s, setter, &params.time_linked, "time_linked", "L/R", "Linked", "Split", focus);
+    // Swing in the row's last slot. Lin and Euclid have a grid to swing; Exp and Log don't.
     let euclid = params.spacing_mode.value() == SpacingMode::Euclidean;
     let grid = euclid || params.spacing_mode.value() == SpacingMode::Linear;
-    knob_cell(ui, t(1, 2, 1), s, setter, &params.swing, "swing", "Swing", false, grid, None, focus);
+    knob_cell(ui, t(0, 2, 1), s, setter, &params.swing, "swing", "Swing", false, grid, None, focus);
+    enum_cell(ui, t(1, 0, 3), s, setter, &params.delay_mode, "delay_mode", "Mode", &["Repitch", "Fade", "Jump"], true, focus);
+    if !linked {
+        time_knob(ui, t(2, 0, 1), s, setter, &params.base_time_r, &params.sync_mode_r, params.sync_mode_r_eff(), "base_time_r", "Time R", tempo, focus);
+    }
 
     // Pattern: the tap count over the list of spacings, the Shape pad beside
     // (Euclid's ring in Euclid, where the pad has nothing to shape); both
@@ -2400,6 +2413,26 @@ fn time_card(
         euclid_ring(ui, pad, s, params, setter, focus);
     } else {
         shape_pad(ui, pad, s, params, setter, focus);
+    }
+}
+
+/// A delay time's knob with its unit menu on the name: each unit's row shows what the knob
+/// would read in it (the knob keeps its position, as the old Free/Sync segment did).
+#[allow(clippy::too_many_arguments)]
+fn time_knob(
+    ui: &mut egui::Ui, cell: Rect, s: f32, setter: &ParamSetter, time: &FloatParam, unit: &EnumParam<SyncMode>,
+    now: SyncMode, id: &str, label: &str, tempo: f32, focus: &mut Option<String>,
+) {
+    let n = time.unmodulated_normalized_value();
+    let texts: [String; 4] = [SyncMode::Free, SyncMode::Sync, SyncMode::Dotted, SyncMode::Triplet]
+        .map(|m| AfterechoParams::format_base_time_mode(m, n, tempo));
+    let rows: [(&str, &str); 4] = std::array::from_fn(|i| (SyncMode::NAMES[i], texts[i].as_str()));
+    let cur = now as usize;
+    let (_, picked) = knob_cell_u(ui, cell, s, setter, time, id, label, false, true, Some(texts[cur].clone()), focus, None, None, Some((&rows, cur)));
+    if let Some(i) = picked.filter(|&i| i != cur) {
+        let m = [SyncMode::Free, SyncMode::Sync, SyncMode::Dotted, SyncMode::Triplet][i];
+        set_norm(setter, unit, m.norm());
+        *focus = Some(id.to_string());
     }
 }
 

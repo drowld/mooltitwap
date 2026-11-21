@@ -138,7 +138,7 @@ fn summary_lines(q: &AfterechoParams, mods: Option<&softsystems_mod::Patch>) -> 
         DelayMode::Fade => "Fade",
         DelayMode::Jump => "Jump",
     };
-    let sync_word = if sync == SyncMode::Sync { "Sync" } else { "Free" };
+    let sync_word = if sync.synced() { "Sync" } else { "Free" };
     let cross = match q.crossfeed_mode.value() {
         CrossfeedMode::Mix => "Mix",
         CrossfeedMode::PingPong => "Ping",

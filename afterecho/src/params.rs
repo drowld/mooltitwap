@@ -13,25 +13,19 @@ pub const NUM_TAPS: usize = 16;
 ///
 /// Selecting "1/8" means each tap fires one 1/8 note after the previous one:
 /// tap 1 at 1×(1/8), tap 2 at 2×(1/8), tap N at N×(1/8).
+///
+/// Straight notes only, each longer than the last (owner 2026-11-21, "rate faster right":
+/// a time turned right goes longer; dotted and triplets come from the unit menu, see
+/// [`SyncMode`]). Before, one list mixed them, so 1/16. was followed by the shorter 1/8T.
 pub const SYNC_DIVS: &[(f32, &str)] = &[
-    (0.125,    "1/32"),    // 1/32 note = 1/8 beat
-    (1.0/6.0,  "1/16T"),   // 1/16 triplet
-    (0.25,     "1/16"),    // 1/16 note = 1/4 beat
-    (0.375,    "1/16."),   // dotted 1/16
-    (1.0/3.0,  "1/8T"),    // 1/8 triplet
-    (0.5,      "1/8"),     // 1/8 note = half a beat
-    (0.75,     "1/8."),    // dotted 1/8
-    (2.0/3.0,  "1/4T"),    // 1/4 triplet
-    (1.0,      "1/4"),     // quarter note = 1 beat
-    (1.5,      "1/4."),    // dotted 1/4
-    (4.0/3.0,  "1/2T"),    // 1/2 triplet
-    (2.0,      "1/2"),     // half note = 2 beats
-    (3.0,      "1/2."),    // dotted 1/2
-    (4.0,      "1/1"),     // whole note = 4 beats (1 bar)
-    (6.0,      "1/1."),    // dotted whole
-    (8.0,      "2/1"),     // 2 bars
-    (12.0,     "2/1."),    // dotted 2/1
-    (16.0,     "4/1"),     // 4 bars
+    (0.125, "1/32"),
+    (0.25,  "1/16"),
+    (0.5,   "1/8"),
+    (1.0,   "1/4"),
+    (2.0,   "1/2"),
+    (4.0,   "1/1"), // a bar in 4/4
+    (8.0,   "2/1"),
+    (16.0,  "4/1"),
 ];
 
 /// Helper: snap a normalized 0..1 value to the nearest sync-division index and return (beats, label)
@@ -41,11 +35,9 @@ pub fn snap_to_div(norm: f32) -> (f32, &'static str) {
 }
 
 /// Feedback-cycle divisions past the end of SYNC_DIVS (v2.30). They continue
-/// its index scale (value × 17), so they sit above 1.0 and a saved cycle keeps
-/// its division.
+/// its index scale (value × 7), so they sit above 1.0.
 pub const FB_LONG_DIVS: &[(f32, &str)] = &[
-    (24.0,     "4/1."),    // dotted 4/1 = 6 bars
-    (32.0,     "8/1"),     // 8 bars
+    (32.0, "8/1"), // 8 bars
 ];
 
 /// Top of `feedback_time`: 20 s in Free (10 ms × 800^n), 8/1 in Sync. It was
@@ -130,12 +122,52 @@ pub enum DelayMode {
     Jump,
 }
 
+/// A time's unit, picked from the Time knob's unit menu (owner 2026-11-21): milliseconds, or
+/// a straight, dotted or triplet note from [`SYNC_DIVS`]. `Sync` is the straight notes (its
+/// id kept from when it was the only synced unit).
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum SyncMode {
     #[id = "free"]
+    #[name = "Milliseconds"]
     Free,
     #[id = "sync"]
+    #[name = "Notes"]
     Sync,
+    #[id = "dotted"]
+    #[name = "Dotted"]
+    Dotted,
+    #[id = "triplet"]
+    #[name = "Triplets"]
+    Triplet,
+}
+
+impl SyncMode {
+    /// The unit menu's rows, in the enum's order.
+    pub const NAMES: [&'static str; 4] = ["Milliseconds", "Notes", "Dotted", "Triplets"];
+    /// Note values, not milliseconds.
+    pub fn synced(self) -> bool {
+        self != SyncMode::Free
+    }
+    /// A note's length against the straight one.
+    pub fn factor(self) -> f32 {
+        match self {
+            SyncMode::Dotted => 1.5,
+            SyncMode::Triplet => 2.0 / 3.0,
+            _ => 1.0,
+        }
+    }
+    /// After the note's label: "1/8.", "1/8T".
+    pub fn mark(self) -> &'static str {
+        match self {
+            SyncMode::Dotted => ".",
+            SyncMode::Triplet => "T",
+            _ => "",
+        }
+    }
+    /// The enum's position as a normalised value.
+    pub fn norm(self) -> f32 {
+        self as usize as f32 / 3.0
+    }
 }
 
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
@@ -645,7 +677,9 @@ impl Default for TapParams {
 
 impl Default for AfterechoParams {
     fn default() -> Self {
-        let time_default = 0.25; // normalized → ~125 ms in Free mode, 1/4 in Sync mode
+        // 220 ms (owner 2026-11-21; was 0.25, 6.69 ms): Free is 2000^n ms. The same knob
+        // position reads 1/1 in Notes.
+        let time_default = 220.0_f32.ln() / 2000.0_f32.ln();
         Self {
             // The page follows the host's bounds on iOS and picks its shape
             // there (gui_scope.rs `Shape::pick`).
@@ -722,10 +756,10 @@ impl Default for AfterechoParams {
                     let s = s.trim();
                     if s == "∞" || s.eq_ignore_ascii_case("inf") { Some(REPEATS_LOOP) } else { s.parse().ok() }
                 })),
-            // Default: Sync mode, 1/4 note (index 8 of 17 divs → 8/17 ≈ 0.47)
+            // Default: a 1/4 note when synced (index 3 of 7)
             feedback_time: FloatParam::new(
                 "Feedback Time",
-                8.0 / (SYNC_DIVS.len() - 1) as f32,
+                3.0 / (SYNC_DIVS.len() - 1) as f32,
                 FloatRange::Linear { min: 0.0, max: FEEDBACK_TIME_MAX },
             )
             .with_smoother(SmoothingStyle::Linear(50.0)),
@@ -970,9 +1004,9 @@ impl AfterechoParams {
                 let ms = 1.0_f32 * 2000.0_f32.powf(normalized.clamp(0.0, 1.0));
                 ms * 0.001
             }
-            SyncMode::Sync => {
+            m => {
                 let (beats, _) = snap_to_div(normalized);
-                (60.0 / tempo_bpm) * beats
+                (60.0 / tempo_bpm) * beats * m.factor()
             }
         }
     }
@@ -992,16 +1026,11 @@ impl AfterechoParams {
                 else if ms < 100.0 { format!("{:.1} ms", ms) }
                 else { format!("{:.0} ms", ms) }
             }
-            SyncMode::Sync => {
+            m => {
                 let (_, label) = snap_to_div(normalized);
-                label.to_string()
+                format!("{label}{}", m.mark())
             }
         }
-    }
-
-    /// Display string for a base-time param value (L / global mode).
-    pub fn format_base_time(&self, normalized: f32, tempo_bpm: f32) -> String {
-        Self::format_base_time_mode(self.sync_mode.value(), normalized, tempo_bpm)
     }
 
     /// Feedback delay time in seconds. Derives from `feedback_time` param
@@ -1020,9 +1049,9 @@ impl AfterechoParams {
                 let ms = 10.0_f32 * 800.0_f32.powf(normalized.clamp(0.0, FEEDBACK_TIME_MAX));
                 ms * 0.001
             }
-            SyncMode::Sync => {
+            m => {
                 let (beats, _) = fb_div(normalized);
-                (60.0 / tempo_bpm) * beats
+                (60.0 / tempo_bpm) * beats * m.factor()
             }
         }
     }
@@ -1032,15 +1061,16 @@ impl AfterechoParams {
     pub fn feedback_time_norm_for_secs(mode: SyncMode, secs: f32, tempo_bpm: f32) -> f32 {
         match mode {
             SyncMode::Free => ((secs * 100.0).max(1.0).ln() / 800.0_f32.ln()).clamp(0.0, FEEDBACK_TIME_MAX),
-            SyncMode::Sync => {
-                let beats = secs * tempo_bpm / 60.0;
+            m => {
+                let beats = secs * tempo_bpm / 60.0 / m.factor();
                 let nearest = SYNC_DIVS
                     .iter()
                     .chain(FB_LONG_DIVS)
                     .enumerate()
                     .min_by(|a, b| (a.1 .0 - beats).abs().total_cmp(&(b.1 .0 - beats).abs()))
                     .map_or(0, |(i, _)| i);
-                nearest as f32 / (SYNC_DIVS.len() - 1) as f32
+                // 8/1 sits a hair past the top (8/7 > FEEDBACK_TIME_MAX); fb_div rounds it back
+                (nearest as f32 / (SYNC_DIVS.len() - 1) as f32).min(FEEDBACK_TIME_MAX)
             }
         }
     }
@@ -1079,7 +1109,32 @@ mod tests {
         // The new top: 20 s free, 8 bars synced.
         assert!((free(FEEDBACK_TIME_MAX) - 20.0).abs() < 0.01);
         assert_eq!(fb_div(FEEDBACK_TIME_MAX).1, "8/1");
-        assert_eq!(AfterechoParams::default().feedback_time.value(), 8.0 / 17.0);
+        assert_eq!(fb_div(AfterechoParams::default().feedback_time.value()).1, "1/4");
+    }
+
+    #[test]
+    fn a_synced_time_goes_longer_to_the_right_in_every_unit() {
+        // owner 2026-11-21: one list of straight notes, longer each step; the unit makes
+        // them dotted (×1.5) or triplets (×⅔), never mixed into the list
+        let all: Vec<_> = SYNC_DIVS.iter().chain(FB_LONG_DIVS).collect();
+        assert!(all.windows(2).all(|w| w[1].0 > w[0].0), "the list only grows");
+        assert!(all.iter().all(|d| !d.1.contains('.') && !d.1.contains('T')), "straight notes only");
+        for m in [SyncMode::Sync, SyncMode::Dotted, SyncMode::Triplet] {
+            let secs: Vec<f32> = (0..SYNC_DIVS.len())
+                .map(|i| AfterechoParams::base_time_seconds_mode(m, i as f32 / 7.0, 120.0))
+                .collect();
+            assert!(secs.windows(2).all(|w| w[1] > w[0]), "{m:?}");
+        }
+        let n8 = 2.0 / 7.0; // 1/8
+        let at = |m| AfterechoParams::base_time_seconds_mode(m, n8, 120.0);
+        assert!((at(SyncMode::Sync) - 0.25).abs() < 1e-6);
+        assert!((at(SyncMode::Dotted) - 0.375).abs() < 1e-6);
+        assert!((at(SyncMode::Triplet) - 0.25 * 2.0 / 3.0).abs() < 1e-6);
+        assert_eq!(AfterechoParams::format_base_time_mode(SyncMode::Dotted, n8, 120.0), "1/8.");
+        assert_eq!(AfterechoParams::format_base_time_mode(SyncMode::Triplet, n8, 120.0), "1/8T");
+        // the cycle edge's inverse finds the division in the unit asked
+        let n = AfterechoParams::feedback_time_norm_for_secs(SyncMode::Dotted, 0.375, 120.0);
+        assert_eq!(fb_div(n).1, "1/8");
     }
 
     #[test]

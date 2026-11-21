@@ -228,7 +228,7 @@ impl Time {
     }
 
 
-    /// From stored values: `sync_mode` is an enum, stored plain (0 Free, 1 Sync).
+    /// From stored values: `sync_mode` is an enum, stored plain (0 Free; 1, 2, 3 the notes).
     pub(crate) fn of(values: &BTreeMap<String, f32>) -> Time {
         let v = values.get("sync_mode").or_else(|| stored_defaults().get("sync_mode")).copied().unwrap_or(0.0);
         if v >= 0.5 { Time::Sync } else { Time::Free }

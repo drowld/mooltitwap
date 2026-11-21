@@ -33,6 +33,7 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
   23. [x] Two palettes (owner via hub and softsystems-ui, nice-plug 4846330): `presets: &AFTERECHO_ALL` (Afterecho, Darkroom); the ☰ Palette row is a dropdown. 115 tests, iOS check, screenshot of the open menu. Committed.
   24. [x] Tap Gain on the shared level knob too (owner 2026-11-21): −60…+12 dB, silent at the bottom, 0 dB at 3 o'clock; the Gain field's axis and dot size on the same scale (was a cube-root taper, −60…+6, 0 dB at 75 %), ticks +12/0/−12/−24/−36/−48; a playing tap at the bottom can still be modulated up. Motion can now lift a tap to +12 dB (was +6). 115 tests, iOS check, clippy as before, screenshot. Committed.
   25. [x] Spacing pass 2 (SOF-86, owner kept all three 2026-11-21): Swing beside Mode (Mode spans two columns; the third row stays for Time R/Sync R when split); the Shape pad fills down to the Spacing list's bottom, "Linked" under both (was a square, the list hung below); the lane's plot 8 px higher so the Cycle pill stays inside the card, 10 px from its left edge. Preview token `split`. 115 tests, iOS check, before/after screenshots. Committed.
+  26. [x] Time units (owner 2026-11-21, "rate faster right", nice-plug 422cc14; owner picked A): `SYNC_DIVS` is straight notes only, 1/32 … 4/1 (was 18 mixed with dotted and triplets, so turning right sometimes got shorter), the feedback cycle on to 8/1 (6 bars gone); `SyncMode` gains Dotted (×1.5) and Triplet (×⅔); Time and Time R pick their unit from the crate's menu on the name (Milliseconds, Notes, Dotted, Triplets), replacing the Free/Sync segments; the cycle uses Time's unit. Time card: Time, L/R, Swing; Mode the full row; Time R alone when split. Factory set v3 (two dotted presets re-encoded). Saved Sync times move (no users). Preview tokens `sync`, `dotted`. Default Time 220 ms (owner; was 6.69 ms; reads 1/1 in Notes). 116 tests (one new), iOS check, clippy as before, screenshots. Committed.
   - Optional: the tape's 2× oversampler on the crate's half-band.
   Release gate: cleared by the owner 2026-11-21 (SPACES tables, TUBE and TRANSFO constants).
 - [ ] **Factory presets: tune by ear** — the 18 approved presets (v2.41.0, `factory.rs`) are written and tested against their descriptions; none heard yet. Linear SOF-147.
@@ -48,7 +49,6 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
 - Later (after release): 32 taps. Linear SOF-93 (Backlog).
 
 ## Open questions (owner)
-- Merge `ui/softsystems-ui` into main and push: owner said yes 2026-11-21; waiting on an explicit go for the push.
 - Beta end date (`BETA_ENDS`, placeholder 2026-12-31), the licence field, CFBundleVersion.
 
 ## Blocked

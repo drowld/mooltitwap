@@ -13,7 +13,7 @@ use softsystems_mod::{Modulator, Rate, Shape, Trigger};
 
 /// Raised whenever the factory set changes (kept in library.json as
 /// `factory_version`).
-pub const FACTORY_VERSION: u32 = 2;
+pub const FACTORY_VERSION: u32 = 3; // 3: straight notes plus a unit (2026-11-21)
 
 /// One factory preset: `changes` are (param id, plain value) from Init.
 struct Recipe {
@@ -24,12 +24,11 @@ struct Recipe {
 }
 
 // Plain values the recipes use, worked out once (see each formula).
-// Sync time: `base_time_l` = the division's index in SYNC_DIVS / 17.
-const T_1_16: f32 = 2.0 / 17.0;
-const T_1_8: f32 = 5.0 / 17.0;
-const T_1_8D: f32 = 6.0 / 17.0;
-const T_1_4: f32 = 8.0 / 17.0;
-const T_1_4D: f32 = 9.0 / 17.0;
+// Sync time: `base_time_l` = the division's index in SYNC_DIVS / 7 (straight notes; a dotted
+// one is the straight one with `sync_mode` DOTTED).
+const T_1_16: f32 = 1.0 / 7.0;
+const T_1_8: f32 = 2.0 / 7.0;
+const T_1_4: f32 = 3.0 / 7.0;
 // Free time: `base_time_l` = ln(ms) / ln(2000).
 const T_11MS: f32 = 0.3155;
 const T_80MS: f32 = 0.5765;
@@ -47,6 +46,7 @@ const HP_300: f32 = 0.6923;
 const HP_600: f32 = 0.8694;
 // Enum indices.
 const SYNC: f32 = 1.0;
+const DOTTED: f32 = 2.0;
 const PING: f32 = 1.0;
 const DIFFUSE: f32 = 2.0;
 const EXP: f32 = 1.0;
@@ -83,7 +83,7 @@ const RECIPES: &[Recipe] = &[
         tags: &["rhythmic", "wide"],
         notes: "The dotted-eighth bounce, side to side.",
         changes: &[
-            ("num_taps_active", 2.0), ("sync_mode", SYNC), ("base_time_l", T_1_8D), ("feedback", 0.50),
+            ("num_taps_active", 2.0), ("sync_mode", DOTTED), ("base_time_l", T_1_8), ("feedback", 0.50),
             ("crossfeed_mode", PING), ("crossfeed", 1.0), ("dry_wet", 0.35),
         ],
     },
@@ -92,7 +92,7 @@ const RECIPES: &[Recipe] = &[
         tags: &["dub", "tape"],
         notes: "Snare throws. Ride Tone for the dark tail.",
         changes: &[
-            ("num_taps_active", 3.0), ("sync_mode", SYNC), ("base_time_l", T_1_4D), ("feedback", 0.78),
+            ("num_taps_active", 3.0), ("sync_mode", DOTTED), ("base_time_l", T_1_4), ("feedback", 0.78),
             ("loop_tone", LP_3K), ("degrade_amount", 0.40), ("degrade_routing", ON_FB),
         ],
     },

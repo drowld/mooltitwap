@@ -133,7 +133,7 @@ pub struct VizData {
 // range adapts down to 1 beat / 250 ms so the content always fills.
 fn pick_nice_range(needed_secs: f32, sync_mode: SyncMode, tempo_bpm: f32) -> f32 {
     match sync_mode {
-        SyncMode::Sync => {
+        SyncMode::Sync | SyncMode::Dotted | SyncMode::Triplet => {
             let beat_secs = 60.0 / tempo_bpm;
             let needed_beats = (needed_secs / beat_secs).max(1.0);
             let nice: &[f32] = &[
