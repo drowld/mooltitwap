@@ -1093,13 +1093,16 @@ impl Plugin for Afterecho {
             self.rep_w = rep_target;
         }
 
+        // the shared level knob (`level`, above): a tap at its bottom is silent, not −60 dB
         let mut tap_gain = [0.0f32; NUM_TAPS];
+        let mut tap_playing = [false; NUM_TAPS];
         let mut tap_pan_l = [1.0f32; NUM_TAPS];
         let mut tap_pan_r = [1.0f32; NUM_TAPS];
         for i in 0..NUM_TAPS {
             let active = p.taps[i].active.value() && i < n_active;
+            tap_playing[i] = active;
             tap_gain[i] = if active {
-                nice_plug::util::db_to_gain(p.taps[i].gain_db.value())
+                level::gain(level::norm(p.taps[i].gain_db.value()))
             } else { 0.0 };
             (tap_pan_l[i], tap_pan_r[i]) = bounce::pan_gains(p.taps[i].pan.value());
             // A tap that isn't playing waits where it's going: one that starts
@@ -1328,8 +1331,9 @@ impl Plugin for Afterecho {
                         if routed_to[T_PAN] {
                             (tap_pan_l[i], tap_pan_r[i]) = bounce::pan_gains(tp[i].pan.preview_plain(m.apply_tap(T_PAN, i, n_pan[i])));
                         }
-                        if routed_to[T_GAIN] && tap_gain[i] > 0.0 {
-                            tap_gain[i] = nice_plug::util::db_to_gain(tp[i].gain_db.preview_plain(m.apply_tap(T_GAIN, i, n_db[i])));
+                        // a playing tap at the bottom can still be modulated up
+                        if routed_to[T_GAIN] && tap_playing[i] {
+                            tap_gain[i] = level::gain(level::norm(tp[i].gain_db.preview_plain(m.apply_tap(T_GAIN, i, n_db[i]))));
                         }
                         if routed_to[T_CUTOFF] {
                             tap_cut[i] = tp[i].filter_cutoff.preview_plain(m.apply_tap(T_CUTOFF, i, n_cut[i]));
@@ -3525,7 +3529,7 @@ mod tests {
     fn motion_on_gain_stays_within_the_knob() {
         // the same tone with and without Gain motion (the crate's rule: a share
         // of the knob's travel, clamped at its ends): from 0 dB it rises at most
-        // to the knob's +6 dB, and dips far more than that
+        // to the level knob's +12 dB (×3.98), and dips far more than that
         let run = |depth: f32| {
             let mut plug = plugin(&[0.0, 0.0, 0.0]);
             slot(&plug, 0, Rate::hz(3.0), |_| {});
@@ -3536,7 +3540,7 @@ mod tests {
         };
         let (still, moving) = (run(0.0), run(0.5));
         let peak = |o: &[(f32, f32)], a: f32, b: f32| o[(a * SR) as usize..(b * SR) as usize].iter().fold(0.0f32, |m, s| m.max(s.0.abs()));
-        assert!(peak(&moving, 0.5, 4.5) <= peak(&still, 0.5, 4.5) * 2.0 * 1.01);
+        assert!(peak(&moving, 0.5, 4.5) <= peak(&still, 0.5, 4.5) * 3.99 * 1.01);
         let quietest = (0..80).map(|k| rms(&moving, 0.5 + k as f32 * 0.05, 0.55 + k as f32 * 0.05)).fold(1.0f32, f32::min);
         assert!(quietest < 0.3 * rms(&still, 0.5, 4.5), "{quietest} against {}", rms(&still, 0.5, 4.5));
     }

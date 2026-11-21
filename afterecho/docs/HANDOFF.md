@@ -14,7 +14,16 @@ by Rainbow Circuit's *Petal* and Cluster Delay. Rust.
 
 ---
 
-## ⭐ CURRENT STATE — v2.49.0 · 2026-11-06 · branch `ui/softsystems-ui`
+## ⭐ CURRENT STATE — 2026-11-21 · branch `ui/softsystems-ui` (nice-plug main 4846330+)
+
+Last commits: 3d01799 (In/Out on the shared level knob), 3bfa640 (palettes Afterecho + Darkroom).
+Committed after: the tap Gain on the level knob (item 24) and spacing pass 2 (item 25). 115 tests, iOS check.
+Owner 2026-11-21: keep Saturate; release gate cleared; merge yes (push waits on an explicit go).
+**Next:** beta date, licence
+field, CFBundleVersion from the owner; re-check the Matrix audit (SOF-244) against today's code.
+Nothing heard by the owner since the knob stops; nothing installed since.
+
+## (before) v2.49.0 · 2026-11-06 · branch `ui/softsystems-ui`
 
 **v2.49.0 (uncommitted, not installed):** Afterecho moved onto the shared Soft Systems UI
 (SOF-224; DECISIONS has the details): shared theme, ☰ Options panel, 16/12 frame,

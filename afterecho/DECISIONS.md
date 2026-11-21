@@ -2,6 +2,16 @@
 
 _Newest first. Each entry: date · what we decided · why · alternative rejected._
 
+## 2026-11-21 · Every level knob on the shared one; Saturate stays; release gate cleared
+- **In, Out and each tap's Gain use `knob::level`** (owner; nice-plug DECISIONS 2026-11-20:
+  knobs from silence to a little boost are level knobs). −60…+12 dB straight in dB, 0 dB at
+  3 o'clock, silent at the bottom. In/Out were −24…+12 with 0 dB at the top; tap Gain was
+  −60…+6. The Gain field and its dot sizes follow the same scale (was a cube-root taper), so a
+  dot and its knob agree. Motion can lift a tap to +12 dB now. Rejected: keeping the tap Gain
+  apart (owner first picked In/Out only, then all three). Saved values in dB keep their meaning.
+- **Saturate stays** (owner); its Curve is still to pick by ear.
+- **Release gate cleared** (owner): the SPACES tables and the TUBE and TRANSFO constants.
+
 ## 2026-11-16 · Slope in 6 dB steps; Resonance on one stage
 - **Slope is 6 to 48 dB/oct in 6 dB steps** (owner): exact, from SVFs and a one-pole. Rejected:
   a continuous Slope. Blending two orders keeps the lower slope; the tilt version works but is an

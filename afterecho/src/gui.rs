@@ -59,15 +59,16 @@ pub(crate) fn ab_switch(st: &mut EditorState, params: &Arc<AfterechoParams>, set
     st.ab_active = target;
 }
 
-// ─── Audio-taper gain mapping (cube-root: 75% pos = 0 dB) ────────────────
-const GAIN_SKEW: f32 = 0.333;
+// ─── A tap's Gain on the field and its dot size: the level knob's own scale ──
+// (−60…+12 dB straight in dB, 0 dB at 5/6; owner 2026-11-21, was a cube-root
+// taper over −60…+6 with 0 dB at 75 %)
 #[inline]
 pub(crate) fn gain_db_to_pos(db: f32) -> f32 {
-    ((db + 60.0) / 66.0).clamp(0.0, 1.0).powf(1.0 / GAIN_SKEW)
+    softsystems_ui::knob::level::norm(db)
 }
 #[inline]
 pub(crate) fn pos_to_gain_db(pos: f32) -> f32 {
-    -60.0 + pos.clamp(0.0, 1.0).powf(GAIN_SKEW) * 66.0
+    softsystems_ui::knob::level::db(pos)
 }
 
 pub fn create_editor(

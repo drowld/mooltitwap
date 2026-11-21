@@ -282,6 +282,7 @@ pub struct ScopeState {
     swing_demo: bool,
     /// Preview only (`sync`): Time synced.
     sync_demo: bool,
+    split_demo: bool,
     /// Preview only (`over`): Feedback at 104 %, tap 1's Gain at +3 dB (the stops' over-range).
     over_demo: bool,
     /// The preset browser's state (the loaded preset, Try, the sheet's view).
@@ -394,7 +395,7 @@ pub fn frame(
                 OldAccent::import(&mut sc.look);
             }
             // Desktop previews, to check a state without clicking to it:
-            // AFTERECHO_PREVIEW=bars,menu,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
+            // AFTERECHO_PREVIEW=bars,menu,split,time|gain|cutoff|reso|type|slope|detune,sel3,tap|motion,mxdemo,step|step2|follow,presets,light,tape,pattern,
             // saveas|trying|deleting (with AFTERECHO_PRESET_DIR, a folder of presets to show)
             // (the Bars view, the Time view or a Y axis, a selected
             // tap, the Tap or Motion tab and its source, the preset browser, the light page, Colour's Tape
@@ -415,6 +416,7 @@ pub fn frame(
                         "euclid" => sc.euclid_demo = true,
                         "swing" => sc.swing_demo = true,
                         "sync" => sc.sync_demo = true,
+                        "split" => sc.split_demo = true,
                         "over" => sc.over_demo = true,
                         "tap" => sc.lane_tab = 2,
                         "motion" => sc.lane_tab = 1,
@@ -652,9 +654,12 @@ fn dial_arc(c: Pos2, rad: f32, v0: f32, v1: f32) -> Vec<Pos2> {
         .collect()
 }
 
-/// The knobs drawn as the shared level knob ([`softsystems_ui::knob::level`]); their params
-/// run −60…+12 dB straight in dB (`params::GAIN_RANGE`).
-const LEVEL_IDS: [&str; 2] = ["input_gain", "output_gain"];
+/// The knobs drawn as the shared level knob ([`softsystems_ui::knob::level`]): In, Out and
+/// each tap's Gain ("gain_db_3"); their params run −60…+12 dB straight in dB
+/// (`params::GAIN_RANGE`).
+fn is_level(id: &str) -> bool {
+    matches!(id, "input_gain" | "output_gain") || id.starts_with("gain_db")
+}
 
 /// A knob cell: the crate's knob (`softsystems_ui::knob`: name, dial, value;
 /// the arc in the accent). `id` is the param's id — the focus card follows it.
@@ -705,7 +710,7 @@ fn knob_cell_m<P: Param>(
         k = k.over(at);
     }
     // In and Out are the shared level knob: the mark and the arc's start at 0 dB, 3 o'clock
-    if LEVEL_IDS.contains(&id) {
+    if is_level(id) {
         k = k.level();
     }
     let mut v = n;
@@ -1112,7 +1117,7 @@ impl Axis {
         match self {
             Axis::Pan if lb.ch == ChannelMode::MidSide => at(&[(-1.0, "Mid"), (0.0, "M·S"), (1.0, "Side")]),
             Axis::Pan => at(&[(-1.0, "L"), (0.0, "C"), (1.0, "R")]),
-            Axis::Gain => at(&[(6.0, "+6"), (0.0, "0 dB"), (-12.0, "−12"), (-24.0, "−24"), (-48.0, "−48")]),
+            Axis::Gain => at(&[(12.0, "+12"), (0.0, "0 dB"), (-12.0, "−12"), (-24.0, "−24"), (-36.0, "−36"), (-48.0, "−48")]),
             Axis::Cutoff => at(&[(20000.0, "20k"), (5000.0, "5k"), (1000.0, "1k"), (200.0, "200"), (50.0, "50")]),
             Axis::Reso => at(&[(12.0, "Q 12"), (4.0, "4"), (1.2, "1.2"), (0.4, "0.4"), (0.1, "0.1")]),
             Axis::Type => at(&[(2.0, "HP"), (1.0, "BP"), (0.0, "LP")]),
@@ -1479,6 +1484,9 @@ fn picture(
     }
     if std::mem::take(&mut sc.sync_demo) {
         set_norm(setter, &params.sync_mode, 1.0);
+    }
+    if std::mem::take(&mut sc.split_demo) {
+        set_norm(setter, &params.time_linked, 0.0);
     }
     if std::mem::take(&mut sc.swing_demo) {
         setter.begin_set_parameter(&params.swing);
@@ -2059,7 +2067,7 @@ fn tap_panel(
     let time = secs_text(viz.times_l_grid[i] * viz.grid_range_secs_taps_only);
     knob_cell(ui, c(0, 0), s, setter, &tap.time_offset, &id("time_offset"), "Time", true, true, Some(time), focus);
     knob_cell_m(ui, c(0, 1), s, setter, &tap.pan, &id("pan"), "Pan", true, ch != ChannelMode::Mono, Some(pan_text(tap.pan.value(), ch)), focus, Some((&params.motion, crate::modulation::T_PAN, Some(i))), None);
-    knob_cell_m(ui, c(0, 2), s, setter, &tap.gain_db, &id("gain_db"), "Gain", false, true, Some(db_text(tap.gain_db.value())), focus, Some((&params.motion, crate::modulation::T_GAIN, Some(i))), Some(tap.gain_db.preview_normalized(0.0)));
+    knob_cell_m(ui, c(0, 2), s, setter, &tap.gain_db, &id("gain_db"), "Gain", false, true, None, focus, Some((&params.motion, crate::modulation::T_GAIN, Some(i))), Some(tap.gain_db.preview_normalized(0.0)));
     let det = detune_text(tap.detune.value(), params.detune_range.value() as f32);
     knob_cell(ui, c(0, 3), s, setter, &tap.detune, &id("tap_detune"), "Detune", true, true, Some(det), focus);
     // the range is every tap's (v2.46)
@@ -2121,7 +2129,8 @@ fn echo(
     focus: &mut Option<String>, viz: &VizData, tempo: f32,
 ) {
     let p = ui.painter().clone();
-    let plot = Rect::from_min_max(area.min + Vec2::new(18.0, 36.0) * s, area.max - Vec2::new(20.0, 22.0) * s);
+    // 30 px under the plot (was 22): the Cycle pill on the time axis stays inside the card
+    let plot = Rect::from_min_max(area.min + Vec2::new(18.0, 36.0) * s, area.max - Vec2::new(20.0, 30.0) * s);
     let ch = params.channel_mode.value();
     let ping = params.crossfeed_mode.value() == CrossfeedMode::PingPong && ch != ChannelMode::Mono;
     let width = bounce::width(ch, params.crossfeed.value());
@@ -2307,7 +2316,7 @@ fn echo(
     p.line_segment([Pos2::new(gx, area.top() + 4.0 * s), Pos2::new(gx, plot.bottom())], Stroke::new(1.4 * s, INK()));
     if viz.frozen {
         let ctxt = format!("Held · {}", secs_text(cyc));
-        pill_in(&p, Pos2::new(gx, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &ctxt, s, INK(), PAPER(), area);
+        pill_in(&p, Pos2::new(gx, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &ctxt, s, INK(), PAPER(), area.shrink2(Vec2::new(10.0 * s, 0.0)));
         return;
     }
     p.rect_filled(Rect::from_center_size(Pos2::new(gx, mid), Vec2::new(6.0, 18.0) * s), 3.0 * s, INK());
@@ -2322,7 +2331,7 @@ fn echo(
         String::new()
     };
     let ctxt = format!("↔ Cycle {div}{}{}", secs_text(cyc), if auto { " · auto" } else { "" });
-    pill_in(&p, Pos2::new(gx, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &ctxt, s, INK(), PAPER(), area);
+    pill_in(&p, Pos2::new(gx, plot.bottom() + 12.0 * s), Align2::CENTER_CENTER, &ctxt, s, INK(), PAPER(), area.shrink2(Vec2::new(10.0 * s, 0.0)));
     text(&p, h + Vec2::new(11.0, 0.0) * s, Align2::LEFT_CENTER, "↕", 12.0, s, INK2());
 }
 
@@ -2357,18 +2366,18 @@ fn time_card(
     knob_cell(ui, t(0, 0, 1), s, setter, &params.base_time_l, "base_time_l", "Time", false, true, Some(params.format_base_time(nl, tempo)), focus);
     enum_cell(ui, t(0, 1, 1), s, setter, &params.sync_mode, "sync_mode", "Sync", &["Free", "Sync"], true, focus);
     toggle_cell(ui, t(0, 2, 1), s, setter, &params.time_linked, "time_linked", "L/R", "Linked", "Split", focus);
-    enum_cell(ui, t(1, 0, 3), s, setter, &params.delay_mode, "delay_mode", "Mode", &["Repitch", "Fade", "Jump"], true, focus);
+    enum_cell(ui, t(1, 0, 2), s, setter, &params.delay_mode, "delay_mode", "Mode", &["Repitch", "Fade", "Jump"], true, focus);
     if !linked {
         let nr = params.base_time_r.unmodulated_normalized_value();
         let r_txt = AfterechoParams::format_base_time_mode(params.sync_mode_r_eff(), nr, tempo);
         knob_cell(ui, t(2, 0, 1), s, setter, &params.base_time_r, "base_time_r", "Time R", false, true, Some(r_txt), focus);
         enum_cell(ui, t(2, 1, 1), s, setter, &params.sync_mode_r, "sync_r", "Sync R", &["Free", "Sync"], true, focus);
     }
-    // Swing, in the slot under L/R that nothing else uses (so nothing moves).
-    // Lin and Euclid have a grid to swing; Exp and Log don't.
+    // Swing beside Mode, under L/R (spacing pass 2, 2026-11-21: was alone on
+    // the third row). Lin and Euclid have a grid to swing; Exp and Log don't.
     let euclid = params.spacing_mode.value() == SpacingMode::Euclidean;
     let grid = euclid || params.spacing_mode.value() == SpacingMode::Linear;
-    knob_cell(ui, t(2, 2, 1), s, setter, &params.swing, "swing", "Swing", false, grid, None, focus);
+    knob_cell(ui, t(1, 2, 1), s, setter, &params.swing, "swing", "Swing", false, grid, None, focus);
 
     // Pattern: the tap count over the list of spacings, the Shape pad beside
     // (Euclid's ring in Euclid, where the pad has nothing to shape); both
@@ -2378,14 +2387,15 @@ fn time_card(
     knob_cell(ui, taps, s, setter, &params.num_taps_active, "num_taps_active", "Taps", false, true, None, focus);
     let sp_top = taps.bottom() + 10.0 * s;
     text(&p, Pos2::new(taps.center().x, sp_top + g::LBL_H * 0.5 * s), Align2::CENTER_CENTER, "Spacing", 11.0, s, INK2());
-    let list = Rect::from_min_max(Pos2::new(taps.left() + 8.0 * s, sp_top + (g::LBL_H + 4.0) * s), Pos2::new(taps.right(), inner.bottom()));
+    let pad = Rect::from_min_max(Pos2::new(c(0, 4, 1).left(), row0.top()), Pos2::new(c(0, 5, 1).right(), inner.bottom()));
+    // the list and the Shape pad end on one line (spacing pass 2)
+    let list = Rect::from_min_max(Pos2::new(taps.left() + 8.0 * s, sp_top + (g::LBL_H + 4.0) * s), Pos2::new(taps.right(), shape_pad_rect(pad, s).bottom()));
     let cur = enum_index(&params.spacing_mode, 4);
     let picked = controls::seg_v(ui, list, &["Lin", "Exp", "Log", "Euclid"], cur, ui.id().with(("seg", "spacing_mode")), &[]);
     if let Some(i) = picked.filter(|&i| i != cur) {
         set_norm(setter, &params.spacing_mode, i as f32 / 3.0);
         *focus = Some("spacing_mode".into());
     }
-    let pad = Rect::from_min_max(Pos2::new(c(0, 4, 1).left(), row0.top()), Pos2::new(c(0, 5, 1).right(), inner.bottom()));
     if euclid {
         euclid_ring(ui, pad, s, params, setter, focus);
     } else {
@@ -2484,13 +2494,21 @@ fn euclid_ring(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoPara
     }
 }
 
+/// The Shape pad in its `area`: the full width under the "Shape" label, down to the room
+/// "Linked" needs below (spacing pass 2: was a square, which left the list hanging below it).
+fn shape_pad_rect(area: Rect, s: f32) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(area.left(), area.top() + (g::LBL_H + 2.0) * s),
+        Pos2::new(area.right(), area.bottom() - (g::LBL_H + 2.0) * s),
+    )
+}
+
 /// The Shape pad: X bends where the taps bunch up, Y how hard (shape_x −1…1,
 /// shape_y 0…1 with 1 at the top, as in v3). Ticks show the real tap positions.
 fn shape_pad(ui: &mut egui::Ui, area: Rect, s: f32, params: &Arc<AfterechoParams>, setter: &ParamSetter, focus: &mut Option<String>) {
     let p = ui.painter().clone();
     text(&p, Pos2::new(area.center().x, area.top() + g::LBL_H * 0.5 * s), Align2::CENTER_CENTER, "Shape", 11.0, s, INK2());
-    let side = (area.height() - 2.0 * (g::LBL_H + 2.0) * s).min(area.width());
-    let pad = Rect::from_center_size(Pos2::new(area.center().x, area.top() + (g::LBL_H + 2.0) * s + side * 0.5), Vec2::splat(side));
+    let pad = shape_pad_rect(area, s);
     p.rect_filled(pad, g::R_CTL * s, INSET());
 
     // The dot and the drag both map to the same inset rect, so the dot stays

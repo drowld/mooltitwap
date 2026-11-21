@@ -1,5 +1,5 @@
 # TASKS — Afterecho
-_State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDESIGN_PLAN.md. Branch `ui/scope-first`, local commits only (push on major milestones, owner's call)._
+_State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDESIGN_PLAN.md. Branch `ui/softsystems-ui`, local commits only (merge and push: owner's word)._
 
 ## In Progress
 - [ ] **Owner hand test (v2.34–v2.47)** on desktop, all at once: Phase 4 (Loop tone, Freeze, Ducking, Pattern tools, Euclid + Swing, Motion), Ping (v2.32), the new look (v2.33), the preset browser (v2.40), v2.42 (Repeats, the Motion matrix, Hanken Grotesk) and v2.43 (Time view, Grid, two Steps with Glide, ear safety), v2.44 (fractional delay reads: Repitch glides, cycles a sample tighter), v2.45 (per-tap detune, Light/Clean), v2.46 (Detune Range, In/Out at 0 dB, full-page presets), v2.47 (Diffuse rebuilt; Cross → Diffuse with it), v2.48 (presets on the shared store: browse, Try/Back, Save as… once). v2.47.0 installed 2026-11-01. Step clicks: owner confirmed fixed (2026-11-01). Unit/A-B tested + screenshots; nothing heard or clicked by hand yet. Linear SOF-57.
@@ -29,31 +29,34 @@ _State lives in docs/HANDOFF.md, the why in DECISIONS.md, the plan in docs/REDES
   19. [x] One pending Matrix row (owner via hub, nice-plug 9d7f979): a modulatable knob touched with nothing armed becomes the grid's one pending row (`assign.seen` on `KnobOut::touched`, nice-plug 040a2de: a knob at its end too); the next touch replaces it. "+ Target" off (`add_menu: false`, 2026-11-18): every target has a knob and the crate's menu leaves slot settings out, so on it only showed greyed; `GridOut::add` stays handled. 115 tests, iOS check. Not seen on screen (needs a touch). Committed.
   20. [x] Routes on the picture's card, box on box (owner 2026-11-18): the lane stays live under it, so a slot armed there routes by touching its knobs with the grid in view. Its title, Depth/Time/Numbers and the crate's × (was "Close") share one line, so all ten rows show. The ten main rows stay (owner: "keep this"). Screenshot checked. Committed.
   21. [x] Range and Slope: the number in the stepper, the unit below ("st · all taps", "dB/oct"), as Repeats (owner 2026-11-19: A). nice-plug 4adbc54 cuts stepper labels with "…" instead of shrinking them, and the 67 px cells left "1…" and "…". 115 tests, iOS check, screenshot. Committed.
-  22. [ ] In and Out on the shared level knob (owner via hub, nice-plug 627ebb7; owner 2026-11-20 picked In and Out, not the tap Gain; rule in nice-plug DECISIONS 8f8d7ee): −60…+12 dB straight in dB, 0 dB at 3 o'clock, silent at the bottom ("−∞ dB"); typed "-inf"/"+6 dB" parse. Was −24…+12 with 0 dB at the top. 115 tests, iOS check, screenshot. Committed.
-  23. [ ] Two palettes (owner via hub and softsystems-ui, nice-plug 4846330): `presets: &AFTERECHO_ALL` (Afterecho, Darkroom); the ☰ Palette row is a dropdown. 115 tests, iOS check, screenshot of the open menu. Committed.
+  22. [x] In and Out on the shared level knob (owner via hub, nice-plug 627ebb7; owner 2026-11-20 picked In and Out, not the tap Gain; rule in nice-plug DECISIONS 8f8d7ee): −60…+12 dB straight in dB, 0 dB at 3 o'clock, silent at the bottom ("−∞ dB"); typed "-inf"/"+6 dB" parse. Was −24…+12 with 0 dB at the top. 115 tests, iOS check, screenshot. Committed.
+  23. [x] Two palettes (owner via hub and softsystems-ui, nice-plug 4846330): `presets: &AFTERECHO_ALL` (Afterecho, Darkroom); the ☰ Palette row is a dropdown. 115 tests, iOS check, screenshot of the open menu. Committed.
+  24. [x] Tap Gain on the shared level knob too (owner 2026-11-21): −60…+12 dB, silent at the bottom, 0 dB at 3 o'clock; the Gain field's axis and dot size on the same scale (was a cube-root taper, −60…+6, 0 dB at 75 %), ticks +12/0/−12/−24/−36/−48; a playing tap at the bottom can still be modulated up. Motion can now lift a tap to +12 dB (was +6). 115 tests, iOS check, clippy as before, screenshot. Committed.
+  25. [x] Spacing pass 2 (SOF-86, owner kept all three 2026-11-21): Swing beside Mode (Mode spans two columns; the third row stays for Time R/Sync R when split); the Shape pad fills down to the Spacing list's bottom, "Linked" under both (was a square, the list hung below); the lane's plot 8 px higher so the Cycle pill stays inside the card, 10 px from its left edge. Preview token `split`. 115 tests, iOS check, before/after screenshots. Committed.
   - Optional: the tape's 2× oversampler on the crate's half-band.
-  Release gate: SPACES tables, TUBE and TRANSFO constants need the owner's clearance before a public build.
+  Release gate: cleared by the owner 2026-11-21 (SPACES tables, TUBE and TRANSFO constants).
 - [ ] **Factory presets: tune by ear** — the 18 approved presets (v2.41.0, `factory.rs`) are written and tested against their descriptions; none heard yet. Linear SOF-147.
 
 ## Next
 1. [ ] Fold in the hand-test feedback. Linear SOF-84. First notes (2026-11-01) in v2.46/v2.47: preset sheet over the whole page, In/Out with 0 dB at the top, accent ring no longer cropped, Detune Range 1–12 st (and short detuned taps fixed), Diffuse rebuilt. Same ring crop in Morpheus, merge, cumulus, phasma, y-flanger (their own repos).
 2. [ ] iPad: install v2.47.0 (still on v2.34.0; needs the iPad unlocked), hand-test touch, measure CPU with Motion's Cutoff/Reso moving and with detune (Light and Clean, 16 taps). Linear SOF-85.
-3. [ ] Second spacing pass (owner: "spacing still not perfect"). Linear SOF-86.
-4. [ ] Restyle the Settings menu to the new look (still old epo chips). **On hold:** the ☰ panel will come from softsystems-ui (below). Linear SOF-87.
-5. [ ] Matrix audit (crates hub, 2026-11-05, read from code, nothing run; 7 bugs, none high): cell drag sticks on slow drags (no accumulator, `gui_scope.rs:2211`); no clear on iPad cells; negative Gain depth / Polarity < 0 silent on Gain with no hint; the Motion tick grid restarts every block, so Step Glide runs fast with block sizes not a multiple of 32 (`lib.rs:1048`); Amount/Polarity unsmoothed; the grid shows raw cells, not the depth heard; a hidden Env LFO shape is dead. Most go with the shared routing (after Vortex); owner (2026-11-05): wait for the shared routing, fix none before. List: the hub's `matrix-audit-bugs-by-plugin.md`. Linear SOF-244.
+3. [x] Second spacing pass: item 25. Linear SOF-86.
+5. [ ] Matrix audit (crates hub, 2026-11-05, read from code, nothing run; 7 bugs, none high): cell drag sticks on slow drags (no accumulator, `gui_scope.rs:2211`); no clear on iPad cells; negative Gain depth / Polarity < 0 silent on Gain with no hint; the Motion tick grid restarts every block, so Step Glide runs fast with block sizes not a multiple of 32 (`lib.rs:1048`); Amount/Polarity unsmoothed; the grid shows raw cells, not the depth heard; a hidden Env LFO shape is dead. Most go with the shared routing (after Vortex); owner (2026-11-05): wait for the shared routing, fix none before. List: the hub's `matrix-audit-bugs-by-plugin.md`. Linear SOF-244. **2026-11-21:** the shared routing landed (pass 8, a40e778: the crate's Engine, Matrix and grid), so the cited lines are gone; to re-check against today's code. One still visible: Motion re-aims on `s % 32` inside each block (`lib.rs` ~1289), so the grid restarts per block; the engine itself runs per sample (reasoned, not tested).
 5. [ ] Touch layer on the scope page: multitouch for drag surfaces (dots, pads, ring, range pins) — REDESIGN_PLAN Phase 3 / D1. Linear SOF-88.
 7. [ ] Phase 5: hosts (AUM, Drambo, Logic iPad, Cubasis; Ableton, Reaper, Bitwig, FL; pluginval), release list (bundle IDs, App Group, 60 fps cap), licences (RE-DEEMER notice, GPL vs Soft Systems plan). Linear SOF-90.
 8. [ ] Verify Fade mode thoroughly with feedback interaction. Linear SOF-91.
 - Later (after release): 32 taps. Linear SOF-93 (Backlog).
 
 ## Open questions (owner)
-- Keep SATURATE?
-- Merge / push `ui/scope-first` (owner's call).
+- Merge `ui/softsystems-ui` into main and push: owner said yes 2026-11-21; waiting on an explicit go for the push.
+- Beta end date (`BETA_ENDS`, placeholder 2026-12-31), the licence field, CFBundleVersion.
 
 ## Blocked
 - iPad installs: devicectl refuses while the iPad is locked or "not unlocked recently" — unlock first.
 
 ## Done (recent)
+- [x] Settings menu restyle (SOF-87): done by the crate's ☰ Options panel (v2.49).
+- [x] Keep Saturate (owner 2026-11-21); its Curve still to pick by ear.
 - [x] v2.52.0 Crate pass 2: the crate's cards; LFO shapes as icons and names. 100 tests, iOS check, screenshots.
 - [x] v2.51.0 One page shape: Tall removed (owner: Afterecho always runs in a host panel). 100 tests, iOS check, screenshots. Commit 8c1ab85.
 - [x] v2.50.0 Old editors and every compatibility path removed (crate adoption pass 1); 101 tests, iOS check, screenshots. Commit 7014573. (SOF-89)

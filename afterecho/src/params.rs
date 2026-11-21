@@ -587,11 +587,11 @@ impl Default for TapParams {
             gain_db: FloatParam::new(
                 "Gain",
                 0.0,
-                FloatRange::Linear { min: -60.0, max: 6.0 },
+                GAIN_RANGE, // the shared level knob, as In and Out (owner 2026-11-21)
             )
-            .with_unit(" dB")
             .with_step_size(0.1)
-            .with_value_to_string(Arc::new(|v| format!("{:.1}", v)))
+            .with_value_to_string(level_v2s())
+            .with_string_to_value(level_s2v())
             .with_smoother(SmoothingStyle::Linear(10.0)),
             // Displayed/edited as -100..+100 in steps of 1 (stored -1..1).
             pan: FloatParam::new("Pan", 0.0, FloatRange::Linear { min: -1.0, max: 1.0 })
