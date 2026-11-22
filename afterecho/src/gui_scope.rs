@@ -898,7 +898,7 @@ fn header(
     }
     let badge = st.scope.beta.badge(ui, h.badge_at(), beta, ui.id().with("sc_beta"));
     let after = h.title.right().max(badge.right());
-    let sl = header::slots(&h, after, &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W });
+    let sl = header::slots(&h, after, &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W, preset_after: &[] });
 
     // channel modes
     let cm = enum_index(&params.channel_mode, 3);
@@ -2990,7 +2990,7 @@ mod tests {
                 theme: false,
                 window,
             };
-            let sl = header::slots(&h, title.right(), &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W });
+            let sl = header::slots(&h, title.right(), &header::Want { left: HEAD_TABS, right: &HEAD_RIGHT, preset: header::PRESET_W, preset_after: &[] });
             assert!(sl.fits, "{sl:?}");
         }
     }

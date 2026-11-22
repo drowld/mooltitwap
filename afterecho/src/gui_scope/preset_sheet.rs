@@ -200,7 +200,7 @@ pub(super) fn preset_box(ui: &mut egui::Ui, pb: Rect, params: &Arc<AfterechoPara
     let pu = &mut st.scope.presets;
     pu.sync_session(params, ui.ctx().cumulative_frame_nr());
     let header = pu.session.header(pu.edited);
-    let out = shared::preset_box(ui, pb, &header, st.preset_open, ui.id().with("sc_preset"));
+    let out = shared::preset_box(ui, pb, &header, st.preset_open, None, ui.id().with("sc_preset"));
     if out.step != 0 {
         pu.step(params, setter, out.step);
     }
