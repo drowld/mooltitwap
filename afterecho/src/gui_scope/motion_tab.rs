@@ -99,6 +99,7 @@ pub(super) fn motion_panel(
             armed: armed_port == Some(Port::slot(i as u16)),
             armed_output: None,
             open: mu.sel == i,
+            lock: softsystems_mod::Lock::NONE,
         })
         .collect();
     let outs = tiles::tiles(ui, r(o, s, x + 14.0, y + 50.0, 196.0, 184.0), 2, 3, &items, None, ui.id().with("mo_tiles"));
